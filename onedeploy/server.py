@@ -480,3 +480,309 @@ class App:
                 self.save(job_id)
             self.event(job_id, 'retired', 'Cloud Run 서비스와 해당 Artifact Registry 이미지의 삭제를 확인했습니다.')
 
+    def reconcile_aws_update(self, job_id):
+        with self.lock:
+            failed = self.jobs.get(job_id)
+            previous = self.jobs.get(failed.get('replaces_job_id')) if failed else None
+            if (not failed or failed.get('status') not in {'failed', 'interrupted'} or not failed.get('aws_update_submitted')
+                    or failed.get('target') != 'aws-ecs-express' or not previous
+                    or previous.get('deployment_state') != 'needs_attention'
+                    or previous.get('status') != 'succeeded'):
+                raise ValueError('재확인할 AWS 업데이트가 아닙니다.')
+            failed_snapshot = json.loads(json.dumps(failed))
+            previous_snapshot = json.loads(json.dumps(previous))
+        prior_result = previous_snapshot['result']
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(**previous_snapshot['aws']))
+        deployments = json.loads(adapter.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
+                                              '--service', prior_result['service']], private=True, quiet=True))
+        items = deployments.get('serviceDeployments', [])
+        latest = max(items, key=lambda item: item.get('createdAt', '')) if items else {}
+        if (not latest.get('serviceDeploymentArn')
+                or latest.get('status') not in {'SUCCESSFUL', 'ROLLBACK_SUCCESSFUL'}):
+            return {'reconciled': False, 'reason': 'AWS 새 배포 또는 롤백이 아직 완료되지 않았습니다.'}
+        no_new_deployment = latest['serviceDeploymentArn'] == failed_snapshot.get('aws_previous_deployment_arn')
+        if no_new_deployment:
+            failed_at = failed_snapshot.get('aws_update_failed_at')
+            try:
+                settled = datetime.fromisoformat(failed_at)
+                if settled.tzinfo is None or datetime.now(timezone.utc) - settled < timedelta(minutes=10):
+                    raise ValueError('AWS 배포 이력 반영을 기다리는 중입니다. 실패 또는 재시작 후 10분 뒤 다시 확인하세요.')
+            except (TypeError, ValueError) as exc:
+                return {'reconciled': False, 'reason': str(exc) if str(exc).startswith('AWS 배포') else
+                        '업데이트 결과를 확인할 시간이 기록되지 않았습니다.'}
+        service_data = json.loads(adapter.aws(['ecs', 'describe-express-gateway-service',
+                                               '--service-arn', prior_result['service_arn'], '--include', 'TAGS'],
+                                              private=True, quiet=True)).get('service', {})
+        tags = {item.get('key'): item.get('value') for item in service_data.get('tags', [])}
+        owner_attempt = prior_result.get('owner_attempt') or prior_result['service'].removeprefix('onedeploy-')
+        if (service_data.get('serviceArn') != prior_result['service_arn']
+                or service_data.get('status', {}).get('statusCode') != 'ACTIVE'
+                or service_data.get('currentDeployment')
+                or tags.get('onedeploy-managed') != 'true'
+                or tags.get('onedeploy-attempt') != owner_attempt):
+            return {'reconciled': False, 'reason': 'ECS 서비스 소유권 또는 완료 상태를 확인할 수 없습니다.'}
+        active_images = {config.get('primaryContainer', {}).get('image')
+                         for config in service_data.get('activeConfigurations', [])}
+        candidate_image = failed_snapshot.get('aws_candidate_image')
+        attempt = failed_snapshot['id'] + '-a' + str(failed_snapshot.get('attempts', 0))
+        expected_image = prior_result['image'].rsplit(':', 1)[0] + ':' + attempt
+        if candidate_image != expected_image:
+            raise ValueError('업데이트 이미지 식별자가 예상과 다릅니다.')
+        if (not no_new_deployment and latest['status'] == 'SUCCESSFUL'
+                and active_images == {candidate_image}):
+            active_configs = service_data.get('activeConfigurations', [])
+            task_arn = active_configs[0].get('taskDefinitionArn') if len(active_configs) == 1 else None
+            task_prefix = (f"arn:aws:ecs:{prior_result['region']}:{prior_result['account']}:task-definition/")
+            if (not isinstance(task_arn, str) or not task_arn.startswith(task_prefix)
+                    or not re.fullmatch(r'[A-Za-z0-9_-]+:\d+', task_arn.removeprefix(task_prefix))):
+                return {'reconciled': False, 'reason': '새 릴리스의 ECS 태스크 정의를 확인할 수 없습니다.'}
+            candidate_result = {**prior_result, 'image': candidate_image,
+                                'images': [*(prior_result.get('images') or [prior_result['image']]), candidate_image],
+                                'task_definition_arn': task_arn,
+                                'previous_task_definition_arn': prior_result.get('task_definition_arn'),
+                                'health_url': prior_result['url'].rstrip('/') + failed_snapshot['plan']['health_path']}
+            candidate = {**failed_snapshot, 'status': 'succeeded', 'result': candidate_result,
+                         'deployment_state': 'active'}
+            health = check_deployment(candidate)
+            if health['healthy']:
+                with self.lock:
+                    if (self.jobs[job_id].get('status') not in {'failed', 'interrupted'}
+                            or self.jobs[previous_snapshot['id']].get('deployment_state') != 'needs_attention'):
+                        raise ValueError('재확인 도중 작업 상태가 변경됐습니다.')
+                    self.jobs[job_id].update(status='succeeded', result=candidate_result,
+                                             deployment_state='active')
+                    self.save(job_id)
+                    self.jobs[previous_snapshot['id']]['deployment_state'] = 'superseded'
+                    self.save(previous_snapshot['id'])
+                self.event(job_id, 'reconciled', 'AWS 새 릴리스의 이미지와 HTTP 200을 확인해 성공으로 복구했습니다.')
+                return {'reconciled': True, 'release': 'new', 'health': health}
+        previous_ready = (active_images == {prior_result['image']}
+                          and (no_new_deployment or latest['status'] in {'SUCCESSFUL', 'ROLLBACK_SUCCESSFUL'}))
+        health = check_deployment(previous_snapshot) if previous_ready else {
+            'healthy': False, 'reason': 'AWS 이전 이미지가 유일한 활성 구성인지 확인할 수 없습니다.'}
+        if health['healthy']:
+            with self.lock:
+                if self.jobs[previous_snapshot['id']].get('deployment_state') != 'needs_attention':
+                    raise ValueError('재확인 도중 작업 상태가 변경됐습니다.')
+                self.jobs[previous_snapshot['id']]['deployment_state'] = 'active'
+                self.save(previous_snapshot['id'])
+                self.jobs[job_id]['aws_reconciled'] = 'previous'
+                self.save(job_id)
+            self.event(job_id, 'reconciled', '이전 릴리스의 이미지와 HTTP 200을 확인했습니다.')
+            return {'reconciled': True, 'release': 'previous', 'health': health}
+        return {'reconciled': False, 'reason': '활성 이미지 또는 HTTP 응답을 확인할 수 없습니다.', 'health': health}
+
+    def cleanup_abandoned_aws_image(self, job_id):
+        with self.lock:
+            failed = self.jobs.get(job_id)
+            previous = self.jobs.get(failed.get('replaces_job_id')) if failed else None
+            if (not failed or failed.get('status') not in {'failed', 'interrupted'}
+                    or failed.get('target') != 'aws-ecs-express' or failed.get('aws_reconciled') != 'previous'
+                    or failed.get('aws_image_cleanup_state') in {'running', 'done'}
+                    or not previous or previous.get('status') != 'succeeded'
+                    or previous.get('deployment_state') != 'active'
+                    or any(other is not failed and other is not previous
+                           and other.get('application_id') == failed.get('application_id')
+                           and other.get('target') == 'aws-ecs-express'
+                           and other.get('status') in {'running', 'waiting_input'} for other in self.jobs.values())):
+                raise ValueError('정리할 수 있는 실패 AWS 이미지가 아닙니다.')
+            failed['aws_image_cleanup_state'] = 'running'
+            self.save(job_id)
+            failed_snapshot = json.loads(json.dumps(failed))
+            previous_snapshot = json.loads(json.dumps(previous))
+        try:
+            health = check_deployment(previous_snapshot)
+            if not health['healthy']:
+                raise ValueError('기존 AWS 릴리스의 실제 실행 상태를 확인할 수 없습니다: ' + health['reason'])
+            adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(**previous_snapshot['aws']))
+            attempt = failed_snapshot['id'] + '-a' + str(failed_snapshot.get('attempts', 0))
+            result = adapter.cleanup_abandoned_image(previous_snapshot['result'],
+                                                      failed_snapshot.get('aws_candidate_image'), attempt)
+        except Exception:
+            with self.lock:
+                self.jobs[job_id]['aws_image_cleanup_state'] = 'failed'
+                self.save(job_id)
+            raise
+        with self.lock:
+            self.jobs[job_id]['aws_image_cleanup_state'] = 'done'
+            self.save(job_id)
+        self.event(job_id, 'cleanup', '이전 릴리스가 실행 중임을 확인하고 실패한 ECR 이미지 태그를 삭제했습니다.')
+        return result
+
+    def request_aws_update_rollback(self, job_id):
+        with self.lock:
+            failed = self.jobs.get(job_id)
+            previous = self.jobs.get(failed.get('replaces_job_id')) if failed else None
+            if (not failed or failed.get('status') not in {'failed', 'interrupted'}
+                    or failed.get('target') != 'aws-ecs-express' or not failed.get('aws_update_submitted')
+                    or failed.get('aws_reconciled') or not previous
+                    or previous.get('status') != 'succeeded'
+                    or previous.get('deployment_state') != 'needs_attention'):
+                raise ValueError('롤백을 요청할 수 있는 AWS 업데이트가 아닙니다.')
+            failed_snapshot = json.loads(json.dumps(failed))
+            previous_snapshot = json.loads(json.dumps(previous))
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(**previous_snapshot['aws']))
+        attempt = failed_snapshot['id'] + '-a' + str(failed_snapshot.get('attempts', 0))
+        result = adapter.request_update_rollback(previous_snapshot['result'],
+                                                 failed_snapshot.get('aws_candidate_image'),
+                                                 failed_snapshot.get('aws_previous_deployment_arn'), attempt)
+        with self.lock:
+            if self.jobs[previous_snapshot['id']].get('deployment_state') != 'needs_attention':
+                raise ValueError('롤백 요청 중 이전 릴리스 상태가 변경됐습니다.')
+            self.jobs[job_id]['aws_rollback_requested'] = True
+            self.jobs[job_id]['aws_rollback_deployment_arn'] = result['service_deployment_arn']
+            self.save(job_id)
+        self.event(job_id, 'rollback_requested', '진행 중인 ECS 배포의 이전 리비전 롤백을 요청했습니다. 완료 후 결과를 재확인하세요.')
+        return result
+
+    def start_release_rollback(self, job_id, target_job_id=None):
+        with self.lock:
+            current = self.jobs.get(job_id)
+            target_job_id = target_job_id or (current.get('replaces_job_id') if current else None)
+            previous = self.jobs.get(target_job_id)
+            current_result = current.get('result') if current else None
+            previous_result = previous.get('result') if previous else None
+            if (not current or current.get('status') != 'succeeded'
+                    or current.get('target') != 'aws-ecs-express'
+                    or current.get('deployment_state', 'active') != 'active'
+                    or current.get('release_rollback_state') == 'running'
+                    or not previous or previous.get('status') != 'succeeded'
+                    or previous.get('deployment_state') != 'superseded'
+                    or previous.get('application_id') != current.get('application_id')
+                    or previous.get('target') != 'aws-ecs-express'
+                    or not isinstance(current_result, dict) or not isinstance(previous_result, dict)
+                    or not previous_result.get('task_definition_arn')
+                    or any(previous_result.get(key) != current_result.get(key)
+                           for key in ('service', 'service_arn', 'account', 'region', 'url'))
+                    or previous_result.get('image') not in (current_result.get('images') or [])
+                    or any(other is not current and other is not previous
+                           and other.get('application_id') == current.get('application_id')
+                           and other.get('target') == 'aws-ecs-express'
+                           and (other.get('status') in {'running', 'waiting_input'}
+                                or other.get('deployment_state') in {'deleting', 'needs_attention'}
+                                or other.get('aws_image_cleanup_state') == 'running')
+                           for other in self.jobs.values())):
+                raise ValueError('이전 릴리스로 되돌릴 수 있는 활성 AWS 배포가 아닙니다.')
+            current['release_rollback_state'] = 'running'
+            current['release_rollback_target_id'] = previous['id']
+            current.pop('release_rollback_submitted', None)
+            current.pop('release_rollback_failed_at', None)
+            self.save(job_id)
+        threading.Thread(target=self.run_release_rollback, args=(job_id,), daemon=True).start()
+
+    def finish_release_rollback(self, job_id, previous_id):
+        with self.lock:
+            current = self.jobs[job_id]
+            previous = self.jobs[previous_id]
+            current['release_rollback_state'] = 'succeeded'
+            current['deployment_state'] = 'superseded'
+            current['release_rollback_restore_pending'] = True
+            self.save(job_id)
+            previous['result']['images'] = list(dict.fromkeys(
+                [*(previous['result'].get('images') or [previous['result']['image']]),
+                 *(current['result'].get('images') or [])]))
+            previous['deployment_state'] = 'active'
+            self.save(previous_id)
+            current['release_rollback_restore_pending'] = False
+            self.save(job_id)
+        self.event(job_id, 'release_rollback_succeeded', '이전 릴리스의 이미지와 HTTP 200을 확인했습니다.')
+
+    def run_release_rollback(self, job_id):
+        with self.lock:
+            current = json.loads(json.dumps(self.jobs[job_id]))
+            previous = json.loads(json.dumps(self.jobs[current['release_rollback_target_id']]))
+        def checkpoint(**updates):
+            with self.lock:
+                self.jobs[job_id].update(updates)
+                self.save(job_id)
+        try:
+            adapter = AwsExpressAdapter(lambda stage, message: self.event(job_id, stage, message),
+                                        AwsSettings(**current['aws']))
+            adapter.rollback_release(current['result'], previous['result'],
+                                     (previous.get('plan') or {}).get('health_path', '/'), checkpoint)
+            self.finish_release_rollback(job_id, previous['id'])
+        except Exception as exc:
+            self.event(job_id, 'release_rollback_failed', str(exc)[:300])
+            with self.lock:
+                job = self.jobs[job_id]
+                job['release_rollback_state'] = ('needs_attention' if job.get('release_rollback_submitted') else 'failed')
+                if job.get('release_rollback_submitted'):
+                    job['deployment_state'] = 'needs_attention'
+                    job['release_rollback_failed_at'] = datetime.now(timezone.utc).isoformat()
+                self.save(job_id)
+
+    def reconcile_release_rollback(self, job_id):
+        with self.lock:
+            current = self.jobs.get(job_id)
+            previous = self.jobs.get(current.get('release_rollback_target_id')) if current else None
+            if (not current or current.get('release_rollback_state') != 'needs_attention'
+                    or not current.get('release_rollback_submitted') or not previous
+                    or current.get('deployment_state') != 'needs_attention'
+                    or previous.get('deployment_state') != 'superseded'):
+                raise ValueError('재확인할 이전 릴리스 롤백이 아닙니다.')
+            current_snapshot = json.loads(json.dumps(current))
+            previous_snapshot = json.loads(json.dumps(previous))
+        result = current_snapshot['result']
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(**current_snapshot['aws']))
+        listed = json.loads(adapter.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
+                                         '--service', result['service']], private=True, quiet=True))
+        items = listed.get('serviceDeployments', [])
+        latest = max(items, key=lambda item: item.get('createdAt', '')) if items else {}
+        arn = latest.get('serviceDeploymentArn')
+        old_arn = current_snapshot.get('release_rollback_previous_deployment_arn')
+        no_new = arn == old_arn
+        if not arn or latest.get('status') not in {'SUCCESSFUL', 'ROLLBACK_SUCCESSFUL'}:
+            return {'reconciled': False, 'reason': 'ECS 배포 또는 롤백이 아직 완료되지 않았습니다.'}
+        if no_new:
+            try:
+                failed_at = datetime.fromisoformat(current_snapshot['release_rollback_failed_at'])
+                if failed_at.tzinfo is None or datetime.now(timezone.utc) - failed_at < timedelta(minutes=10):
+                    return {'reconciled': False, 'reason': 'AWS 배포 이력 반영을 10분간 기다립니다.'}
+            except (KeyError, TypeError, ValueError):
+                return {'reconciled': False, 'reason': '롤백 실패 시점을 확인할 수 없습니다.'}
+        service_data = json.loads(adapter.aws(['ecs', 'describe-express-gateway-service',
+                                               '--service-arn', result['service_arn'], '--include', 'TAGS'],
+                                              private=True, quiet=True)).get('service', {})
+        tags = {item.get('key'): item.get('value') for item in service_data.get('tags', [])}
+        owner = result.get('owner_attempt') or result['service'].removeprefix('onedeploy-')
+        configs = service_data.get('activeConfigurations', [])
+        active = configs[0] if len(configs) == 1 else {}
+        previous_result = previous_snapshot['result']
+        previous_task_arn = (previous_result.get('task_definition_arn')
+                             or (result.get('previous_task_definition_arn')
+                                 if current_snapshot.get('replaces_job_id') == previous_snapshot['id'] else None))
+        if (service_data.get('serviceArn') != result['service_arn']
+                or service_data.get('status', {}).get('statusCode') != 'ACTIVE'
+                or service_data.get('currentDeployment')
+                or len(configs) != 1
+                or tags.get('onedeploy-managed') != 'true'
+                or tags.get('onedeploy-attempt') != owner):
+            return {'reconciled': False, 'reason': 'ECS 서비스 소유권 또는 완료 상태를 확인할 수 없습니다.'}
+        if (current_snapshot.get('replaces_job_id') == previous_snapshot['id']
+                and previous_result.get('task_definition_arn') and result.get('previous_task_definition_arn')
+                and previous_result['task_definition_arn'] != result['previous_task_definition_arn']):
+            return {'reconciled': False, 'reason': '이전 릴리스의 태스크 정의 기록이 일치하지 않습니다.'}
+        if (not no_new and latest['status'] == 'SUCCESSFUL'
+                and active.get('primaryContainer', {}).get('image') == previous_result['image']
+                and previous_task_arn and active.get('taskDefinitionArn') == previous_task_arn):
+            previous_snapshot['deployment_state'] = 'active'
+            health = check_deployment(previous_snapshot)
+            if health['healthy']:
+                self.finish_release_rollback(job_id, previous_snapshot['id'])
+                return {'reconciled': True, 'release': 'previous', 'health': health}
+        if (active.get('primaryContainer', {}).get('image') == result['image']
+                and result.get('task_definition_arn')
+                and active.get('taskDefinitionArn') == result['task_definition_arn']
+                and (no_new or latest['status'] == 'ROLLBACK_SUCCESSFUL')):
+            current_snapshot['deployment_state'] = 'active'
+            health = check_deployment(current_snapshot)
+            if health['healthy']:
+                with self.lock:
+                    self.jobs[job_id]['release_rollback_state'] = 'failed'
+                    self.jobs[job_id]['deployment_state'] = 'active'
+                    self.save(job_id)
+                self.event(job_id, 'release_rollback_reconciled', '기존 릴리스가 계속 실행 중임을 확인했습니다.')
+                return {'reconciled': True, 'release': 'current', 'health': health}
+        return {'reconciled': False, 'reason': '실행 중인 ECS 이미지를 확정할 수 없습니다.'}
+
+
