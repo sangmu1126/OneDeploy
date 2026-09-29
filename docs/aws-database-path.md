@@ -33,8 +33,11 @@ python3 -m onedeploy.postgres --application demo-app --account <AWS_ACCOUNT_ID> 
   --subnet-id <SUBNET_A_ID> --subnet-id <SUBNET_B_ID> \
   --service-security-group <NO_INGRESS_GROUP_ID>
 # 실제 생성할 때만 마지막에 --apply 추가
+# 기존 DB의 소유권·암호화·비공개 설정·서브넷·보안 그룹을 읽기 전용으로 재확인하려면 --inspect 추가
 ```
 
 이 명령은 **DB 리소스만 준비**한다. 앱의 환경변수/비밀 권한, 마이그레이션, DB 읽기·쓰기 검증,
 앱 업데이트·종료와 DB 수명주기 연결은 아직 없다. `--apply`를 실행해도 OneDeploy 제품 UI에서
-DB 의존 앱 차단은 해제되지 않는다. 실제 AWS 계정에서 이 생성 경로도 아직 검증하지 않았다.
+DB 의존 앱 차단은 해제되지 않는다. `--inspect`는 지정한 AWS 계정과 스택 소유권을 확인하고,
+RDS의 암호화·삭제 보호·비공개 엔드포인트·서브넷, DB 보안 그룹의 5432 인바운드 범위를 대조한다.
+실제 AWS 계정에서 이 생성·점검 경로는 아직 검증하지 않았다.

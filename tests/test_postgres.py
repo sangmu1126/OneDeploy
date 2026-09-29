@@ -101,14 +101,20 @@ class PostgresTests(unittest.TestCase):
                      'SecretArn': SECRET, 'DatabaseSecurityGroupId': DB_GROUP}.items()]}
         db = {'DBInstanceIdentifier': 'onedeploy-demo-app', 'DBInstanceArn': DB_ARN,
               'DBInstanceStatus': 'available', 'Engine': 'postgres', 'DBName': 'appdb',
-              'PubliclyAccessible': False, 'DeletionProtection': True,
-              'DBSubnetGroup': {'VpcId': VPC},
+              'PubliclyAccessible': False, 'DeletionProtection': True, 'StorageEncrypted': True,
+              'DBSubnetGroup': {'VpcId': VPC, 'Subnets': [
+                  {'SubnetIdentifier': subnet} for subnet in SUBNETS]},
               'VpcSecurityGroups': [{'VpcSecurityGroupId': DB_GROUP}],
               'MasterUserSecret': {'SecretArn': SECRET},
               'Endpoint': {'Address': HOST, 'Port': 5432}}
+        group = {'GroupId': DB_GROUP, 'VpcId': VPC, 'IpPermissions': [{
+            'IpProtocol': 'tcp', 'FromPort': 5432, 'ToPort': 5432,
+            'UserIdGroupPairs': [{'GroupId': SERVICE_GROUP, 'UserId': ACCOUNT, 'VpcId': VPC}]}]}
         def aws(args, **_kwargs):
             if args[:2] == ['cloudformation', 'describe-stacks']:
                 return json.dumps({'Stacks': [stack]})
+            if args[:2] == ['ec2', 'describe-security-groups']:
+                return json.dumps({'SecurityGroups': [group]})
             return json.dumps({'DBInstances': [db]})
         with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
             result = self.provisioner.inspect(STACK)
@@ -120,6 +126,32 @@ class PostgresTests(unittest.TestCase):
             stack['Tags'][0]['Value'] = 'false'
             with self.assertRaisesRegex(AwsConfigurationError, '소유 태그'):
                 self.provisioner.inspect(STACK)
+            stack['Tags'][0]['Value'] = 'true'
+            group['IpPermissions'][0]['IpRanges'] = [{'CidrIp': '0.0.0.0/0'}]
+            with self.assertRaisesRegex(AwsConfigurationError, '인바운드'):
+                self.provisioner.inspect(STACK)
+            group['IpPermissions'][0].pop('IpRanges')
+            db['StorageEncrypted'] = False
+            with self.assertRaisesRegex(AwsConfigurationError, '비공개'):
+                self.provisioner.inspect(STACK)
+
+    def test_inspect_current_checks_account_and_stack_name(self):
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            return json.dumps({'Stacks': [{'StackId': STACK}]})
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
+                patch.object(self.provisioner, 'inspect', return_value={'status': 'available'}) as inspect:
+            self.assertEqual(self.provisioner.inspect_current(), {'status': 'available'})
+        self.assertIn(self.request.stack_name, calls[1])
+        inspect.assert_called_once_with(STACK)
+        with patch.object(self.provisioner.adapter, 'aws', return_value=json.dumps({'Account': '999999999999'})), \
+                patch.object(self.provisioner, 'inspect') as inspect:
+            with self.assertRaisesRegex(AwsConfigurationError, '계정'):
+                self.provisioner.inspect_current()
+            inspect.assert_not_called()
 
     def test_dry_run_never_creates_stack(self):
         arguments = ['--application', 'demo-app', '--account', ACCOUNT, '--region', REGION,
@@ -130,6 +162,19 @@ class PostgresTests(unittest.TestCase):
                 patch('onedeploy.postgres.AwsPostgresProvisioner.create') as create:
             main(arguments)
             create.assert_not_called()
+
+    def test_inspect_cli_never_creates_stack(self):
+        arguments = ['--application', 'demo-app', '--account', ACCOUNT, '--region', REGION,
+                     '--vpc-id', VPC, '--subnet-id', SUBNETS[0], '--subnet-id', SUBNETS[1],
+                     '--service-security-group', SERVICE_GROUP, '--inspect']
+        with patch('onedeploy.postgres.AwsPostgresProvisioner.inspect_current',
+                   return_value={'status': 'available'}) as inspect, \
+                patch('onedeploy.postgres.AwsPostgresProvisioner.preflight') as preflight, \
+                patch('onedeploy.postgres.AwsPostgresProvisioner.create') as create:
+            main(arguments)
+        inspect.assert_called_once_with()
+        preflight.assert_not_called()
+        create.assert_not_called()
 
 
 if __name__ == '__main__':

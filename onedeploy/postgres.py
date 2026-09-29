@@ -124,6 +124,19 @@ class AwsPostgresProvisioner:
         except Exception as exc:
             raise RuntimeError(f'PostgreSQL 생성 결과를 확인하지 못했습니다. {stack_id} 상태와 비용을 확인하세요: {exc}') from None
 
+    def inspect_current(self) -> dict:
+        """Read and verify the existing application database without changing resources."""
+        req = self.request
+        identity = json.loads(self.adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
+        if identity.get('Account') != req.account:
+            raise AwsConfigurationError('현재 AWS 계정이 지정한 계정과 다릅니다.')
+        stacks = json.loads(self.adapter.aws(['cloudformation', 'describe-stacks',
+            '--stack-name', req.stack_name], private=True, quiet=True)).get('Stacks', [])
+        prefix = f'arn:aws:cloudformation:{req.region}:{req.account}:stack/{req.stack_name}/'
+        if len(stacks) != 1 or not isinstance(stacks[0].get('StackId'), str) or not stacks[0]['StackId'].startswith(prefix):
+            raise AwsConfigurationError('지정한 앱의 PostgreSQL 스택을 확인하지 못했습니다.')
+        return self.inspect(stacks[0]['StackId'])
+
     def inspect(self, stack_id: str) -> dict:
         """Verify owned stack, nonpublic instance, network, and secret ARN; never read secret value."""
         req = self.request
@@ -157,13 +170,30 @@ class AwsPostgresProvisioner:
         if (db.get('DBInstanceIdentifier') != req.database_id or db.get('DBInstanceArn') != db_arn
                 or db.get('DBInstanceStatus') != 'available' or db.get('Engine') != 'postgres'
                 or db.get('DBName') != 'appdb' or db.get('PubliclyAccessible') is not False
-                or db.get('DeletionProtection') is not True
+                or db.get('DeletionProtection') is not True or db.get('StorageEncrypted') is not True
                 or db.get('DBSubnetGroup', {}).get('VpcId') != req.vpc_id
-                or group_id not in attached
+                or {item.get('SubnetIdentifier') for item in db.get('DBSubnetGroup', {}).get('Subnets', [])}
+                   != set(req.subnet_ids)
+                or attached != {group_id}
                 or db.get('MasterUserSecret', {}).get('SecretArn') != secret_arn
                 or db.get('Endpoint', {}).get('Address') != outputs['EndpointAddress']
                 or db.get('Endpoint', {}).get('Port') != 5432):
             raise AwsConfigurationError('PostgreSQL 실제 인스턴스가 비공개·보호 구성과 다릅니다.')
+        groups = json.loads(self.adapter.aws(['ec2', 'describe-security-groups', '--group-ids', group_id],
+                                             private=True, quiet=True)).get('SecurityGroups', [])
+        rules = groups[0].get('IpPermissions', []) if len(groups) == 1 else []
+        rule = rules[0] if len(rules) == 1 else {}
+        pairs = rule.get('UserIdGroupPairs', [])
+        if (len(groups) != 1 or groups[0].get('GroupId') != group_id
+                or groups[0].get('VpcId') != req.vpc_id
+                or rule.get('IpProtocol') != 'tcp' or rule.get('FromPort') != 5432
+                or rule.get('ToPort') != 5432 or len(pairs) != 1
+                or pairs[0].get('GroupId') != req.service_security_group
+                or pairs[0].get('UserId', req.account) != req.account
+                or pairs[0].get('VpcId', req.vpc_id) != req.vpc_id
+                or rule.get('IpRanges', []) or rule.get('Ipv6Ranges', [])
+                or rule.get('PrefixListIds', [])):
+            raise AwsConfigurationError('PostgreSQL 보안 그룹의 인바운드 허용 범위가 예상과 다릅니다.')
         return {'stack_id': stack_id, 'database_arn': db_arn, 'database_id': req.database_id,
                 'endpoint': outputs['EndpointAddress'], 'port': 5432,
                 'secret_arn': secret_arn, 'database_security_group': group_id,
@@ -174,7 +204,9 @@ class AwsPostgresProvisioner:
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description='Provision a retained private RDS PostgreSQL instance')
-    parser.add_argument('--apply', action='store_true', help='Create a billable RDS instance and managed secret')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--apply', action='store_true', help='Create a billable RDS instance and managed secret')
+    mode.add_argument('--inspect', action='store_true', help='Verify an existing database without changes')
     parser.add_argument('--application', required=True)
     parser.add_argument('--account', required=True)
     parser.add_argument('--region', required=True)
@@ -186,7 +218,9 @@ def main(argv=None) -> None:
         req = PostgresRequest(args.application, args.account, args.region, args.vpc_id,
                               tuple(args.subnet_id), args.service_security_group)
         provisioner = AwsPostgresProvisioner(req)
-        if args.apply:
+        if args.inspect:
+            result = provisioner.inspect_current()
+        elif args.apply:
             print('RDS 생성 요청을 시작합니다. DB와 비밀은 앱 종료 시 자동 삭제하지 않습니다.', flush=True)
             result = provisioner.create()
         else:
