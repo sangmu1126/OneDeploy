@@ -786,3 +786,351 @@ class App:
         return {'reconciled': False, 'reason': '실행 중인 ECS 이미지를 확정할 수 없습니다.'}
 
 
+def handler_for(app: App):
+    class Handler(BaseHTTPRequestHandler):
+        def json_response(self, status, data):
+            payload = json.dumps(data, ensure_ascii=False).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            if self.path == "/":
+                content = (Path(__file__).parent / "static/index.html").read_text()
+                payload = content.replace("__TOKEN__", app.token).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if self.headers.get("X-OneDeploy-Token") != app.token:
+                self.json_response(403, {"error": "Invalid session token"})
+                return
+            if self.path == "/api/config":
+                self.json_response(200, {"ai_available": app.ai_settings.available,
+                    "ai_model": app.ai_settings.model if app.ai_settings.available else None,
+                    "monitor_interval": app.monitor_interval,
+                    "targets": [{"id": "auto", "name": "AI 자동 선택", "available": app.ai_settings.available},
+                                {"id": "local-docker", "name": "Local Docker", "available": True},
+                                {"id": "cloud-run", "name": "Google Cloud Run",
+                                 "available": app.cloud_settings.unavailable_reason() is None,
+                                 "reason": app.cloud_settings.unavailable_reason()},
+                                {"id": "aws-ecs-express", "name": "AWS ECS Express Mode",
+                                 "available": app.aws_settings.unavailable_reason() is None,
+                                 "reason": app.aws_settings.unavailable_reason()}],
+                    "recovery_warnings": app.recovery_warnings})
+                return
+            if self.path == "/api/jobs":
+                self.json_response(200, app.summaries())
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/releases", self.path):
+                application_id = self.path.split('/')[3]
+                self.json_response(200, app.releases(application_id))
+                return
+            if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/health", self.path):
+                job_id = self.path.split('/')[3]
+                with app.lock:
+                    job = app.jobs.get(job_id)
+                    snapshot = json.loads(json.dumps(job)) if job else None
+                if not snapshot:
+                    self.json_response(404, {"error": "Not found"})
+                elif snapshot.get('status') != 'succeeded':
+                    self.json_response(409, {"error": "Only completed deployments can be checked"})
+                elif snapshot.get('deployment_state', 'active') in {'deleting', 'deleted'}:
+                    self.json_response(409, {"error": "배포 종료 중이거나 이미 종료됐습니다."})
+                else:
+                    self.json_response(200, app.check_and_record_health(job_id))
+                return
+            if self.path.startswith("/api/jobs/"):
+                with app.lock:
+                    job_id = self.path.rsplit("/", 1)[-1]
+                    job = app.jobs.get(job_id)
+                    response = ({**job, 'health_history': app.health_history.get(job_id, []),
+                                 'last_health': (app.health_history.get(job_id) or [None])[-1],
+                                 'monitor_error': app.monitor_errors.get(job_id)}
+                                if job else {"error": "Not found"})
+                    self.json_response(200 if job else 404, response)
+                return
+            self.json_response(404, {"error": "Not found"})
+
+        def do_POST(self):
+            if self.headers.get("X-OneDeploy-Token") != app.token:
+                self.json_response(403, {"error": "Invalid session token"})
+                return
+            try:
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback-release/reconcile", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('릴리스 롤백 재확인 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.reconcile_release_rollback(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback-release", self.path):
+                    job_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if size < 0 or size > 512:
+                        raise ValueError('릴리스 롤백 요청 본문은 512바이트 이하이어야 합니다.')
+                    payload = json.loads(self.rfile.read(size)) if size else {}
+                    if (not isinstance(payload, dict) or set(payload) not in (set(), {'target_job_id'})
+                            or ('target_job_id' in payload and
+                                (not isinstance(payload['target_job_id'], str)
+                                 or not re.fullmatch(r'[a-f0-9]{16}', payload['target_job_id'])))):
+                        raise ValueError('롤백 대상 작업 ID가 올바르지 않습니다.')
+                    app.start_release_rollback(job_id, payload.get('target_job_id'))
+                    self.json_response(202, {'id': job_id, 'release_rollback_state': 'running'})
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('롤백 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.request_aws_update_rollback(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/cleanup-image", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('이미지 정리 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.cleanup_abandoned_aws_image(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/reconcile", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('AWS 상태 재확인 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.reconcile_aws_update(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/retire", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('배포 종료 요청에는 본문을 넣을 수 없습니다.')
+                    with app.lock:
+                        job = app.jobs.get(job_id)
+                        if (not job or job.get('status') != 'succeeded'
+                                or job.get('target') not in {'aws-ecs-express', 'local-docker', 'cloud-run'} or not job.get('result')
+                                or job.get('deployment_state', 'active') not in {'active', 'delete_failed'}
+                                or job.get('release_rollback_state') in {'running', 'needs_attention'}
+                                or (job.get('target') == 'aws-ecs-express' and any(other is not job and other.get('application_id') == job.get('application_id')
+                                       and other.get('target') == 'aws-ecs-express'
+                                       and (other.get('status') in {'running', 'waiting_input'}
+                                            or other.get('aws_image_cleanup_state') == 'running')
+                                       for other in app.jobs.values()))):
+                            message = ('종료할 수 있는 AWS 배포가 아닙니다.' if job and job.get('target') == 'aws-ecs-express'
+                                       else '종료할 수 있는 배포가 아닙니다.')
+                            self.json_response(409, {'error': message})
+                            return
+                        target = job['target']
+                        job['deployment_state'] = 'deleting'
+                        job.pop('retire_error', None)
+                        app.save(job_id)
+                    threading.Thread(target=app.retire_aws if target == 'aws-ecs-express' else
+                                     app.retire_cloud if target == 'cloud-run' else app.retire_local,
+                                     args=(job_id,), daemon=True).start()
+                    self.json_response(202, {'id': job_id, 'deployment_state': 'deleting'})
+                    return
+                if self.path == "/api/deployments":
+                    if not app.ai_settings.available:
+                        self.json_response(503, {"error": "AI 배포를 사용하려면 서버에 OPENAI_API_KEY와 ONEDEPLOY_AI_MODEL을 설정하세요."})
+                        return
+                    requested_target = self.headers.get("X-Deploy-Target", "local-docker")
+                    if requested_target not in {"auto", "local-docker", "cloud-run", "aws-ecs-express"}:
+                        raise ValueError("Unsupported deployment target")
+                    target = requested_target
+                    public_flag = self.headers.get("X-Public-Access", "false")
+                    if public_flag not in {"true", "false"}:
+                        raise ValueError("Invalid public access selection")
+                    if target == "cloud-run" and app.cloud_settings.unavailable_reason():
+                        raise ValueError(app.cloud_settings.unavailable_reason())
+                    if target == "aws-ecs-express":
+                        if app.aws_settings.unavailable_reason():
+                            raise ValueError(app.aws_settings.unavailable_reason())
+                        if public_flag != 'true':
+                            raise ValueError('AWS ECS Express 대상은 인터넷 공개 선택이 필요합니다.')
+                    size = int(self.headers.get("Content-Length", "0"))
+                    content_type = self.headers.get('Content-Type', '')
+                    folder_upload = content_type.lower().startswith('multipart/form-data;')
+                    if not 0 < size <= MAX_UPLOAD + (1024 * 1024 if folder_upload else 0):
+                        raise ValueError("Upload must be smaller than 20 MiB (plus folder form overhead)")
+                    job_id = uuid.uuid4().hex[:16]
+                    application_id = self.headers.get("X-Application-Id", "app-" + job_id)
+                    if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
+                        raise ValueError("Application ID must be 3-31 lowercase letters, digits or hyphens, starting with a letter")
+                    directory = app.root / job_id
+                    directory.mkdir()
+                    try:
+                        archive = directory / "source.zip"
+                        upload = self.rfile.read(size)
+                        if len(upload) != size:
+                            raise ValueError('Incomplete upload')
+                        if folder_upload:
+                            folder_upload_to_zip(upload, content_type, archive)
+                        else:
+                            archive.write_bytes(upload)
+                        try:
+                            project = extract_project(archive, directory / "source")
+                        finally:
+                            archive.unlink(missing_ok=True)
+                        infrastructure_profile = inspect_infrastructure(project)
+                        validate_infrastructure(infrastructure_profile, target)
+                        if target == 'auto':
+                            available_targets = ['local-docker']
+                            if app.cloud_settings.unavailable_reason() is None:
+                                available_targets.append('cloud-run')
+                            if public_flag == 'true' and app.aws_settings.unavailable_reason() is None:
+                                available_targets.append('aws-ecs-express')
+                            infrastructure_plan = plan_infrastructure(project, available_targets,
+                                public_flag == 'true', app.infrastructure_planner_factory(app.ai_settings))
+                            target = infrastructure_plan['target']
+                        else:
+                            infrastructure_plan = {'target': target, 'workload': 'unconfirmed',
+                                'rationale': '사용자가 배포 대상을 지정했습니다. 알려진 영속 저장소 의존성은 사전 검사합니다.',
+                                'evidence': [], 'resources': TARGET_RESOURCES[target], 'planner': 'user'}
+                        with app.lock:
+                            app.ensure_application_available(application_id, target)
+                            app.jobs[job_id] = {"id": job_id, "mode": "agent", "target": target,
+                                "requested_target": requested_target, "infrastructure_plan": infrastructure_plan,
+                                "application_id": application_id,
+                                "public": target in {"cloud-run", "aws-ecs-express"} and public_flag == "true",
+                                "status": "running", "created_at": datetime.now(timezone.utc).isoformat(),
+                                "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
+                                "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
+                                "events": []}
+                            if target == "cloud-run":
+                                app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
+                            elif target == "aws-ecs-express":
+                                app.jobs[job_id]["aws"] = asdict(app.aws_settings)
+                                previous = [old for old in app.jobs.values() if old['id'] != job_id
+                                            and old.get('application_id') == application_id
+                                            and old.get('target') == 'aws-ecs-express'
+                                            and old.get('status') == 'succeeded'
+                                            and old.get('deployment_state', 'active') == 'active'
+                                            and old.get('result')]
+                                if previous:
+                                    latest = max(previous, key=lambda item: item.get('created_at', ''))
+                                    app.jobs[job_id]['prior_result'] = latest['result']
+                                    app.jobs[job_id]['replaces_job_id'] = latest['id']
+                            app.save(job_id)
+                    except Exception:
+                        if job_id not in app.jobs:
+                            shutil.rmtree(directory)
+                        raise
+                    threading.Thread(target=app.run_agent, args=(job_id,), daemon=True).start()
+                    self.json_response(202, {"id": job_id, "status": "running"})
+                    return
+                if self.path.startswith("/api/deployments/") and self.path.endswith("/resume"):
+                    job_id = self.path.split('/')[-2]
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 65536:
+                        raise ValueError("Environment input must be under 64 KiB")
+                    payload = json.loads(self.rfile.read(size))
+                    if not isinstance(payload, dict) or set(payload) != {"environment"}:
+                        raise ValueError("Expected an environment object")
+                    with app.lock:
+                        job = app.jobs.get(job_id)
+                        if not job or job.get('mode') != 'agent' or job['status'] != 'waiting_input':
+                            self.json_response(409, {"error": "환경변수 입력을 기다리는 배포가 아닙니다."})
+                            return
+                        environment = validate_environment(payload['environment'], job['missing_environment'])
+                        job.update(status="running", environment_names=sorted(environment), missing_environment=[])
+                        app.save(job_id)
+                    threading.Thread(target=app.run_agent, args=(job_id, environment), daemon=True).start()
+                    self.json_response(202, {"id": job_id, "status": "running"})
+                    return
+                if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/cancel", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get("Content-Length", "0")) != 0:
+                        raise ValueError("Cancellation request must be empty")
+                    with app.lock:
+                        job = app.jobs.get(job_id)
+                        if not job or job.get('mode') != 'agent' or job['status'] != 'waiting_input':
+                            self.json_response(409, {"error": "입력 대기 중인 작업만 취소할 수 있습니다."})
+                            return
+                        job.update(status='cancelled', missing_environment=[])
+                        job['events'].append({"time": datetime.now(timezone.utc).isoformat(),
+                                              "stage": "cancelled", "message": "사용자가 입력 대기 작업을 취소했습니다."})
+                        app.save(job_id)
+                    self.json_response(200, {"id": job_id, "status": "cancelled"})
+                    return
+                if self.path == "/api/analyze":
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= MAX_UPLOAD:
+                        raise ValueError("Upload a ZIP smaller than 20 MiB")
+                    job_id = uuid.uuid4().hex[:16]
+                    directory = app.root / job_id
+                    directory.mkdir()
+                    archive = directory / "source.zip"
+                    archive.write_bytes(self.rfile.read(size))
+                    try:
+                        project = extract_project(archive, directory / "source")
+                    finally:
+                        archive.unlink(missing_ok=True)
+                    plan = analyze_project(project, self.headers.get("X-Analysis-Mode", "static"), app.ai_settings)
+                    diff = dockerfile_diff(project, asdict(plan))
+                    with app.lock:
+                        app.jobs[job_id] = {"id": job_id, "status": "planned",
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "plan": asdict(plan), "diff": diff, "project": str(project), "events": []}
+                        app.save(job_id)
+                    self.json_response(201, app.jobs[job_id])
+                    return
+                if self.path.startswith("/api/deploy/"):
+                    job_id = self.path.rsplit("/", 1)[-1]
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 <= size <= 65536:
+                        raise ValueError("Deployment input exceeds 64 KiB")
+                    try:
+                        payload = json.loads(self.rfile.read(size)) if size else {}
+                    except (ValueError, UnicodeError):
+                        raise ValueError("Deployment input must be valid JSON") from None
+                    if not isinstance(payload, dict) or set(payload) - {"environment"}:
+                        raise ValueError("Expected an environment object")
+                    with app.lock:
+                        job = app.jobs.get(job_id)
+                        if not job or job["status"] != "planned":
+                            self.json_response(409, {"error": "A planned job is required"})
+                            return
+                        environment = validate_environment(payload.get("environment"), job["plan"]["required_env"])
+                        if source_digest(Path(job["project"])) != job["plan"]["source_digest"]:
+                            self.json_response(409, {"error": "Source changed after analysis; analyze again"})
+                            return
+                        job["status"] = "running"
+                        job["environment_names"] = sorted(environment)
+                        app.save(job_id)
+                    threading.Thread(target=app.run, args=(job_id, environment), daemon=True).start()
+                    self.json_response(202, {"id": job_id, "status": "running"})
+                    return
+                self.json_response(404, {"error": "Not found"})
+            except Exception as exc:
+                self.json_response(400, {"error": str(exc)})
+
+    return Handler
+
+
+def main():
+    parser = argparse.ArgumentParser(description="OneDeploy local development server")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--state-dir", type=Path, default=Path(".onedeploy"))
+    parser.add_argument("--monitor-interval", type=int, default=300,
+                        help="Seconds between health checks (60–3600; 0 disables monitoring)")
+    args = parser.parse_args()
+    if args.monitor_interval != 0 and not 60 <= args.monitor_interval <= 3600:
+        parser.error('--monitor-interval must be 0 or 60–3600 seconds')
+    with StateDirectoryLock(args.state_dir) as state_dir:
+        app = App(state_dir, monitor_interval=args.monitor_interval)
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(app))
+        stop_monitor = threading.Event()
+        if app.monitor_interval:
+            threading.Thread(target=app.monitor_loop, args=(stop_monitor,), daemon=True).start()
+        print(f"OneDeploy: http://127.0.0.1:{args.port}", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop_monitor.set()
+            server.server_close()
+
+
+if __name__ == "__main__":
+    main()
