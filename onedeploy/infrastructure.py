@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -24,6 +25,18 @@ SQLITE_SOURCE = re.compile(
     re.I,
 )
 SQLITE_DEPENDENCIES = {'sqlite3', 'better-sqlite3', 'sqlite', 'aiosqlite', 'pysqlite3', 'sqlite-utils'}
+DATABASE_DEPENDENCIES = {
+    'pg', 'postgres', 'mysql', 'mysql2', 'mariadb', 'mongodb', 'mongoose', '@prisma/client',
+    'psycopg', 'psycopg2', 'psycopg2-binary', 'asyncpg', 'pymysql', 'mysqlclient',
+    'pymongo', 'motor', 'sqlalchemy',
+}
+DATABASE_SOURCE = re.compile(
+    r"\b(?:require\s*\(?\s*|from\s+)['\"](?:pg|postgres|mysql2?|mariadb|mongodb|mongoose)['\"]|"
+    r"\b(?:import|from)\s+(?:psycopg2?|asyncpg|pymysql|MySQLdb|pymongo|motor|sqlalchemy)(?:\b|\.)|"
+    r"\bprovider\s*=\s*['\"](?:postgresql|mysql|mongodb|sqlserver|cockroachdb)['\"]|"
+    r"\b(?:postgres(?:ql)?|mysql|mongodb)(?:\+\w+)?://",
+    re.I,
+)
 WORKER_DEPENDENCIES = {'bull', 'bullmq', 'celery', 'rq', 'huey', 'dramatiq', 'sidekiq', 'resque'}
 LOCAL_WRITE = re.compile(
     r"\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|createWriteStream)\s*\(\s*['\"](?:\./)?(?:data|uploads|storage)/[^'\"]+['\"]|"
@@ -103,6 +116,8 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                 runtime_dependencies = package.get('dependencies', {})
                 if any(name.lower() in SQLITE_DEPENDENCIES for name in dependencies):
                     found.add('sqlite')
+                if any(name.lower() in DATABASE_DEPENDENCIES for name in runtime_dependencies):
+                    found.add('database')
                 if (any(name.lower() in WORKER_DEPENDENCIES for name in runtime_dependencies)
                         or any(name.lower() in {'worker', 'queue', 'jobs'} for name in package.get('scripts', {}))):
                     found.add('background-worker')
@@ -111,19 +126,38 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
         if path.name in MANIFESTS - {'package.json'}:
             if re.search(r'(?im)^\s*(?:["\']?)(?:sqlite3|better-sqlite3|aiosqlite|pysqlite3|sqlite-utils)(?:["\']?)(?:\s|[=<>~;,{]|$)', content):
                 found.add('sqlite')
+            if re.search(r'(?im)^\s*["\']?(?:psycopg2?(?:-binary)?|asyncpg|pymysql|mysqlclient|pymongo|motor|sqlalchemy)(?:\[[^\]]+\])?["\']?(?:\s|[=<>~;,{]|$)', content):
+                found.add('database')
             if (re.search(r'(?im)^\s*(?:["\']?)(?:celery|rq|huey|dramatiq|sidekiq|resque)(?:["\']?)(?:\s|[=<>~;,{]|$)', content)
                     or (path.name == 'Procfile' and re.search(r'(?im)^\s*worker\s*:', content))):
                 found.add('background-worker')
+            if path.name == 'pyproject.toml':
+                try:
+                    manifest = tomllib.loads(content)
+                    dependencies = manifest.get('project', {}).get('dependencies', [])
+                    poetry = manifest.get('tool', {}).get('poetry', {}).get('dependencies', {})
+                    names = [re.match(r'[A-Za-z0-9_.-]+', item).group().lower()
+                             for item in dependencies if isinstance(item, str)
+                             and re.match(r'[A-Za-z0-9_.-]+', item)]
+                    if isinstance(poetry, dict):
+                        names.extend(name.lower() for name in poetry)
+                    if any(name in DATABASE_DEPENDENCIES for name in names):
+                        found.add('database')
+                except (ValueError, TypeError, AttributeError):
+                    pass
         if path.suffix in SOURCE_EXTENSIONS:
             if SQLITE_SOURCE.search(content):
                 found.add('sqlite')
+            if DATABASE_SOURCE.search(content):
+                found.add('database')
             if LOCAL_WRITE.search(content):
                 found.add('local-files')
         if found:
             requirements.update(found)
             if len(evidence) < 20 and relative.as_posix() not in evidence:
                 evidence.append(relative.as_posix())
-    storage = 'sqlite' if 'sqlite' in requirements else 'local-files' if 'local-files' in requirements else 'unconfirmed'
+    storage = ('sqlite' if 'sqlite' in requirements else 'database' if 'database' in requirements
+               else 'local-files' if 'local-files' in requirements else 'unconfirmed')
     return InfrastructureProfile(storage, tuple(evidence), scanned, tuple(sorted(requirements)))
 
 
@@ -131,6 +165,8 @@ def validate_infrastructure(profile: InfrastructureProfile, target: str) -> None
     problems = []
     if 'sqlite' in profile.requirements or profile.storage == 'sqlite':
         problems.append('SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다')
+    if 'database' in profile.requirements or profile.storage == 'database':
+        problems.append('데이터베이스 서비스 연결·마이그레이션 검증이 필요합니다')
     if 'local-files' in profile.requirements:
         problems.append('로컬 파일 쓰기에 영속 저장소가 필요합니다')
     if 'background-worker' in profile.requirements:

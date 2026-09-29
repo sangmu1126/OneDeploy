@@ -67,6 +67,48 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(profile.storage, 'sqlite')
             self.assertEqual(profile.evidence, ('schema.prisma',))
 
+    def test_detects_external_database_from_runtime_dependencies_and_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'package.json').write_text(json.dumps({
+                'dependencies': {'pg': '^8.0.0'}, 'devDependencies': {'typescript': '^5.0.0'}}))
+            (project / 'schema.prisma').write_text(
+                'datasource db { provider = "postgresql" url = env("DATABASE_URL") }')
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.storage, 'database')
+            self.assertEqual(profile.requirements, ('database',))
+            self.assertEqual(profile.evidence, ('package.json', 'schema.prisma'))
+            with self.assertRaisesRegex(ValueError, '마이그레이션'):
+                validate_infrastructure(profile, 'aws-ecs-express')
+
+    def test_detects_database_from_python_manifest_and_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'requirements.txt').write_text('psycopg[binary]>=3.1\n')
+            (project / 'app.py').write_text('import pymongo\n')
+            (project / 'docs').mkdir()
+            (project / 'docs' / 'example.py').write_text('import sqlite3\n')
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.requirements, ('database',))
+            self.assertEqual(profile.evidence, ('app.py', 'requirements.txt'))
+
+    def test_detects_database_from_pyproject_runtime_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'pyproject.toml').write_text(
+                '[project]\ndependencies = ["psycopg[binary]>=3.1"]\n')
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.requirements, ('database',))
+            self.assertEqual(profile.evidence, ('pyproject.toml',))
+
+    def test_database_dependency_only_in_dev_does_not_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'package.json').write_text(json.dumps({
+                'dependencies': {'express': '^5.0.0'}, 'devDependencies': {'pg': '^8.0.0'}}))
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.requirements, ())
+
     def test_detects_uploaded_sqlite_database_without_source_import(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -117,6 +159,26 @@ class InfrastructureTests(unittest.TestCase):
             self.assertIn('SQLite', handler.json_response.call_args.args[1]['error'])
             self.assertFalse(app.jobs)
 
+    def test_upload_blocks_postgres_before_any_deployment_resource(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('package.json', json.dumps({
+                'scripts': {'start': 'node server.js'}, 'dependencies': {'pg': '^8.0.0'}}))
+            bundle.writestr('server.js', 'console.log("ready")')
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            handler_class = handler_for(app)
+            handler = handler_class.__new__(handler_class)
+            handler.path = '/api/deployments'
+            handler.headers = {'X-OneDeploy-Token': app.token,
+                               'Content-Length': str(len(archive.getvalue()))}
+            handler.rfile = io.BytesIO(archive.getvalue())
+            handler.json_response = Mock()
+            handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[0], 400)
+            self.assertIn('데이터베이스', handler.json_response.call_args.args[1]['error'])
+            self.assertFalse(app.jobs)
+
     def test_agent_cannot_add_sqlite_after_upload_and_provision(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -128,6 +190,20 @@ class InfrastructureTests(unittest.TestCase):
             tools.configure_deployment('start', None, 3000, '/', [])
             (tools.work / 'server.js').write_text('const sqlite = require("node:sqlite");')
             with self.assertRaisesRegex(ValueError, 'SQLite'):
+                tools.deploy_application()
+            self.assertEqual(tools.attempts, 0)
+
+    def test_agent_cannot_add_database_after_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'source'
+            project.mkdir()
+            (project / 'package.json').write_text('{"scripts":{"start":"node server.js"}}')
+            (project / 'server.js').write_text('console.log("ready")')
+            tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None, lambda **_: None)
+            tools.configure_deployment('start', None, 3000, '/', [])
+            (tools.work / 'server.js').write_text('const db = require("pg");')
+            with self.assertRaisesRegex(ValueError, '데이터베이스'):
                 tools.deploy_application()
             self.assertEqual(tools.attempts, 0)
 
