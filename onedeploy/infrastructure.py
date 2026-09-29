@@ -12,8 +12,9 @@ from onedeploy.analysis import AISettings, AnalysisError, parse_response, redact
 
 
 SOURCE_EXTENSIONS = {'.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.php', '.java', '.kt', '.cs', '.prisma'}
-MANIFESTS = {'package.json', 'requirements.txt', 'pyproject.toml', 'Gemfile', 'go.mod', 'Cargo.toml'}
-SKIP_DIRECTORIES = {'tests', 'test', '__tests__', 'spec', 'docs', 'examples', 'vendor', 'dist', 'build'}
+MANIFESTS = {'package.json', 'requirements.txt', 'pyproject.toml', 'Gemfile', 'go.mod', 'Cargo.toml', 'Procfile'}
+SKIP_DIRECTORIES = {'tests', 'test', '__tests__', 'spec', 'docs', 'examples', 'vendor', 'dist', 'build', 'node_modules'}
+SQLITE_FILES = {'.db', '.sqlite', '.sqlite3'}
 SQLITE_SOURCE = re.compile(
     r"(?:\b(?:require|import)\s*\(?\s*['\"](?:node:)?sqlite(?:3)?['\"]|"
     r"\b(?:import|from)\s+(?:sqlite3|aiosqlite)\b|"
@@ -23,6 +24,12 @@ SQLITE_SOURCE = re.compile(
     re.I,
 )
 SQLITE_DEPENDENCIES = {'sqlite3', 'better-sqlite3', 'sqlite', 'aiosqlite', 'pysqlite3', 'sqlite-utils'}
+WORKER_DEPENDENCIES = {'bull', 'bullmq', 'celery', 'rq', 'huey', 'dramatiq', 'sidekiq', 'resque'}
+LOCAL_WRITE = re.compile(
+    r"\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|createWriteStream)\s*\(\s*['\"](?:\./)?(?:data|uploads|storage)/[^'\"]+['\"]|"
+    r"\bopen\s*\(\s*['\"](?:\./)?(?:data|uploads|storage)/[^'\"]+['\"]\s*,\s*['\"][wax+]",
+    re.I,
+)
 TARGET_RESOURCES = {
     'local-docker': ['Docker image', 'local container'],
     'cloud-run': ['Artifact Registry repository', 'runtime service account', 'Cloud Run service'],
@@ -57,6 +64,7 @@ class InfrastructureProfile:
     storage: str
     evidence: tuple[str, ...]
     scanned_files: int
+    requirements: tuple[str, ...] = ()
 
     def as_dict(self):
         return asdict(self)
@@ -65,6 +73,7 @@ class InfrastructureProfile:
 def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     """Find known durable-storage needs; absence of signals is not a statelessness proof."""
     evidence = []
+    requirements = set()
     scanned = 0
     budget = 1024 * 1024
     for path in sorted(project.rglob('*')):
@@ -72,6 +81,11 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
             continue
         relative = path.relative_to(project)
         if any(part.startswith('.') or part in SKIP_DIRECTORIES for part in relative.parts[:-1]):
+            continue
+        if path.suffix.lower() in SQLITE_FILES:
+            requirements.add('sqlite')
+            if len(evidence) < 20:
+                evidence.append(relative.as_posix())
             continue
         if path.name not in MANIFESTS and path.suffix not in SOURCE_EXTENSIONS:
             continue
@@ -81,31 +95,50 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
         with path.open('rb') as source:
             content = source.read(min(20000, budget)).decode('utf-8', errors='replace')
         budget -= len(content)
-        found = False
+        found = set()
         if path.name == 'package.json':
             try:
                 package = json.loads(content)
                 dependencies = {**package.get('dependencies', {}), **package.get('devDependencies', {})}
-                found = any(name.lower() in SQLITE_DEPENDENCIES for name in dependencies)
+                runtime_dependencies = package.get('dependencies', {})
+                if any(name.lower() in SQLITE_DEPENDENCIES for name in dependencies):
+                    found.add('sqlite')
+                if (any(name.lower() in WORKER_DEPENDENCIES for name in runtime_dependencies)
+                        or any(name.lower() in {'worker', 'queue', 'jobs'} for name in package.get('scripts', {}))):
+                    found.add('background-worker')
             except (ValueError, TypeError, AttributeError):
                 pass
-        if not found and path.name in MANIFESTS - {'package.json'}:
-            found = bool(re.search(r'(?im)^\s*(?:["\']?)(?:sqlite3|better-sqlite3|aiosqlite|pysqlite3|sqlite-utils)(?:["\']?)(?:\s|[=<>~;,{]|$)', content))
-        if not found and path.suffix in SOURCE_EXTENSIONS:
-            found = bool(SQLITE_SOURCE.search(content))
+        if path.name in MANIFESTS - {'package.json'}:
+            if re.search(r'(?im)^\s*(?:["\']?)(?:sqlite3|better-sqlite3|aiosqlite|pysqlite3|sqlite-utils)(?:["\']?)(?:\s|[=<>~;,{]|$)', content):
+                found.add('sqlite')
+            if (re.search(r'(?im)^\s*(?:["\']?)(?:celery|rq|huey|dramatiq|sidekiq|resque)(?:["\']?)(?:\s|[=<>~;,{]|$)', content)
+                    or (path.name == 'Procfile' and re.search(r'(?im)^\s*worker\s*:', content))):
+                found.add('background-worker')
+        if path.suffix in SOURCE_EXTENSIONS:
+            if SQLITE_SOURCE.search(content):
+                found.add('sqlite')
+            if LOCAL_WRITE.search(content):
+                found.add('local-files')
         if found:
-            evidence.append(relative.as_posix())
-            if len(evidence) >= 20:
-                break
-    return InfrastructureProfile('sqlite' if evidence else 'unconfirmed', tuple(evidence), scanned)
+            requirements.update(found)
+            if len(evidence) < 20 and relative.as_posix() not in evidence:
+                evidence.append(relative.as_posix())
+    storage = 'sqlite' if 'sqlite' in requirements else 'local-files' if 'local-files' in requirements else 'unconfirmed'
+    return InfrastructureProfile(storage, tuple(evidence), scanned, tuple(sorted(requirements)))
 
 
 def validate_infrastructure(profile: InfrastructureProfile, target: str) -> None:
-    if profile.storage == 'sqlite':
-        raise ValueError(
-            'SQLite 사용이 감지됐습니다 (' + ', '.join(profile.evidence[:3]) + '). '
-            '현재 ' + target + ' 배포는 영속 데이터 저장소와 마이그레이션을 제공하지 않아 데이터 손실 위험이 있습니다. '
-            '이 앱의 자동 배포는 지원되는 데이터 경로가 추가될 때까지 중단합니다.')
+    problems = []
+    if 'sqlite' in profile.requirements or profile.storage == 'sqlite':
+        problems.append('SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다')
+    if 'local-files' in profile.requirements:
+        problems.append('로컬 파일 쓰기에 영속 저장소가 필요합니다')
+    if 'background-worker' in profile.requirements:
+        problems.append('별도 백그라운드 워커가 필요합니다')
+    if problems:
+        raise ValueError('인프라 요구가 감지됐습니다 (' + ', '.join(profile.evidence[:3]) + '): '
+                         + '; '.join(problems) + '. 현재 ' + target
+                         + ' 구성에서는 지원하지 않아 데이터 손실 또는 작업 누락 위험이 있으므로 배포를 중단합니다.')
 
 
 class OpenAIInfrastructurePlanner:

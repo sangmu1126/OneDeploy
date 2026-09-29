@@ -67,6 +67,35 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(profile.storage, 'sqlite')
             self.assertEqual(profile.evidence, ('schema.prisma',))
 
+    def test_detects_uploaded_sqlite_database_without_source_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'data').mkdir()
+            (project / 'data' / 'users.sqlite3').write_bytes(b'SQLite format 3\x00')
+            profile = inspect_infrastructure(project)
+            self.assertIn('sqlite', profile.requirements)
+            self.assertEqual(profile.evidence, ('data/users.sqlite3',))
+
+    def test_detects_required_worker_and_local_file_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'package.json').write_text(json.dumps({
+                'scripts': {'start': 'node server.js', 'worker': 'node worker.js'},
+                'dependencies': {'bullmq': '^5.0.0'}}))
+            (project / 'server.js').write_text('fs.writeFileSync("uploads/photo.jpg", image);')
+            profile = inspect_infrastructure(project)
+            self.assertEqual(set(profile.requirements), {'background-worker', 'local-files'})
+            with self.assertRaisesRegex(ValueError, '워커') as raised:
+                validate_infrastructure(profile, 'aws-ecs-express')
+            self.assertIn('영속 저장소', str(raised.exception))
+
+    def test_detects_procfile_worker_without_runtime_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'Procfile').write_text('web: node server.js\nworker: node worker.js\n')
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.requirements, ('background-worker',))
+
     def test_upload_blocks_sqlite_before_any_deployment_resource(self):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, 'w') as bundle:
