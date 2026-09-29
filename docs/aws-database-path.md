@@ -26,8 +26,12 @@ DB 보안 그룹은 지정한 서비스 보안 그룹에서 포트 5432로 오�
 Secrets Manager 비밀로 두고 원문을 출력하지 않는다. 같은 스택에 DB 전용 ECS 실행 역할도 생성하며,
 기본 ECS 실행 권한에 더해 해당 RDS 비밀 ARN 하나의 `secretsmanager:GetSecretValue`만 허용한다
 ([AWS 태스크 실행 역할 문서](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html)).
-생성 결과와 `--inspect` 출력에는 이 역할의 ARN만 기록한다. 앱 배포에 역할과 비밀 참조를 연결하는
-동작은 아직 구현되지 않았다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
+생성 결과와 `--inspect` 출력에는 이 역할의 ARN만 기록한다. AWS 배포 어댑터의 명시적
+`postgres=PostgresRequest(...)` 경로는 기존 DB를 읽기 전용으로 재검증한 뒤 역할과
+Secrets Manager의 `username`·`password` JSON 키를 ECS 환경에 참조로 연결한다.
+`PGHOST`·`PGPORT`·`PGDATABASE`·`PGSSLMODE`도 설정하고 실제 ECS 리비전의 설정을 대조한다.
+일반 업로드 UI는 아직 이 경로를 호출하지 않으며, 스키마 마이그레이션·DB 읽기/쓰기 검증 전에는
+DB 앱 배포를 계속 차단한다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
 켜고 스택 종료 보호도 적용하므로, 앱 배포 실패·서비스 종료가 데이터를 지우지 않는다. 이 설정은 계속 비용이 발생할 수 있으며,
 DB 폐기는 별도 스냅샷·보호 해제·소유권 검증 절차가 필요하다.
 
@@ -40,8 +44,9 @@ python3 -m onedeploy.postgres --application demo-app --account <AWS_ACCOUNT_ID> 
 # 기존 DB의 소유권·암호화·비공개 설정·서브넷·보안 그룹을 읽기 전용으로 재확인하려면 --inspect 추가
 ```
 
-이 명령은 **DB 리소스만 준비**한다. 앱의 환경변수/비밀 권한, 마이그레이션, DB 읽기·쓰기 검증,
-앱 업데이트·종료와 DB 수명주기 연결은 아직 없다. `--apply`를 실행해도 OneDeploy 제품 UI에서
+이 명령은 **DB 리소스만 준비**한다. 어댑터의 옵션 경로는 앱 접속 설정을 준비하지만,
+마이그레이션, DB 읽기·쓰기 검증, 앱 업데이트·종료와 DB 수명주기 연결은 아직 없다.
+`--apply`를 실행해도 OneDeploy 제품 UI에서
 DB 의존 앱 차단은 해제되지 않는다. `--inspect`는 지정한 AWS 계정과 스택 소유권을 확인하고,
 RDS의 암호화·삭제 보호·비공개 엔드포인트·서브넷, DB 보안 그룹의 5432 인바운드 범위를 대조한다.
 실제 AWS 계정에서 이 생성·점검 경로는 아직 검증하지 않았다.

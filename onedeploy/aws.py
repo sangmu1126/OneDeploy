@@ -27,6 +27,26 @@ class AwsConfigurationError(RuntimeError):
     retryable = False
 
 
+def database_configuration_matches(configuration, database):
+    if database is None:
+        return True
+    container = configuration.get('primaryContainer', {})
+    expected_environment = [
+        {'name': 'PGHOST', 'value': database['endpoint']},
+        {'name': 'PGPORT', 'value': str(database['port'])},
+        {'name': 'PGDATABASE', 'value': 'appdb'},
+        {'name': 'PGSSLMODE', 'value': 'require'}]
+    expected_secrets = [
+        {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
+        {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}]
+    actual_environment = [item for item in container.get('environment', [])
+                          if item.get('name') in {value['name'] for value in expected_environment}]
+    return (configuration.get('executionRoleArn') == database['execution_role_arn']
+            and container.get('secrets') == expected_secrets
+            and len(actual_environment) == len(expected_environment)
+            and all(item in actual_environment for item in expected_environment))
+
+
 @dataclass(frozen=True)
 class AwsSettings:
     region: str = ''
@@ -158,12 +178,31 @@ class AwsExpressAdapter:
             raise AwsConfigurationError('ECS 인프라 역할 ARN이 예상과 다릅니다.')
         return account, repository, execution, infrastructure
 
-    def deploy(self, project, plan, attempt_id, environment=None):
+    def deploy(self, project, plan, attempt_id, environment=None, postgres=None):
         if not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id):
             raise ValueError('Invalid deployment attempt ID')
         if plan.target != 'aws-ecs-express':
             raise ValueError('AWS ECS Express adapter requires an aws-ecs-express plan')
-        environment = validate_environment(environment, plan.required_env)
+        database = None
+        if postgres is not None:
+            from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
+            if not isinstance(postgres, PostgresRequest):
+                raise ValueError('PostgreSQL 연결 요청이 올바르지 않습니다.')
+            postgres.validate()
+            if (self.settings.expected_account != postgres.account
+                    or self.settings.region != postgres.region
+                    or self.settings.service_security_group != postgres.service_security_group):
+                raise AwsConfigurationError('PostgreSQL 계정·리전·서비스 보안 그룹이 AWS 배포 대상과 다릅니다.')
+            managed_names = {'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSSLMODE'}
+            if managed_names.intersection(environment or {}):
+                raise ValueError('PostgreSQL 접속 환경변수는 배포 시스템이 설정합니다.')
+            environment = validate_environment(environment, [name for name in plan.required_env
+                                                               if name not in managed_names])
+            database = AwsPostgresProvisioner(postgres).inspect_current()
+        else:
+            environment = validate_environment(environment, plan.required_env)
+        if self.existing is not None and self.existing.get('database') != database:
+            raise AwsConfigurationError('기존 AWS 서비스의 PostgreSQL 연결 구성이 배포 기록과 다릅니다.')
         self.sensitive.extend(environment.values())
         self.validate_service_security_group()
         account, repository, execution, infrastructure = self.prepare_infrastructure()
@@ -203,6 +242,8 @@ class AwsExpressAdapter:
             if (self.settings.service_security_group and self.settings.service_security_group not in
                     previous_configs[0].get('networkConfiguration', {}).get('securityGroups', [])):
                 raise AwsConfigurationError('기존 ECS 서비스의 보안 그룹 구성이 배포 기록과 다릅니다.')
+            if not database_configuration_matches(previous_configs[0], database):
+                raise AwsConfigurationError('기존 ECS 서비스의 PostgreSQL 연결 구성이 배포 기록과 다릅니다.')
             previous_task_definition = previous_configs[0].get('taskDefinitionArn')
             deployments = json.loads(self.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
                                                '--service', service], private=True, quiet=True))
@@ -242,8 +283,18 @@ class AwsExpressAdapter:
                    'primaryContainer': {'image': self.image, 'containerPort': plan.port,
                                         'environment': [{'name': 'PORT', 'value': str(plan.port)}] +
                                                        [{'name': key, 'value': value} for key, value in environment.items()]}}
+        if database is not None:
+            payload['executionRoleArn'] = database['execution_role_arn']
+            payload['primaryContainer']['environment'].extend([
+                {'name': 'PGHOST', 'value': database['endpoint']},
+                {'name': 'PGPORT', 'value': str(database['port'])},
+                {'name': 'PGDATABASE', 'value': 'appdb'},
+                {'name': 'PGSSLMODE', 'value': 'require'}])
+            payload['primaryContainer']['secrets'] = [
+                {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
+                {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}]
         if self.existing is None:
-            payload.update({'serviceName': service, 'executionRoleArn': execution,
+            payload.update({'serviceName': service, 'executionRoleArn': payload.get('executionRoleArn', execution),
                             'infrastructureRoleArn': infrastructure,
                             'scalingTarget': {'minTaskCount': 1, 'maxTaskCount': 1},
                             'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
@@ -316,6 +367,8 @@ class AwsExpressAdapter:
                     and self.settings.service_security_group not in
                     active[0].get('networkConfiguration', {}).get('securityGroups', [])):
                 raise AwsConfigurationError('ECS 서비스에 추가 보안 그룹이 적용되지 않았습니다.')
+            if settled and not database_configuration_matches(active[0], database):
+                raise AwsConfigurationError('ECS 서비스의 PostgreSQL 역할·비밀·접속 설정이 예상과 다릅니다.')
             if state == 'ACTIVE' and paths and deployment_ready and settled:
                 break
             if state in {'FAILED', 'INACTIVE'}:
@@ -342,6 +395,7 @@ class AwsExpressAdapter:
                 'region': self.settings.region, 'account': account, 'public': True,
                 'service_security_group': self.settings.service_security_group,
                 'owner_attempt': owner_attempt, 'images': [*previous_images, self.image],
+                **({'database': database} if database is not None else {}),
                 'task_definition_arn': task_definition,
                 'previous_task_definition_arn': previous_task_definition}
 

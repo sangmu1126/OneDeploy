@@ -6,8 +6,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings, database_configuration_matches
 from onedeploy.core import analyze
+from onedeploy.postgres import PostgresRequest
 
 
 ACCOUNT = '123456789012'
@@ -113,6 +114,94 @@ class AwsTests(unittest.TestCase):
             result = self.adapter.deploy(self.project, self.plan, ATTEMPT)
         self.assertEqual(submitted[0]['networkConfiguration'], {'securityGroups': [SERVICE_GROUP]})
         self.assertEqual(result['service_security_group'], SERVICE_GROUP)
+
+    def test_postgres_binding_uses_verified_secret_and_role(self):
+        request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
+                                  ('subnet-12345678', 'subnet-87654321'), SERVICE_GROUP)
+        database = {'stack_id': f'arn:aws:cloudformation:{REGION}:{ACCOUNT}:stack/onedeploy-db-demo-app/id',
+                    'database_arn': f'arn:aws:rds:{REGION}:{ACCOUNT}:db:onedeploy-demo-app',
+                    'database_id': 'onedeploy-demo-app',
+                    'endpoint': f'onedeploy-demo-app.example.{REGION}.rds.amazonaws.com',
+                    'port': 5432, 'secret_arn': f'arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:managed-id',
+                    'execution_role_arn': f'arn:aws:iam::{ACCOUNT}:role/db-execution'}
+        adapter = AwsExpressAdapter(lambda *_: None,
+                                    AwsSettings(REGION, expected_account=ACCOUNT,
+                                                service_security_group=SERVICE_GROUP))
+        image = REPOSITORY + ':' + ATTEMPT
+        host = f'on-853b928a17804449916e1acb4141349b.ecs.{REGION}.on.aws'
+        submitted = []
+        def aws(args, **_kwargs):
+            if args[:2] == ['ecr', 'get-login-password']:
+                return 'synthetic-password'
+            if args[:2] == ['ecs', 'create-express-gateway-service']:
+                spec = Path(args[args.index('--cli-input-json') + 1].removeprefix('file://'))
+                submitted.append(json.loads(spec.read_text()))
+                return json.dumps({'service': {'serviceArn': ARN, 'currentDeployment': 'deployment-1'}})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                return json.dumps({'service': {'status': {'statusCode': 'ACTIVE'},
+                    'activeConfigurations': [{'executionRoleArn': database['execution_role_arn'],
+                        'primaryContainer': {'image': image,
+                            'environment': submitted[0]['primaryContainer']['environment'],
+                            'secrets': submitted[0]['primaryContainer']['secrets']},
+                        'networkConfiguration': {'securityGroups': [SERVICE_GROUP]},
+                        'taskDefinitionArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:1',
+                        'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': host}]}]}})
+            if args[:2] == ['ecs', 'describe-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'status': 'SUCCESSFUL'}]})
+            raise AssertionError(args)
+        def command(args, **_kwargs):
+            if args[:3] == ['docker', 'context', 'inspect']:
+                return 'unix:///var/run/docker.sock'
+            return ''
+        self.plan.required_env = ['PGHOST', 'PGPASSWORD']
+        with patch('onedeploy.postgres.AwsPostgresProvisioner.inspect_current', return_value=database), \
+                patch.object(adapter, 'validate_service_security_group'), \
+                patch.object(adapter, 'prepare_infrastructure',
+                             return_value=(ACCOUNT, REPOSITORY, 'base-execution', 'infra')), \
+                patch('onedeploy.aws.ImageBuilder.build'), \
+                patch.object(adapter, 'command', side_effect=command), \
+                patch.object(adapter, 'aws', side_effect=aws), \
+                patch.object(adapter, 'verify'):
+            result = adapter.deploy(self.project, self.plan, ATTEMPT, postgres=request)
+        self.assertEqual(result['database'], database)
+        self.assertEqual(submitted[0]['executionRoleArn'], database['execution_role_arn'])
+        self.assertEqual(submitted[0]['primaryContainer']['secrets'], [
+            {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
+            {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}])
+        self.assertNotIn('password', str(submitted[0]['primaryContainer']['environment']).lower())
+
+    def test_postgres_binding_rejects_wrong_target_before_build(self):
+        request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
+                                  ('subnet-12345678', 'subnet-87654321'), SERVICE_GROUP)
+        with patch('onedeploy.aws.ImageBuilder.build') as build:
+            with self.assertRaisesRegex(AwsConfigurationError, '계정·리전'):
+                self.adapter.deploy(self.project, self.plan, ATTEMPT, postgres=request)
+            build.assert_not_called()
+
+    def test_postgres_release_cannot_drop_existing_binding(self):
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(REGION),
+                                    existing={'database': {'database_id': 'onedeploy-demo-app'}})
+        with patch('onedeploy.aws.ImageBuilder.build') as build:
+            with self.assertRaisesRegex(AwsConfigurationError, 'PostgreSQL 연결 구성'):
+                adapter.deploy(self.project, self.plan, ATTEMPT)
+            build.assert_not_called()
+
+    def test_postgres_configuration_check_rejects_duplicate_host(self):
+        database = {'endpoint': 'db.example', 'port': 5432, 'secret_arn':
+                    f'arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:managed-id',
+                    'execution_role_arn': f'arn:aws:iam::{ACCOUNT}:role/db-execution'}
+        configuration = {'executionRoleArn': database['execution_role_arn'],
+                         'primaryContainer': {'environment': [
+                             {'name': 'PGHOST', 'value': database['endpoint']},
+                             {'name': 'PGPORT', 'value': '5432'},
+                             {'name': 'PGDATABASE', 'value': 'appdb'},
+                             {'name': 'PGSSLMODE', 'value': 'require'}],
+                             'secrets': [
+                                 {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
+                                 {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}]}}
+        self.assertTrue(database_configuration_matches(configuration, database))
+        configuration['primaryContainer']['environment'].append({'name': 'PGHOST', 'value': 'wrong'})
+        self.assertFalse(database_configuration_matches(configuration, database))
 
     def test_release_update_rejects_changed_service_group_before_build(self):
         prior = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
