@@ -61,6 +61,35 @@
           {"Key": "onedeploy-app", "Value": {"Ref": "ApplicationId"}}
         ]
       }
+    },
+    "DatabaseExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "ManagedPolicyArns": ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
+        "Policies": [{
+          "PolicyName": "ReadManagedDatabaseSecret",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Action": "secretsmanager:GetSecretValue",
+              "Resource": {"Fn::GetAtt": ["Database", "MasterUserSecret.SecretArn"]}
+            }]
+          }
+        }],
+        "Tags": [
+          {"Key": "onedeploy-managed", "Value": "true"},
+          {"Key": "onedeploy-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
     }
   },
   "Outputs": {
@@ -69,6 +98,7 @@
     "EndpointAddress": {"Value": {"Fn::GetAtt": ["Database", "Endpoint.Address"]}},
     "EndpointPort": {"Value": {"Fn::GetAtt": ["Database", "Endpoint.Port"]}},
     "SecretArn": {"Value": {"Fn::GetAtt": ["Database", "MasterUserSecret.SecretArn"]}},
+    "DatabaseExecutionRoleArn": {"Value": {"Fn::GetAtt": ["DatabaseExecutionRole", "Arn"]}},
     "DatabaseSecurityGroupId": {"Value": {"Ref": "DatabaseSecurityGroup"}}
   }
 }

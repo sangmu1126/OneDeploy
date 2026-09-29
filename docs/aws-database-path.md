@@ -23,7 +23,11 @@
 검증한다. 별도의 `onedeploy.postgres` 명령은 지정한 기본 VPC의 두 가용 영역을 확인하고,
 PostgreSQL 인스턴스·DB 보안 그룹·서브넷 그룹을 **명시적 `--apply`일 때만** 새 스택으로 생성한다.
 DB 보안 그룹은 지정한 서비스 보안 그룹에서 포트 5432로 오는 연결만 허용한다. RDS 암호는 관리형
-Secrets Manager 비밀로 두고 원문을 출력하지 않는다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
+Secrets Manager 비밀로 두고 원문을 출력하지 않는다. 같은 스택에 DB 전용 ECS 실행 역할도 생성하며,
+기본 ECS 실행 권한에 더해 해당 RDS 비밀 ARN 하나의 `secretsmanager:GetSecretValue`만 허용한다
+([AWS 태스크 실행 역할 문서](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html)).
+생성 결과와 `--inspect` 출력에는 이 역할의 ARN만 기록한다. 앱 배포에 역할과 비밀 참조를 연결하는
+동작은 아직 구현되지 않았다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
 켜고 스택 종료 보호도 적용하므로, 앱 배포 실패·서비스 종료가 데이터를 지우지 않는다. 이 설정은 계속 비용이 발생할 수 있으며,
 DB 폐기는 별도 스냅샷·보호 해제·소유권 검증 절차가 필요하다.
 

@@ -16,6 +16,7 @@ DB_GROUP = 'sg-44444444'
 STACK = f'arn:aws:cloudformation:{REGION}:{ACCOUNT}:stack/onedeploy-db-demo-app/stack-id'
 DB_ARN = f'arn:aws:rds:{REGION}:{ACCOUNT}:db:onedeploy-demo-app'
 SECRET = f'arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:rds-managed-secret'
+ROLE = f'arn:aws:iam::{ACCOUNT}:role/onedeploy-db-demo-app-execution'
 HOST = f'onedeploy-demo-app.abc.{REGION}.rds.amazonaws.com'
 
 
@@ -38,6 +39,14 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(template['Resources']['DatabaseSecurityGroup']['Properties']
                          ['SecurityGroupIngress'][0]['SourceSecurityGroupId'],
                          {'Ref': 'ServiceSecurityGroupId'})
+        role = template['Resources']['DatabaseExecutionRole']['Properties']
+        self.assertEqual(role['AssumeRolePolicyDocument']['Statement'][0]['Principal'],
+                         {'Service': 'ecs-tasks.amazonaws.com'})
+        self.assertEqual(role['Policies'][0]['PolicyDocument']['Statement'], [{
+            'Effect': 'Allow', 'Action': 'secretsmanager:GetSecretValue',
+            'Resource': {'Fn::GetAtt': ['Database', 'MasterUserSecret.SecretArn']}}])
+        self.assertEqual(template['Outputs']['DatabaseExecutionRoleArn']['Value'],
+                         {'Fn::GetAtt': ['DatabaseExecutionRole', 'Arn']})
 
     def test_preflight_checks_account_vpc_group_and_two_azs(self):
         calls = []
@@ -78,6 +87,7 @@ class PostgresTests(unittest.TestCase):
                 payload = json.loads(spec.read_text())
                 self.assertEqual(payload['StackName'], self.request.stack_name)
                 self.assertTrue(payload['EnableTerminationProtection'])
+                self.assertEqual(payload['Capabilities'], ['CAPABILITY_IAM'])
                 self.assertEqual(json.loads(payload['TemplateBody'])['Resources']['Database']
                                  ['Properties']['PubliclyAccessible'], False)
                 return json.dumps({'StackId': STACK})
@@ -98,7 +108,8 @@ class PostgresTests(unittest.TestCase):
                  'Outputs': [{'OutputKey': key, 'OutputValue': value} for key, value in {
                      'DatabaseIdentifier': 'onedeploy-demo-app', 'DatabaseArn': DB_ARN,
                      'EndpointAddress': HOST, 'EndpointPort': '5432',
-                     'SecretArn': SECRET, 'DatabaseSecurityGroupId': DB_GROUP}.items()]}
+                     'SecretArn': SECRET, 'DatabaseExecutionRoleArn': ROLE,
+                     'DatabaseSecurityGroupId': DB_GROUP}.items()]}
         db = {'DBInstanceIdentifier': 'onedeploy-demo-app', 'DBInstanceArn': DB_ARN,
               'DBInstanceStatus': 'available', 'Engine': 'postgres', 'DBName': 'appdb',
               'PubliclyAccessible': False, 'DeletionProtection': True, 'StorageEncrypted': True,
@@ -119,6 +130,7 @@ class PostgresTests(unittest.TestCase):
         with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
             result = self.provisioner.inspect(STACK)
             self.assertEqual(result['secret_arn'], SECRET)
+            self.assertEqual(result['execution_role_arn'], ROLE)
             db['PubliclyAccessible'] = True
             with self.assertRaisesRegex(AwsConfigurationError, '비공개'):
                 self.provisioner.inspect(STACK)

@@ -100,6 +100,7 @@ class AwsPostgresProvisioner:
         template = TEMPLATE.read_text(encoding='utf-8')
         payload = {'StackName': req.stack_name, 'TemplateBody': template,
                    'EnableTerminationProtection': True,
+                   'Capabilities': ['CAPABILITY_IAM'],
                    'Parameters': [
                        {'ParameterKey': 'ApplicationId', 'ParameterValue': req.application_id},
                        {'ParameterKey': 'VpcId', 'ParameterValue': req.vpc_id},
@@ -151,11 +152,14 @@ class AwsPostgresProvisioner:
         outputs = {item.get('OutputKey'): item.get('OutputValue') for item in stacks[0].get('Outputs', [])}
         db_arn = f'arn:aws:rds:{req.region}:{req.account}:db:{req.database_id}'
         secret_arn = outputs.get('SecretArn', '')
+        execution_role_arn = outputs.get('DatabaseExecutionRoleArn', '')
         group_id = outputs.get('DatabaseSecurityGroupId', '')
         if (tags.get('onedeploy-managed') != 'true' or tags.get('onedeploy-app') != req.application_id
                 or outputs.get('DatabaseIdentifier') != req.database_id or outputs.get('DatabaseArn') != db_arn
                 or not isinstance(secret_arn, str) or not secret_arn.startswith(
                     f'arn:aws:secretsmanager:{req.region}:{req.account}:secret:')
+                or not isinstance(execution_role_arn, str) or not re.fullmatch(
+                    rf'arn:aws:iam::{req.account}:role/[A-Za-z0-9_+=,.@/-]+', execution_role_arn)
                 or not isinstance(group_id, str) or not re.fullmatch(r'sg-[a-f0-9]{8,17}', group_id)
                 or not isinstance(outputs.get('EndpointAddress'), str)
                 or not outputs['EndpointAddress'].endswith(f'.{req.region}.rds.amazonaws.com')
@@ -197,6 +201,7 @@ class AwsPostgresProvisioner:
         return {'stack_id': stack_id, 'database_arn': db_arn, 'database_id': req.database_id,
                 'endpoint': outputs['EndpointAddress'], 'port': 5432,
                 'secret_arn': secret_arn, 'database_security_group': group_id,
+                'execution_role_arn': execution_role_arn,
                 'service_security_group': req.service_security_group,
                 'vpc_id': req.vpc_id, 'subnet_ids': list(req.subnet_ids),
                 'status': 'available', 'deletion_protection': True, 'retained_on_stack_delete': True}
