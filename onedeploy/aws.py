@@ -383,3 +383,362 @@ class AwsExpressAdapter:
                 connection.close()
         return last_status
 
+    def cleanup_failure(self, attempt_id):
+        service_inactive = not self.service_created
+        if self.service_created and self.service_arn:
+            try:
+                if (not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id)
+                        or not re.fullmatch(r'arn:aws:ecs:' + re.escape(self.settings.region)
+                                            + r':\d{12}:service/default/onedeploy-' + re.escape(attempt_id),
+                                            self.service_arn)):
+                    raise AwsConfigurationError('정리할 ECS 서비스 ARN이 예상과 다릅니다.')
+                def describe_owned():
+                    described = json.loads(self.aws(['ecs', 'describe-express-gateway-service',
+                        '--service-arn', self.service_arn, '--include', 'TAGS'], private=True))['service']
+                    tags = {item.get('key'): item.get('value') for item in described.get('tags', [])}
+                    if (described.get('serviceArn') != self.service_arn
+                            or tags.get('onedeploy-managed') != 'true'
+                            or tags.get('onedeploy-attempt') != attempt_id):
+                        raise AwsConfigurationError('정리할 ECS 서비스의 소유권을 확인할 수 없습니다.')
+                    return described
+                described = describe_owned()
+                status = described.get('status', {}).get('statusCode')
+                if status == 'ACTIVE':
+                    self.aws(['ecs', 'delete-express-gateway-service', '--service-arn', self.service_arn], timeout=300)
+                elif status not in {'DRAINING', 'INACTIVE'}:
+                    raise AwsConfigurationError('정리할 ECS 서비스 상태를 확인할 수 없습니다.')
+                for _ in range(180):
+                    if describe_owned().get('status', {}).get('statusCode') == 'INACTIVE':
+                        service_inactive = True
+                        break
+                    time.sleep(5)
+                if not service_inactive:
+                    self.event('cleanup', 'ECS 서비스가 아직 종료되지 않아 ECR 이미지를 보존합니다: ' + self.service_arn)
+            except Exception:
+                self.event('cleanup', 'ECS Express 서비스 정리 확인 필요: ' + self.service_arn)
+        if self.updated_existing and self.image:
+            self.event('cleanup', '기존 ECS 서비스의 롤백 확인 전 새 ECR 이미지를 보존합니다: ' + self.image)
+        elif self.image_pushed and self.image:
+            if not service_inactive:
+                self.event('cleanup', 'ECS 서비스 종료 확인 전 ECR 이미지를 보존합니다: ' + self.image)
+            else:
+                try:
+                    if (not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id)
+                            or not re.fullmatch(r'\d{12}\.dkr\.ecr\.' + re.escape(self.settings.region)
+                                                + r'\.amazonaws\.com/onedeploy-managed:' + re.escape(attempt_id),
+                                                self.image)):
+                        raise AwsConfigurationError('정리할 ECR 이미지가 예상과 다릅니다.')
+                    deleted = json.loads(self.aws(['ecr', 'batch-delete-image', '--repository-name',
+                        'onedeploy-managed', '--image-ids', 'imageTag=' + attempt_id], timeout=60))
+                    failures = deleted.get('failures', [])
+                    if failures and not all(item.get('failureCode') == 'ImageNotFound' for item in failures):
+                        raise RuntimeError('ECR 이미지 태그 삭제 결과를 확인할 수 없습니다.')
+                except Exception:
+                    self.event('cleanup', 'ECR 이미지 정리 확인 필요: ' + self.image)
+        if self.image_built and self.image:
+            try:
+                self.command(['docker', 'image', 'rm', self.image], timeout=30)
+            except Exception:
+                self.event('cleanup', '로컬 이미지 정리 확인 필요: ' + self.image)
+
+    def cleanup_abandoned_image(self, result, candidate_image, attempt_id):
+        """Remove one failed-update tag only after the owned service is back on its prior image."""
+        self.settings.validate()
+        account = result.get('account', '')
+        stored_service = result.get('service', '')
+        owner_attempt = result.get('owner_attempt') or (
+            stored_service.removeprefix('onedeploy-') if isinstance(stored_service, str) else '')
+        service = 'onedeploy-' + owner_attempt
+        arn = f'arn:aws:ecs:{self.settings.region}:{account}:service/default/{service}'
+        repository = f'{account}.dkr.ecr.{self.settings.region}.amazonaws.com/onedeploy-managed'
+        if (not isinstance(account, str) or not re.fullmatch(r'\d{12}', account)
+                or not isinstance(owner_attempt, str)
+                or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', owner_attempt)
+                or not isinstance(attempt_id, str)
+                or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id)
+                or stored_service != service or result.get('service_arn') != arn
+                or result.get('region') != self.settings.region or result.get('target') != 'aws-ecs-express'
+                or not isinstance(result.get('image'), str)
+                or not re.fullmatch(re.escape(repository) + r':[a-f0-9]{16}-a[1-3]', result['image'])
+                or candidate_image != repository + ':' + attempt_id or candidate_image == result['image']):
+            raise AwsConfigurationError('정리할 AWS 이미지 또는 서비스 정보가 예상과 다릅니다.')
+        self.validate_url(result.get('url', ''), service, self.settings.region)
+        current_account = json.loads(self.aws(['sts', 'get-caller-identity'], private=True, quiet=True)).get('Account')
+        if current_account != account:
+            raise AwsConfigurationError('현재 AWS 계정이 배포 계정과 다릅니다.')
+        described = json.loads(self.aws(['ecs', 'describe-express-gateway-service', '--service-arn', arn,
+                                         '--include', 'TAGS'], private=True, quiet=True)).get('service', {})
+        tags = {item.get('key'): item.get('value') for item in described.get('tags', [])}
+        active_images = {configuration.get('primaryContainer', {}).get('image')
+                         for configuration in described.get('activeConfigurations', [])}
+        if (described.get('serviceArn') != arn or described.get('status', {}).get('statusCode') != 'ACTIVE'
+                or described.get('currentDeployment') or active_images != {result['image']}
+                or tags.get('onedeploy-managed') != 'true'
+                or tags.get('onedeploy-attempt') != owner_attempt):
+            raise AwsConfigurationError('기존 이미지의 단독 실행과 ECS 서비스 소유권을 확인할 수 없습니다.')
+        deployments = json.loads(self.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
+                                           '--service', service], private=True, quiet=True))
+        items = deployments.get('serviceDeployments', [])
+        latest = max(items, key=lambda item: item.get('createdAt', '')) if items else {}
+        if latest.get('status') not in {'SUCCESSFUL', 'ROLLBACK_SUCCESSFUL'}:
+            raise AwsConfigurationError('ECS 배포가 아직 완료되지 않아 이미지를 삭제하지 않았습니다.')
+        deleted = json.loads(self.aws(['ecr', 'batch-delete-image', '--repository-name', 'onedeploy-managed',
+                                      '--image-ids', 'imageTag=' + attempt_id], private=True, timeout=60))
+        failures = deleted.get('failures', [])
+        if failures and not all(item.get('failureCode') == 'ImageNotFound' for item in failures):
+            raise RuntimeError('실패한 ECR 이미지 태그를 삭제하지 못했습니다.')
+        return {'image': candidate_image, 'state': 'deleted'}
+
+    def request_update_rollback(self, result, candidate_image, previous_deployment_arn, attempt_id):
+        """Stop only this owned, ongoing ECS deployment after checking both revision images."""
+        self.settings.validate()
+        account = result.get('account', '')
+        owner_attempt = result.get('owner_attempt') or result.get('service', '').removeprefix('onedeploy-')
+        service = 'onedeploy-' + owner_attempt
+        service_arn = f'arn:aws:ecs:{self.settings.region}:{account}:service/default/{service}'
+        repository = f'{account}.dkr.ecr.{self.settings.region}.amazonaws.com/onedeploy-managed'
+        deployment_prefix = f'arn:aws:ecs:{self.settings.region}:{account}:service-deployment/default/{service}/'
+        revision_prefix = f'arn:aws:ecs:{self.settings.region}:{account}:service-revision/default/{service}/'
+        if (not isinstance(account, str) or not re.fullmatch(r'\d{12}', account)
+                or not isinstance(owner_attempt, str)
+                or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', owner_attempt)
+                or not isinstance(attempt_id, str)
+                or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id)
+                or result.get('service') != service or result.get('service_arn') != service_arn
+                or result.get('target') != 'aws-ecs-express' or result.get('region') != self.settings.region
+                or not isinstance(result.get('image'), str)
+                or not re.fullmatch(re.escape(repository) + r':[a-f0-9]{16}-a[1-3]', result['image'])
+                or candidate_image != repository + ':' + attempt_id
+                or not isinstance(previous_deployment_arn, str)
+                or not previous_deployment_arn.startswith(deployment_prefix)):
+            raise AwsConfigurationError('롤백할 AWS 배포 정보가 예상과 다릅니다.')
+        self.validate_url(result.get('url', ''), service, self.settings.region)
+        account_now = json.loads(self.aws(['sts', 'get-caller-identity'], private=True, quiet=True)).get('Account')
+        if account_now != account:
+            raise AwsConfigurationError('현재 AWS 계정이 배포 계정과 다릅니다.')
+        service_data = json.loads(self.aws(['ecs', 'describe-express-gateway-service',
+                                            '--service-arn', service_arn, '--include', 'TAGS'],
+                                           private=True, quiet=True)).get('service', {})
+        tags = {item.get('key'): item.get('value') for item in service_data.get('tags', [])}
+        if (service_data.get('serviceArn') != service_arn
+                or service_data.get('status', {}).get('statusCode') != 'ACTIVE'
+                or tags.get('onedeploy-managed') != 'true'
+                or tags.get('onedeploy-attempt') != owner_attempt):
+            raise AwsConfigurationError('ECS 서비스 소유권을 확인할 수 없습니다.')
+        listed = json.loads(self.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
+                                      '--service', service], private=True, quiet=True))
+        items = listed.get('serviceDeployments', [])
+        latest = max(items, key=lambda item: item.get('createdAt', '')) if items else {}
+        deployment_arn = latest.get('serviceDeploymentArn', '')
+        status = latest.get('status')
+        if (not isinstance(deployment_arn, str) or not deployment_arn.startswith(deployment_prefix)
+                or deployment_arn == previous_deployment_arn
+                or service_data.get('currentDeployment') != deployment_arn
+                or status not in {'PENDING', 'IN_PROGRESS', 'ROLLBACK_REQUESTED', 'ROLLBACK_IN_PROGRESS'}):
+            raise AwsConfigurationError('롤백할 새 ECS 배포가 진행 중인지 확인할 수 없습니다.')
+        details = json.loads(self.aws(['ecs', 'describe-service-deployments',
+                                       '--service-deployment-arns', deployment_arn], private=True, quiet=True))
+        deployments = details.get('serviceDeployments', [])
+        if len(deployments) != 1 or deployments[0].get('serviceArn') != service_arn:
+            raise AwsConfigurationError('새 ECS 배포의 서비스 소유권을 확인할 수 없습니다.')
+        detail = deployments[0]
+        sources = detail.get('sourceServiceRevisions', [])
+        target_arn = detail.get('targetServiceRevision', {}).get('arn')
+        source_arn = sources[0].get('arn') if len(sources) == 1 else None
+        if (detail.get('serviceDeploymentArn') != deployment_arn or detail.get('status') != status
+                or not isinstance(target_arn, str) or not target_arn.startswith(revision_prefix)
+                or not isinstance(source_arn, str) or not source_arn.startswith(revision_prefix)
+                or source_arn == target_arn):
+            raise AwsConfigurationError('이전·새 ECS 서비스 리비전을 확인할 수 없습니다.')
+        revisions = json.loads(self.aws(['ecs', 'describe-service-revisions',
+                                         '--service-revision-arns', source_arn, target_arn],
+                                        private=True, quiet=True)).get('serviceRevisions', [])
+        by_arn = {item.get('serviceRevisionArn'): item for item in revisions}
+        if set(by_arn) != {source_arn, target_arn} or any(
+                item.get('serviceArn') != service_arn for item in revisions):
+            raise AwsConfigurationError('ECS 서비스 리비전의 소유권을 확인할 수 없습니다.')
+        for revision_arn, expected_image in ((source_arn, result['image']), (target_arn, candidate_image)):
+            task_definition = by_arn[revision_arn].get('taskDefinition', '')
+            if not isinstance(task_definition, str) or not re.fullmatch(
+                    rf'arn:aws:ecs:{re.escape(self.settings.region)}:{account}:task-definition/[A-Za-z0-9_-]+:\d+',
+                    task_definition):
+                raise AwsConfigurationError('ECS 태스크 정의 ARN이 예상과 다릅니다.')
+            task = json.loads(self.aws(['ecs', 'describe-task-definition', '--task-definition', task_definition],
+                                       private=True, quiet=True)).get('taskDefinition', {})
+            containers = task.get('containerDefinitions', [])
+            if (task.get('taskDefinitionArn') != task_definition or len(containers) != 1
+                    or containers[0].get('name') != 'Main'
+                    or containers[0].get('image') != expected_image):
+                raise AwsConfigurationError('ECS 롤백 대상 이미지가 작업 기록과 다릅니다.')
+        if status in {'ROLLBACK_REQUESTED', 'ROLLBACK_IN_PROGRESS'}:
+            return {'service_deployment_arn': deployment_arn, 'state': 'already_requested'}
+        stopped = json.loads(self.aws(['ecs', 'stop-service-deployment', '--service-deployment-arn', deployment_arn,
+                                       '--stop-type', 'ROLLBACK'], timeout=60, private=True))
+        if stopped.get('serviceDeploymentArn') != deployment_arn:
+            raise AwsConfigurationError('AWS 롤백 요청의 배포 ARN이 예상과 다릅니다.')
+        return {'service_deployment_arn': deployment_arn, 'state': 'requested'}
+
+    def rollback_release(self, current, previous, health_path, checkpoint=None):
+        """Redeploy the previous managed task definition on the same Express service."""
+        self.settings.validate()
+        account = current.get('account', '')
+        owner_attempt = current.get('owner_attempt') or current.get('service', '').removeprefix('onedeploy-')
+        service = 'onedeploy-' + owner_attempt
+        arn = f'arn:aws:ecs:{self.settings.region}:{account}:service/default/{service}'
+        repository = f'{account}.dkr.ecr.{self.settings.region}.amazonaws.com/onedeploy-managed'
+        task_prefix = f'arn:aws:ecs:{self.settings.region}:{account}:task-definition/'
+        task_arn = previous.get('task_definition_arn') or current.get('previous_task_definition_arn')
+        if (not isinstance(account, str) or not re.fullmatch(r'\d{12}', account)
+                or not isinstance(owner_attempt, str)
+                or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', owner_attempt)
+                or current.get('service') != service or current.get('service_arn') != arn
+                or current.get('region') != self.settings.region or current.get('target') != 'aws-ecs-express'
+                or any(previous.get(key) != current.get(key)
+                       for key in ('service', 'service_arn', 'region', 'account', 'target', 'url'))
+                or not isinstance(current.get('image'), str) or not isinstance(previous.get('image'), str)
+                or not re.fullmatch(re.escape(repository) + r':[a-f0-9]{16}-a[1-3]', current['image'])
+                or not re.fullmatch(re.escape(repository) + r':[a-f0-9]{16}-a[1-3]', previous['image'])
+                or previous['image'] == current['image']
+                or previous['image'] not in (current.get('images') or [])
+                or not isinstance(task_arn, str) or not task_arn.startswith(task_prefix)
+                or not re.fullmatch(r'[A-Za-z0-9_-]+:\d+', task_arn.removeprefix(task_prefix))
+                or not isinstance(health_path, str) or not health_path.startswith('/')
+                or '?' in health_path or '#' in health_path):
+            raise AwsConfigurationError('이전 AWS 릴리스의 롤백 정보가 예상과 다릅니다.')
+        self.validate_url(current.get('url', ''), service, self.settings.region)
+        caller = json.loads(self.aws(['sts', 'get-caller-identity'], private=True, quiet=True)).get('Account')
+        if caller != account:
+            raise AwsConfigurationError('현재 AWS 계정이 배포 계정과 다릅니다.')
+        described = json.loads(self.aws(['ecs', 'describe-express-gateway-service',
+                                         '--service-arn', arn, '--include', 'TAGS'], private=True, quiet=True))['service']
+        tags = {item.get('key'): item.get('value') for item in described.get('tags', [])}
+        configs = described.get('activeConfigurations', [])
+        if (described.get('serviceArn') != arn or described.get('status', {}).get('statusCode') != 'ACTIVE'
+                or described.get('currentDeployment') or len(configs) != 1
+                or configs[0].get('primaryContainer', {}).get('image') != current['image']
+                or tags.get('onedeploy-managed') != 'true'
+                or tags.get('onedeploy-attempt') != owner_attempt):
+            raise AwsConfigurationError('현재 ECS 릴리스의 소유권과 완료 상태를 확인할 수 없습니다.')
+        task = json.loads(self.aws(['ecs', 'describe-task-definition', '--task-definition', task_arn],
+                                   private=True, quiet=True)).get('taskDefinition', {})
+        containers = task.get('containerDefinitions', [])
+        if (task.get('taskDefinitionArn') != task_arn or len(containers) != 1
+                or containers[0].get('name') != 'Main'
+                or containers[0].get('image') != previous['image']):
+            raise AwsConfigurationError('이전 태스크 정의의 이미지가 릴리스 기록과 다릅니다.')
+        listed = json.loads(self.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
+                                      '--service', service], private=True, quiet=True))
+        items = listed.get('serviceDeployments', [])
+        latest = max(items, key=lambda item: item.get('createdAt', '')) if items else {}
+        previous_deployment_arn = latest.get('serviceDeploymentArn')
+        if not previous_deployment_arn or latest.get('status') != 'SUCCESSFUL':
+            raise AwsConfigurationError('현재 ECS 배포가 완료되지 않아 롤백을 시작하지 않았습니다.')
+        payload = {'serviceArn': arn, 'taskDefinitionArn': task_arn, 'healthCheckPath': health_path}
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='onedeploy-aws-rollback-', encoding='utf-8') as spec:
+            json.dump(payload, spec)
+            spec.flush()
+            if checkpoint:
+                checkpoint(release_rollback_submitted=True,
+                           release_rollback_previous_deployment_arn=previous_deployment_arn,
+                           release_rollback_submitted_at=datetime.now(timezone.utc).isoformat())
+            self.event('rollback', '이전 ECS 태스크 정의를 같은 서비스에 배포합니다.')
+            updated = json.loads(self.aws(['ecs', 'update-express-gateway-service',
+                                           '--cli-input-json', 'file://' + spec.name], timeout=600, private=True))
+        if updated.get('service', {}).get('serviceArn') != arn:
+            raise AwsConfigurationError('롤백 요청의 ECS 서비스 ARN이 예상과 다릅니다.')
+        new_deployment_arn = updated.get('service', {}).get('currentDeployment')
+        for _ in range(360):
+            service_data = json.loads(self.aws(['ecs', 'describe-express-gateway-service',
+                                                '--service-arn', arn], private=True, quiet=True)).get('service', {})
+            deployments = json.loads(self.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
+                                               '--service', service], private=True, quiet=True))
+            items = deployments.get('serviceDeployments', [])
+            newest = max(items, key=lambda item: item.get('createdAt', '')) if items else {}
+            deployment_arn = newest.get('serviceDeploymentArn')
+            if deployment_arn and deployment_arn != previous_deployment_arn:
+                new_deployment_arn = deployment_arn
+                if newest.get('status') in {'STOPPED', 'ROLLBACK_SUCCESSFUL', 'ROLLBACK_FAILED'}:
+                    raise RuntimeError('이전 릴리스 재배포에 실패했습니다: ' + newest['status'])
+                active = service_data.get('activeConfigurations', [])
+                if (newest.get('status') == 'SUCCESSFUL'
+                        and service_data.get('status', {}).get('statusCode') == 'ACTIVE'
+                        and len(active) == 1
+                        and active[0].get('primaryContainer', {}).get('image') == previous['image']
+                        and active[0].get('taskDefinitionArn') == task_arn
+                        and not service_data.get('currentDeployment')):
+                    endpoints = [path.get('endpoint') for path in active[0].get('ingressPaths', [])
+                                 if path.get('accessType') == 'PUBLIC']
+                    url = endpoints[0].rstrip('/') if len(endpoints) == 1 and endpoints[0] else ''
+                    if url and not url.startswith('https://'):
+                        url = 'https://' + url
+                    if url != current['url'].rstrip('/'):
+                        raise AwsConfigurationError('롤백 후 ECS 공개 URL이 변경됐습니다.')
+                    self.verify(url + health_path)
+                    return {'service_deployment_arn': new_deployment_arn, 'url': url,
+                            'image': previous['image'], 'state': 'successful'}
+            time.sleep(5)
+        raise RuntimeError('이전 ECS 릴리스 재배포 시간 제한을 초과했습니다.')
+
+    def retire(self, result, attempt_id):
+        """Delete one verified OneDeploy service, then its image tag; keep the shared stack."""
+        self.settings.validate()
+        if not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id):
+            raise AwsConfigurationError('배포 시도 ID가 올바르지 않습니다.')
+        account = result.get('account', '')
+        service = f'onedeploy-{attempt_id}'
+        arn = f'arn:aws:ecs:{self.settings.region}:{account}:service/default/{service}'
+        repository = f'{account}.dkr.ecr.{self.settings.region}.amazonaws.com/onedeploy-managed'
+        image = result.get('image', '')
+        images = result.get('images') or [image]
+        valid_image = lambda item: isinstance(item, str) and re.fullmatch(
+            re.escape(repository) + r':[a-f0-9]{16}-a[1-3]', item)
+        if (not re.fullmatch(r'\d{12}', account) or result.get('service') != service
+                or result.get('service_arn') != arn or result.get('owner_attempt', attempt_id) != attempt_id
+                or not valid_image(image) or not isinstance(images, list) or image not in images
+                or not all(valid_image(item) for item in images) or len(images) != len(set(images))
+                or result.get('region') != self.settings.region
+                or result.get('target') != 'aws-ecs-express'):
+            raise AwsConfigurationError('작업 기록의 AWS 리소스 정보가 예상과 다릅니다.')
+        self.validate_url(result.get('url', ''), service, self.settings.region)
+        current_account = json.loads(self.aws(['sts', 'get-caller-identity'], private=True)).get('Account')
+        if current_account != account:
+            raise AwsConfigurationError('현재 AWS 계정이 배포 계정과 다릅니다.')
+
+        def describe():
+            response = json.loads(self.aws(['ecs', 'describe-express-gateway-service', '--service-arn', arn,
+                                            '--include', 'TAGS'], private=True, quiet=True))
+            service_data = response.get('service', {})
+            tags = {item['key']: item['value'] for item in service_data.get('tags', [])}
+            if (service_data.get('serviceArn') != arn or tags.get('onedeploy-managed') != 'true'
+                    or tags.get('onedeploy-attempt') != attempt_id):
+                raise AwsConfigurationError('ECS 서비스 소유권이 확인되지 않아 삭제를 중단했습니다.')
+            return service_data
+
+        service_data = describe()
+        state = service_data.get('status', {}).get('statusCode')
+        if state == 'ACTIVE':
+            active_images = [configuration.get('primaryContainer', {}).get('image')
+                             for configuration in service_data.get('activeConfigurations', [])]
+            if image not in active_images:
+                raise AwsConfigurationError('ECS 서비스 이미지가 배포 기록과 달라 삭제를 중단했습니다.')
+            self.event('retiring', 'ECS Express 서비스를 종료합니다.')
+            self.aws(['ecs', 'delete-express-gateway-service', '--service-arn', arn], timeout=300, private=True)
+        elif state not in {'DRAINING', 'INACTIVE'}:
+            raise AwsConfigurationError(f'ECS 서비스를 종료할 수 없는 상태입니다: {state}')
+
+        for _ in range(180):
+            service_data = describe()
+            if service_data.get('status', {}).get('statusCode') == 'INACTIVE':
+                break
+            time.sleep(5)
+        else:
+            raise RuntimeError('ECS 서비스 종료가 아직 완료되지 않았습니다. 이미지 삭제는 보류했습니다.')
+        self.event('retiring', 'ECR 이미지 태그를 삭제합니다.')
+        for managed_image in images:
+            tag = managed_image.rsplit(':', 1)[-1]
+            deleted = json.loads(self.aws(['ecr', 'batch-delete-image', '--repository-name', 'onedeploy-managed',
+                                           '--image-ids', 'imageTag=' + tag], timeout=60, private=True))
+            failures = deleted.get('failures', [])
+            if failures and not all(item.get('failureCode') == 'ImageNotFound' for item in failures):
+                raise RuntimeError('ECR 이미지 삭제에 실패했습니다. 태그를 확인하세요.')
+        return {'service_arn': arn, 'image': image, 'state': 'deleted'}

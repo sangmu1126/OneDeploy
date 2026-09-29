@@ -1,0 +1,501 @@
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from onedeploy.core import analyze
+
+
+ACCOUNT = '123456789012'
+REGION = 'ap-northeast-2'
+ATTEMPT = 'a' * 16 + '-a1'
+SERVICE = 'onedeploy-' + ATTEMPT
+ARN = f'arn:aws:ecs:{REGION}:{ACCOUNT}:service/default/{SERVICE}'
+REPOSITORY = f'{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/onedeploy-managed'
+
+
+class AwsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name)
+        (self.project / 'package.json').write_text('{"scripts":{"start":"node server.js"}}')
+        self.plan = replace(analyze(self.project), target='aws-ecs-express')
+        self.events = []
+        self.adapter = AwsExpressAdapter(lambda stage, message: self.events.append((stage, message)),
+                                         AwsSettings(REGION))
+
+    def test_cloudformation_prepares_repository_and_roles(self):
+        outputs = [{'OutputKey': name, 'OutputValue': value} for name, value in {
+            'RepositoryUri': REPOSITORY,
+            'ExecutionRoleArn': f'arn:aws:iam::{ACCOUNT}:role/execution',
+            'InfrastructureRoleArn': f'arn:aws:iam::{ACCOUNT}:role/infrastructure'}.items()]
+        calls = []
+        def aws(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['cloudformation', 'describe-stacks']:
+                return json.dumps({'Stacks': [{'StackStatus': 'CREATE_COMPLETE', 'Outputs': outputs}]})
+            return ''
+        with patch('onedeploy.aws.shutil.which', return_value='/usr/bin/tool'), patch.object(self.adapter, 'aws', side_effect=aws):
+            result = self.adapter.prepare_infrastructure()
+        self.assertEqual(result[1], REPOSITORY)
+        deploy = next(args for args in calls if args[:2] == ['cloudformation', 'deploy'])
+        self.assertIn('--capabilities', deploy)
+        self.assertIn('CAPABILITY_IAM', deploy)
+        self.assertTrue(Path(deploy[deploy.index('--template-file') + 1]).is_file())
+
+    def test_deploy_creates_bounded_service_then_verifies_url(self):
+        image = REPOSITORY + ':' + ATTEMPT
+        host = f'on-853b928a17804449916e1acb4141349b.ecs.{REGION}.on.aws'
+        url = 'https://' + host
+        commands = []
+        push_attempts = 0
+        deployment_checks = 0
+        def command(args, **kwargs):
+            nonlocal push_attempts
+            commands.append(args)
+            if args[:3] == ['docker', 'context', 'inspect']:
+                return 'unix:///var/run/docker.sock'
+            if 'push' in args:
+                push_attempts += 1
+                if push_attempts == 1:
+                    raise AwsConfigurationError('ECR 이미지 업로드 연결이 시간 초과됐습니다.')
+            return ''
+        def aws(args, **kwargs):
+            nonlocal deployment_checks
+            if args[:2] == ['ecr', 'get-login-password']:
+                return 'synthetic-password'
+            if args[:2] == ['ecs', 'create-express-gateway-service']:
+                path = Path(args[args.index('--cli-input-json') + 1].removeprefix('file://'))
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                payload = json.loads(path.read_text())
+                self.assertEqual(payload['serviceName'], SERVICE)
+                self.assertEqual(payload['scalingTarget'], {'minTaskCount': 1, 'maxTaskCount': 1})
+                self.assertEqual(payload['primaryContainer']['environment'],
+                                 [{'name': 'PORT', 'value': '3000'},
+                                  {'name': 'APP_SECRET', 'value': 'synthetic-value'}])
+                return json.dumps({'service': {'serviceArn': ARN}})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                return json.dumps({'service': {'status': {'statusCode': 'ACTIVE'},
+                                                'currentDeployment': 'initial-deployment' if deployment_checks == 0 else None,
+                                                'activeConfigurations': [{'primaryContainer': {'image': image},
+                                                    'taskDefinitionArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:1',
+                                                    'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': host}]}]}})
+            if args[:2] == ['ecs', 'list-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'serviceDeploymentArn': 'initial-deployment',
+                    'status': 'SUCCESSFUL', 'createdAt': '2026-09-29T00:00:00Z'}]})
+            if args[:2] == ['ecs', 'describe-service-deployments']:
+                deployment_checks += 1
+                return json.dumps({'serviceDeployments': [{'status': 'IN_PROGRESS' if deployment_checks == 1
+                                                                else 'SUCCESSFUL'}]})
+            raise AssertionError(args)
+        self.plan.required_env = ['APP_SECRET']
+        with patch.object(self.adapter, 'prepare_infrastructure', return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
+                patch('onedeploy.aws.ImageBuilder.build'), patch.object(self.adapter, 'command', side_effect=command), \
+                patch.object(self.adapter, 'aws', side_effect=aws), patch.object(self.adapter, 'verify') as verify, \
+                patch('onedeploy.aws.time.sleep'):
+            result = self.adapter.deploy(self.project, self.plan, ATTEMPT, {'APP_SECRET': 'synthetic-value'})
+        self.assertEqual(result['url'], url)
+        self.assertEqual(result['service_arn'], ARN)
+        self.assertIn('task-definition/', result['task_definition_arn'])
+        verify.assert_called_once_with(url + '/')
+        self.assertTrue(any(args[-2:] == ['push', image] for args in commands))
+        self.assertEqual(push_attempts, 2)
+        self.assertGreaterEqual(deployment_checks, 2)
+        self.assertNotIn('synthetic-value', str(self.events))
+        self.assertNotIn('synthetic-password', str(self.events))
+
+    def test_cleanup_only_deletes_owned_service(self):
+        self.adapter.service_created = True
+        self.adapter.service_arn = ARN
+        self.adapter.image_pushed = False
+        self.adapter.image_built = False
+        calls = []
+        def aws(args, **kwargs):
+            calls.append(args)
+            return json.dumps({'service': {'tags': [{'key': 'onedeploy-managed', 'value': 'false'},
+                                                    {'key': 'onedeploy-attempt', 'value': ATTEMPT}]}})
+        with patch.object(self.adapter, 'aws', side_effect=aws):
+            self.adapter.cleanup_failure(ATTEMPT)
+        self.assertEqual(len(calls), 1)
+
+    def test_failed_create_waits_for_inactive_before_deleting_image(self):
+        self.adapter.service_created = True
+        self.adapter.service_arn = ARN
+        self.adapter.image = REPOSITORY + ':' + ATTEMPT
+        self.adapter.image_pushed = True
+        states = iter(['ACTIVE', 'DRAINING', 'INACTIVE'])
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                return json.dumps({'service': {'serviceArn': ARN,
+                    'status': {'statusCode': next(states)},
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}]}})
+            return '{}'
+        with patch.object(self.adapter, 'aws', side_effect=aws), patch('onedeploy.aws.time.sleep'):
+            self.adapter.cleanup_failure(ATTEMPT)
+        self.assertLess(next(i for i, call in enumerate(calls)
+                             if call[:2] == ['ecs', 'delete-express-gateway-service']),
+                        next(i for i, call in enumerate(calls) if call[:2] == ['ecr', 'batch-delete-image']))
+        self.assertEqual(sum(call[:2] == ['ecs', 'describe-express-gateway-service'] for call in calls), 3)
+
+    def test_failed_create_preserves_image_when_service_owner_is_uncertain(self):
+        self.adapter.service_created = True
+        self.adapter.service_arn = ARN
+        self.adapter.image = REPOSITORY + ':' + ATTEMPT
+        self.adapter.image_pushed = True
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            return json.dumps({'service': {'serviceArn': ARN, 'status': {'statusCode': 'ACTIVE'},
+                'tags': [{'key': 'onedeploy-managed', 'value': 'false'},
+                         {'key': 'onedeploy-attempt', 'value': ATTEMPT}]}})
+        with patch.object(self.adapter, 'aws', side_effect=aws):
+            self.adapter.cleanup_failure(ATTEMPT)
+        self.assertFalse(any(call[:2] == ['ecs', 'delete-express-gateway-service'] for call in calls))
+        self.assertFalse(any(call[:2] == ['ecr', 'batch-delete-image'] for call in calls))
+
+    def test_failed_create_preserves_image_while_service_drains(self):
+        self.adapter.service_created = True
+        self.adapter.service_arn = ARN
+        self.adapter.image = REPOSITORY + ':' + ATTEMPT
+        self.adapter.image_pushed = True
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                return json.dumps({'service': {'serviceArn': ARN,
+                    'status': {'statusCode': 'DRAINING'},
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}]}})
+            raise AssertionError(args)
+        with patch.object(self.adapter, 'aws', side_effect=aws), patch('onedeploy.aws.time.sleep'):
+            self.adapter.cleanup_failure(ATTEMPT)
+        self.assertFalse(any(call[:2] == ['ecr', 'batch-delete-image'] for call in calls))
+        self.assertTrue(any(stage == 'cleanup' and '보존' in message for stage, message in self.events))
+
+    def test_failed_create_reports_ecr_delete_failure(self):
+        self.adapter.image = REPOSITORY + ':' + ATTEMPT
+        self.adapter.image_pushed = True
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'failures': [
+                {'failureCode': 'AccessDenied'}]})):
+            self.adapter.cleanup_failure(ATTEMPT)
+        self.assertTrue(any(stage == 'cleanup' and '정리 확인 필요' in message
+                            for stage, message in self.events))
+
+    def test_rejects_wrong_service_url(self):
+        with self.assertRaises(AwsConfigurationError):
+            self.adapter.validate_url('https://wrong.example.com', SERVICE, REGION)
+
+    def test_retire_waits_for_inactive_before_deleting_image(self):
+        image = REPOSITORY + ':' + ATTEMPT
+        result = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
+                  'service': SERVICE, 'service_arn': ARN, 'image': image,
+                  'url': f'https://on-853b928a17804449916e1acb4141349b.ecs.{REGION}.on.aws'}
+        calls = []
+        states = iter(['ACTIVE', 'DRAINING', 'INACTIVE'])
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                state = next(states)
+                return json.dumps({'service': {'serviceArn': ARN, 'status': {'statusCode': state},
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}],
+                    'activeConfigurations': [{'primaryContainer': {'image': image}}]}})
+            if args[:2] == ['ecr', 'batch-delete-image']:
+                return json.dumps({'failures': []})
+            return '{}'
+        with patch.object(self.adapter, 'aws', side_effect=aws), patch('onedeploy.aws.time.sleep'):
+            self.assertEqual(self.adapter.retire(result, ATTEMPT)['state'], 'deleted')
+        self.assertLess(next(i for i, args in enumerate(calls) if args[:2] == ['ecs', 'delete-express-gateway-service']),
+                        next(i for i, args in enumerate(calls) if args[:2] == ['ecr', 'batch-delete-image']))
+        self.assertEqual(sum(args[:2] == ['ecs', 'describe-express-gateway-service'] for args in calls), 3)
+
+    def test_retire_rejects_unowned_service(self):
+        image = REPOSITORY + ':' + ATTEMPT
+        result = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
+                  'service': SERVICE, 'service_arn': ARN, 'image': image,
+                  'url': f'https://{SERVICE}.ecs.{REGION}.on.aws'}
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            return json.dumps({'service': {'serviceArn': ARN, 'status': {'statusCode': 'ACTIVE'},
+                'tags': [{'key': 'onedeploy-managed', 'value': 'false'},
+                         {'key': 'onedeploy-attempt', 'value': ATTEMPT}]}})
+        with patch.object(self.adapter, 'aws', side_effect=aws):
+            with self.assertRaises(AwsConfigurationError):
+                self.adapter.retire(result, ATTEMPT)
+        self.assertFalse(any(args[:2] in (['ecs', 'delete-express-gateway-service'],
+                                          ['ecr', 'batch-delete-image']) for args in calls))
+
+    def test_second_release_updates_owned_service_and_keeps_url(self):
+        second_attempt = 'b' * 16 + '-a1'
+        old_image = REPOSITORY + ':' + ATTEMPT
+        new_image = REPOSITORY + ':' + second_attempt
+        url = f'https://on-853b928a17804449916e1acb4141349b.ecs.{REGION}.on.aws'
+        prior = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
+                 'service': SERVICE, 'service_arn': ARN, 'image': old_image, 'url': url}
+        checkpoints = []
+        adapter = AwsExpressAdapter(lambda stage, message: self.events.append((stage, message)),
+                                    AwsSettings(REGION), existing=prior,
+                                    checkpoint=lambda **updates: checkpoints.append(updates))
+        calls = []
+        updated_describes = [0]
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                updated = any(call[:2] == ['ecs', 'update-express-gateway-service'] for call in calls)
+                if updated:
+                    updated_describes[0] += 1
+                current_deployment = 'new-deployment' if updated and updated_describes[0] == 1 else None
+                active = [{'primaryContainer': {'image': new_image if updated else old_image},
+                    'taskDefinitionArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:{2 if updated else 1}',
+                    'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': url.removeprefix('https://')}]}]
+                if current_deployment:
+                    active.insert(0, {'primaryContainer': {'image': old_image},
+                        'taskDefinitionArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:1'})
+                return json.dumps({'service': {'serviceArn': ARN, 'status': {'statusCode': 'ACTIVE'},
+                    'currentDeployment': current_deployment,
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}],
+                    'activeConfigurations': active}})
+            if args[:2] == ['ecs', 'describe-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'status': 'SUCCESSFUL'}]})
+            if args[:2] == ['ecs', 'list-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'serviceDeploymentArn': 'old-deployment',
+                    'createdAt': '2026-09-28T00:00:00+00:00', 'status': 'SUCCESSFUL'}]})
+            if args[:2] == ['ecs', 'update-express-gateway-service']:
+                self.assertEqual(checkpoints[0]['aws_previous_deployment_arn'], 'old-deployment')
+                self.assertEqual(checkpoints[0]['aws_candidate_image'], new_image)
+                self.assertTrue(checkpoints[0]['aws_update_submitted'])
+                payload = json.loads(Path(args[args.index('--cli-input-json') + 1].removeprefix('file://')).read_text())
+                self.assertEqual(payload['serviceArn'], ARN)
+                self.assertEqual(payload['primaryContainer']['image'], new_image)
+                self.assertNotIn('serviceName', payload)
+                return json.dumps({'service': {'serviceArn': ARN}})
+            if args[:2] == ['ecr', 'get-login-password']:
+                return 'synthetic-password'
+            raise AssertionError(args)
+        def command(args, **_kwargs):
+            if args[:3] == ['docker', 'context', 'inspect']:
+                return 'unix:///var/run/docker.sock'
+            return ''
+        with patch.object(adapter, 'prepare_infrastructure', return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
+                patch('onedeploy.aws.ImageBuilder.build'), patch.object(adapter, 'command', side_effect=command), \
+                patch.object(adapter, 'aws', side_effect=aws), patch.object(adapter, 'verify') as verify, \
+                patch('onedeploy.aws.time.sleep'):
+            result = adapter.deploy(self.project, self.plan, second_attempt)
+        self.assertEqual(result['url'], url)
+        self.assertEqual(result['service'], SERVICE)
+        self.assertEqual(result['owner_attempt'], ATTEMPT)
+        self.assertEqual(result['images'], [old_image, new_image])
+        self.assertTrue(result['previous_task_definition_arn'].endswith(':1'))
+        self.assertGreaterEqual(updated_describes[0], 2)
+        self.assertTrue(result['task_definition_arn'].endswith(':2'))
+        verify.assert_called_once_with(url + '/')
+        self.assertFalse(any(args[:2] == ['ecs', 'create-express-gateway-service'] for args in calls))
+
+    def test_retire_updated_service_deletes_both_release_images(self):
+        second_attempt = 'b' * 16 + '-a1'
+        old_image = REPOSITORY + ':' + ATTEMPT
+        new_image = REPOSITORY + ':' + second_attempt
+        result = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
+                  'service': SERVICE, 'service_arn': ARN, 'owner_attempt': ATTEMPT,
+                  'image': new_image, 'images': [old_image, new_image],
+                  'url': f'https://{SERVICE}.ecs.{REGION}.on.aws'}
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                state = 'INACTIVE' if any(call[:2] == ['ecs', 'delete-express-gateway-service'] for call in calls) else 'ACTIVE'
+                return json.dumps({'service': {'serviceArn': ARN, 'status': {'statusCode': state},
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}],
+                    'activeConfigurations': [{'primaryContainer': {'image': new_image}}]}})
+            if args[:2] == ['ecr', 'batch-delete-image']:
+                return json.dumps({'failures': []})
+            return '{}'
+        with patch.object(self.adapter, 'aws', side_effect=aws):
+            self.adapter.retire(result, ATTEMPT)
+        deleted_tags = [args[-1] for args in calls if args[:2] == ['ecr', 'batch-delete-image']]
+        self.assertEqual(deleted_tags, ['imageTag=' + ATTEMPT, 'imageTag=' + second_attempt])
+
+    def test_abandoned_image_cleanup_checks_owned_service_and_active_image(self):
+        second_attempt = 'b' * 16 + '-a1'
+        old_image = REPOSITORY + ':' + ATTEMPT
+        new_image = REPOSITORY + ':' + second_attempt
+        result = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
+                  'service': SERVICE, 'service_arn': ARN, 'owner_attempt': ATTEMPT,
+                  'image': old_image, 'url': f'https://{SERVICE}.ecs.{REGION}.on.aws'}
+        calls = []
+        active_image = old_image
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                return json.dumps({'service': {'serviceArn': ARN, 'status': {'statusCode': 'ACTIVE'},
+                    'currentDeployment': None,
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}],
+                    'activeConfigurations': [{'primaryContainer': {'image': active_image}}]}})
+            if args[:2] == ['ecs', 'list-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'status': 'ROLLBACK_SUCCESSFUL',
+                    'serviceDeploymentArn': 'new-deployment', 'createdAt': '2026-09-28T01:00:00Z'}]})
+            if args[:2] == ['ecr', 'batch-delete-image']:
+                return json.dumps({'failures': []})
+            raise AssertionError(args)
+        with patch.object(self.adapter, 'aws', side_effect=aws):
+            self.assertEqual(self.adapter.cleanup_abandoned_image(result, new_image, second_attempt)['state'], 'deleted')
+            self.assertEqual([call[-1] for call in calls if call[:2] == ['ecr', 'batch-delete-image']],
+                             ['imageTag=' + second_attempt])
+            calls.clear()
+            active_image = new_image
+            with self.assertRaises(AwsConfigurationError):
+                self.adapter.cleanup_abandoned_image(result, new_image, second_attempt)
+            self.assertFalse(any(call[:2] == ['ecr', 'batch-delete-image'] for call in calls))
+        active_image = old_image
+        def already_deleted(args, **kwargs):
+            if args[:2] == ['ecr', 'batch-delete-image']:
+                return json.dumps({'failures': [{'failureCode': 'ImageNotFound'}]})
+            return aws(args, **kwargs)
+        with patch.object(self.adapter, 'aws', side_effect=already_deleted):
+            self.assertEqual(self.adapter.cleanup_abandoned_image(result, new_image, second_attempt)['state'], 'deleted')
+
+    def test_ongoing_update_rollback_verifies_both_revision_images(self):
+        second_attempt = 'b' * 16 + '-a1'
+        old_image = REPOSITORY + ':' + ATTEMPT
+        new_image = REPOSITORY + ':' + second_attempt
+        result = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
+                  'service': SERVICE, 'service_arn': ARN, 'owner_attempt': ATTEMPT,
+                  'image': old_image, 'url': f'https://{SERVICE}.ecs.{REGION}.on.aws'}
+        prefix = f'arn:aws:ecs:{REGION}:{ACCOUNT}'
+        old_deployment = prefix + f':service-deployment/default/{SERVICE}/old'
+        new_deployment = prefix + f':service-deployment/default/{SERVICE}/new'
+        old_revision = prefix + f':service-revision/default/{SERVICE}/1'
+        new_revision = prefix + f':service-revision/default/{SERVICE}/2'
+        old_task = prefix + ':task-definition/old-task:1'
+        new_task = prefix + ':task-definition/new-task:2'
+        source_image = old_image
+        target_image = new_image
+        deployment_status = 'IN_PROGRESS'
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                return json.dumps({'service': {'serviceArn': ARN, 'status': {'statusCode': 'ACTIVE'},
+                    'currentDeployment': new_deployment,
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}]}})
+            if args[:2] == ['ecs', 'list-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'serviceDeploymentArn': new_deployment,
+                    'status': deployment_status, 'createdAt': '2026-09-28T01:00:00Z'}]})
+            if args[:2] == ['ecs', 'describe-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'serviceArn': ARN,
+                    'serviceDeploymentArn': new_deployment, 'status': deployment_status,
+                    'sourceServiceRevisions': [{'arn': old_revision}],
+                    'targetServiceRevision': {'arn': new_revision}}]})
+            if args[:2] == ['ecs', 'describe-service-revisions']:
+                return json.dumps({'serviceRevisions': [
+                    {'serviceRevisionArn': old_revision, 'serviceArn': ARN, 'taskDefinition': old_task},
+                    {'serviceRevisionArn': new_revision, 'serviceArn': ARN, 'taskDefinition': new_task}]})
+            if args[:2] == ['ecs', 'describe-task-definition']:
+                task = args[args.index('--task-definition') + 1]
+                return json.dumps({'taskDefinition': {'taskDefinitionArn': task,
+                    'containerDefinitions': [{'name': 'Main', 'image': source_image if task == old_task else target_image}]}})
+            if args[:2] == ['ecs', 'stop-service-deployment']:
+                return json.dumps({'serviceDeploymentArn': new_deployment})
+            raise AssertionError(args)
+        with patch.object(self.adapter, 'aws', side_effect=aws):
+            outcome = self.adapter.request_update_rollback(result, new_image, old_deployment, second_attempt)
+            self.assertEqual(outcome['state'], 'requested')
+            self.assertEqual(calls[-1][-2:], ['--stop-type', 'ROLLBACK'])
+            calls.clear()
+            deployment_status = 'ROLLBACK_REQUESTED'
+            self.assertEqual(self.adapter.request_update_rollback(
+                result, new_image, old_deployment, second_attempt)['state'], 'already_requested')
+            self.assertFalse(any(call[:2] == ['ecs', 'stop-service-deployment'] for call in calls))
+            calls.clear()
+            deployment_status = 'IN_PROGRESS'
+            target_image = REPOSITORY + ':unexpected-a1'
+            with self.assertRaises(AwsConfigurationError):
+                self.adapter.request_update_rollback(result, new_image, old_deployment, second_attempt)
+            self.assertFalse(any(call[:2] == ['ecs', 'stop-service-deployment'] for call in calls))
+            calls.clear()
+            target_image = new_image
+            source_image = REPOSITORY + ':unexpected-a1'
+            with self.assertRaises(AwsConfigurationError):
+                self.adapter.request_update_rollback(result, new_image, old_deployment, second_attempt)
+            self.assertFalse(any(call[:2] == ['ecs', 'stop-service-deployment'] for call in calls))
+
+    def test_completed_release_rollback_reuses_previous_task_definition(self):
+        second_attempt = 'b' * 16 + '-a1'
+        old_image = REPOSITORY + ':' + ATTEMPT
+        new_image = REPOSITORY + ':' + second_attempt
+        url = f'https://on-853b928a17804449916e1acb4141349b.ecs.{REGION}.on.aws'
+        old_task = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:1'
+        old_deployment = f'arn:aws:ecs:{REGION}:{ACCOUNT}:service-deployment/default/{SERVICE}/old'
+        new_deployment = f'arn:aws:ecs:{REGION}:{ACCOUNT}:service-deployment/default/{SERVICE}/rollback'
+        previous = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
+                    'service': SERVICE, 'service_arn': ARN, 'owner_attempt': ATTEMPT,
+                    'image': old_image, 'task_definition_arn': old_task, 'url': url}
+        current = {**previous, 'image': new_image, 'images': [old_image, new_image],
+                   'previous_task_definition_arn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:2'}
+        calls, checkpoints = [], []
+        task_image = old_image
+        def aws(args, **_kwargs):
+            calls.append(args)
+            updated = any(call[:2] == ['ecs', 'update-express-gateway-service'] for call in calls)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                image = old_image if updated else new_image
+                return json.dumps({'service': {'serviceArn': ARN, 'status': {'statusCode': 'ACTIVE'},
+                    'currentDeployment': None,
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}],
+                    'activeConfigurations': [{'primaryContainer': {'image': image},
+                        'taskDefinitionArn': old_task,
+                        'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': url.removeprefix('https://')}]}]}})
+            if args[:2] == ['ecs', 'describe-task-definition']:
+                return json.dumps({'taskDefinition': {'taskDefinitionArn': old_task,
+                    'containerDefinitions': [{'name': 'Main', 'image': task_image}]}})
+            if args[:2] == ['ecs', 'list-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'serviceDeploymentArn': new_deployment if updated else old_deployment,
+                    'status': 'SUCCESSFUL', 'createdAt': '2026-09-28T01:00:00Z'}]})
+            if args[:2] == ['ecs', 'update-express-gateway-service']:
+                self.assertTrue(checkpoints[0]['release_rollback_submitted'])
+                payload = json.loads(Path(args[args.index('--cli-input-json') + 1].removeprefix('file://')).read_text())
+                self.assertEqual(payload, {'serviceArn': ARN, 'taskDefinitionArn': old_task,
+                                           'healthCheckPath': '/health'})
+                return json.dumps({'service': {'serviceArn': ARN, 'currentDeployment': new_deployment}})
+            raise AssertionError(args)
+        with patch.object(self.adapter, 'aws', side_effect=aws), patch.object(self.adapter, 'verify') as verify:
+            outcome = self.adapter.rollback_release(current, previous, '/health',
+                                                    lambda **updates: checkpoints.append(updates))
+            self.assertEqual(outcome['image'], old_image)
+            verify.assert_called_once_with(url + '/health')
+            calls.clear()
+            task_image = new_image
+            with self.assertRaises(AwsConfigurationError):
+                self.adapter.rollback_release(current, previous, '/health')
+            self.assertFalse(any(call[:2] == ['ecs', 'update-express-gateway-service'] for call in calls))
+
+
+if __name__ == '__main__':
+    unittest.main()
