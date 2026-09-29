@@ -71,6 +71,9 @@ CLI 계정에 Cloud Run Invoker 권한이 있어야 배포 검증을 완료할 �
 
 AWS CLI와 Docker CLI가 필요합니다. AWS CLI에 로그인된 계정과 리전이 있어야 합니다.
 리전은 `ONEDEPLOY_AWS_REGION`으로 지정하거나 AWS CLI의 기본 리전을 사용합니다.
+서버에서 AWS 배포를 사용하려면 `ONEDEPLOY_AWS_ACCOUNT_ID`에 배포할 12자리 계정 ID도 설정하세요.
+실제 로그인 계정이 이 값과 다르면 CloudFormation 등 유료 리소스를 만들기 전에 중단합니다.
+계정 ID를 설정하지 않으면 AWS 대상은 선택할 수 없습니다.
 
 AWS 대상을 선택하고 **인터넷에 공개하기**를 명시적으로 선택하면, 배포 중
 [`onedeploy-core` CloudFormation 템플릿](onedeploy/infra/aws-ecs-express.yaml)을 적용합니다.

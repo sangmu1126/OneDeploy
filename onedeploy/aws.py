@@ -31,6 +31,8 @@ class AwsConfigurationError(RuntimeError):
 class AwsSettings:
     region: str = ''
     stack_name: str = 'onedeploy-core'
+    expected_account: str = ''
+    account_pin_required: bool = False
 
     @classmethod
     def from_environment(cls):
@@ -41,13 +43,18 @@ class AwsSettings:
                 region = result.stdout.strip() if result.returncode == 0 else ''
             except (OSError, subprocess.TimeoutExpired):
                 region = ''
-        return cls(region or '')
+        return cls(region or '', expected_account=os.getenv('ONEDEPLOY_AWS_ACCOUNT_ID', ''),
+                   account_pin_required=True)
 
     def validate(self):
         if not re.fullmatch(r'[a-z]{2}-[a-z]+-\d', self.region):
             raise AwsConfigurationError('ONEDEPLOY_AWS_REGION에 유효한 AWS 리전을 설정하세요.')
         if self.stack_name != 'onedeploy-core':
             raise AwsConfigurationError('AWS 기반 스택 이름이 예상과 다릅니다.')
+        if self.expected_account and not re.fullmatch(r'\d{12}', self.expected_account):
+            raise AwsConfigurationError('ONEDEPLOY_AWS_ACCOUNT_ID에 12자리 AWS 계정 ID를 설정하세요.')
+        if self.account_pin_required and not self.expected_account:
+            raise AwsConfigurationError('AWS 배포 전에 ONEDEPLOY_AWS_ACCOUNT_ID로 대상 계정을 지정하세요.')
 
     def unavailable_reason(self):
         try:
@@ -108,6 +115,8 @@ class AwsExpressAdapter:
         account = json.loads(self.aws(['sts', 'get-caller-identity'], private=True)).get('Account', '')
         if not re.fullmatch(r'\d{12}', account):
             raise AwsConfigurationError('AWS 계정 ID를 확인하지 못했습니다.')
+        if self.settings.expected_account and account != self.settings.expected_account:
+            raise AwsConfigurationError('현재 AWS 계정이 ONEDEPLOY_AWS_ACCOUNT_ID와 다릅니다. 리소스를 생성하지 않았습니다.')
         template = Path(__file__).parent / 'infra' / 'aws-ecs-express.yaml'
         self.event('infrastructure', 'CloudFormation으로 ECR 저장소와 ECS Express 역할 준비')
         self.aws(['cloudformation', 'deploy', '--template-file', str(template), '--stack-name', self.settings.stack_name,

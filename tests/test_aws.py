@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -27,6 +28,30 @@ class AwsTests(unittest.TestCase):
         self.events = []
         self.adapter = AwsExpressAdapter(lambda stage, message: self.events.append((stage, message)),
                                          AwsSettings(REGION))
+
+    def test_server_aws_target_requires_pinned_account(self):
+        with patch.dict(os.environ, {'ONEDEPLOY_AWS_REGION': REGION,
+                                      'ONEDEPLOY_AWS_ACCOUNT_ID': ''}):
+            settings = AwsSettings.from_environment()
+        self.assertIn('ONEDEPLOY_AWS_ACCOUNT_ID', settings.unavailable_reason())
+        with patch.dict(os.environ, {'ONEDEPLOY_AWS_REGION': REGION,
+                                      'ONEDEPLOY_AWS_ACCOUNT_ID': ACCOUNT}), \
+                patch('onedeploy.aws.shutil.which', return_value='/usr/bin/tool'):
+            settings = AwsSettings.from_environment()
+            self.assertIsNone(settings.unavailable_reason())
+        self.assertEqual(settings.expected_account, ACCOUNT)
+
+    def test_wrong_account_stops_before_cloudformation(self):
+        self.adapter.settings = AwsSettings(REGION, expected_account='999999999999')
+        calls = []
+        def aws(args, **kwargs):
+            calls.append(args)
+            return json.dumps({'Account': ACCOUNT})
+        with patch('onedeploy.aws.shutil.which', return_value='/usr/bin/tool'), \
+                patch.object(self.adapter, 'aws', side_effect=aws):
+            with self.assertRaisesRegex(AwsConfigurationError, '리소스를 생성하지 않았습니다'):
+                self.adapter.prepare_infrastructure()
+        self.assertEqual(calls, [['sts', 'get-caller-identity']])
 
     def test_cloudformation_prepares_repository_and_roles(self):
         outputs = [{'OutputKey': name, 'OutputValue': value} for name, value in {
