@@ -174,6 +174,19 @@ PYTHONPATH=. python3 tests/smoke_aws_update.py --account <AWS_ACCOUNT_ID> --regi
 PYTHONPATH=. python3 tests/smoke_aws_update.py --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --apply --rollback-oldest
 ```
 
+실제 OpenAI 모델이 소스를 수정하고 AWS에 배포하는 전체 경로는 별도 smoke로 검증합니다.
+`OPENAI_API_KEY`와 `ONEDEPLOY_AI_MODEL`을 설정하고, 먼저 `--apply` 없이 계정·도구 사전 점검을 실행하세요.
+`--apply`를 붙이면 실제 API 호출과 비용이 발생할 수 있는 ECS/ECR 리소스 생성이 시작됩니다.
+이 smoke는 고정 AI 응답을 사용하지 않고, 소스 패치·공개 HTTPS 200·상태 API·서비스 종료를 확인합니다.
+종료가 확인되지 않으면 작업 기록 경로를 남기므로 AWS 리소스를 확인해야 합니다. 공유 CloudFormation 스택은 유지합니다.
+
+```sh
+PYTHONPATH=.:tests python3 tests/smoke_aws_live_ai.py --account <AWS_ACCOUNT_ID> --region ap-northeast-2
+PYTHONPATH=.:tests python3 tests/smoke_aws_live_ai.py --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --apply
+```
+
+현재 개발 환경에는 OpenAI API 키가 없어 이 live smoke의 실계정 결과는 아직 없습니다.
+
 `--python` smoke는 `package.json` 없이 Dockerfile을 가진 Python 앱의 업로드·작업용 소스 수정·AWS 배포·공개 HTTP 200·상태 API를 검증합니다.
 2026-09-29 서울 리전 실계정에서 이 경로가 통과했고, 임시 서비스의 `INACTIVE`와 ECR 태그 부재를 확인했습니다.
 
