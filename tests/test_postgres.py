@@ -1,0 +1,136 @@
+import json
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from onedeploy.aws import AwsConfigurationError
+from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest, TEMPLATE, main
+
+
+ACCOUNT = '123456789012'
+REGION = 'ap-northeast-2'
+VPC = 'vpc-12345678'
+SUBNETS = ('subnet-11111111', 'subnet-22222222')
+SERVICE_GROUP = 'sg-33333333'
+DB_GROUP = 'sg-44444444'
+STACK = f'arn:aws:cloudformation:{REGION}:{ACCOUNT}:stack/onedeploy-db-demo-app/stack-id'
+DB_ARN = f'arn:aws:rds:{REGION}:{ACCOUNT}:db:onedeploy-demo-app'
+SECRET = f'arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:rds-managed-secret'
+HOST = f'onedeploy-demo-app.abc.{REGION}.rds.amazonaws.com'
+
+
+class PostgresTests(unittest.TestCase):
+    def setUp(self):
+        self.request = PostgresRequest('demo-app', ACCOUNT, REGION, VPC, SUBNETS, SERVICE_GROUP)
+        self.provisioner = AwsPostgresProvisioner(self.request)
+
+    def test_template_retains_private_encrypted_database_and_managed_secret(self):
+        template = json.loads(TEMPLATE.read_text())
+        db = template['Resources']['Database']
+        self.assertEqual(db['DeletionPolicy'], 'Retain')
+        self.assertEqual(db['UpdateReplacePolicy'], 'Retain')
+        properties = db['Properties']
+        self.assertFalse(properties['PubliclyAccessible'])
+        self.assertTrue(properties['DeletionProtection'])
+        self.assertTrue(properties['StorageEncrypted'])
+        self.assertTrue(properties['ManageMasterUserPassword'])
+        self.assertNotIn('MasterUserPassword', properties)
+        self.assertEqual(template['Resources']['DatabaseSecurityGroup']['Properties']
+                         ['SecurityGroupIngress'][0]['SourceSecurityGroupId'],
+                         {'Ref': 'ServiceSecurityGroupId'})
+
+    def test_preflight_checks_account_vpc_group_and_two_azs(self):
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args[:2])
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ec2', 'describe-vpcs']:
+                return json.dumps({'Vpcs': [{'VpcId': VPC, 'IsDefault': True}]})
+            if args[:2] == ['ec2', 'describe-security-groups']:
+                return json.dumps({'SecurityGroups': [{'GroupId': SERVICE_GROUP,
+                    'VpcId': VPC, 'IpPermissions': []}]})
+            if args[:2] == ['ec2', 'describe-subnets']:
+                return json.dumps({'Subnets': [
+                    {'SubnetId': SUBNETS[0], 'VpcId': VPC, 'State': 'available', 'AvailabilityZone': 'a'},
+                    {'SubnetId': SUBNETS[1], 'VpcId': VPC, 'State': 'available', 'AvailabilityZone': 'b'}]})
+            if args[:2] == ['rds', 'describe-orderable-db-instance-options']:
+                return json.dumps({'OrderableDBInstanceOptions': [{'DBInstanceClass': 'db.t4g.micro'}]})
+            raise AssertionError(args)
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
+            result = self.provisioner.preflight()
+        self.assertEqual(result['availability_zones'], ['a', 'b'])
+        self.assertEqual(calls, [['sts', 'get-caller-identity'], ['ec2', 'describe-vpcs'],
+                                 ['ec2', 'describe-security-groups'], ['ec2', 'describe-subnets'],
+                                 ['rds', 'describe-orderable-db-instance-options']])
+        with patch.object(self.provisioner.adapter, 'aws',
+                          side_effect=lambda args, **kwargs: json.dumps({'Account': '999999999999'})):
+            with self.assertRaisesRegex(AwsConfigurationError, '현재 AWS 계정'):
+                self.provisioner.preflight()
+
+    def test_create_uses_create_only_and_checks_output_after_wait(self):
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args[:2])
+            if args[:2] == ['cloudformation', 'create-stack']:
+                spec = Path(args[args.index('--cli-input-json') + 1].removeprefix('file://'))
+                self.assertEqual(spec.stat().st_mode & 0o777, 0o600)
+                payload = json.loads(spec.read_text())
+                self.assertEqual(payload['StackName'], self.request.stack_name)
+                self.assertTrue(payload['EnableTerminationProtection'])
+                self.assertEqual(json.loads(payload['TemplateBody'])['Resources']['Database']
+                                 ['Properties']['PubliclyAccessible'], False)
+                return json.dumps({'StackId': STACK})
+            if args[:2] == ['cloudformation', 'wait']:
+                return ''
+            raise AssertionError(args)
+        with patch.object(self.provisioner, 'preflight'), \
+                patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
+                patch.object(self.provisioner, 'inspect', return_value={'status': 'available'}) as inspect:
+            self.assertEqual(self.provisioner.create(), {'status': 'available'})
+        self.assertEqual(calls, [['cloudformation', 'create-stack'], ['cloudformation', 'wait']])
+        inspect.assert_called_once_with(STACK)
+
+    def test_inspect_rejects_public_or_misowned_database(self):
+        stack = {'StackId': STACK, 'StackStatus': 'CREATE_COMPLETE',
+                 'Tags': [{'Key': 'onedeploy-managed', 'Value': 'true'},
+                          {'Key': 'onedeploy-app', 'Value': 'demo-app'}],
+                 'Outputs': [{'OutputKey': key, 'OutputValue': value} for key, value in {
+                     'DatabaseIdentifier': 'onedeploy-demo-app', 'DatabaseArn': DB_ARN,
+                     'EndpointAddress': HOST, 'EndpointPort': '5432',
+                     'SecretArn': SECRET, 'DatabaseSecurityGroupId': DB_GROUP}.items()]}
+        db = {'DBInstanceIdentifier': 'onedeploy-demo-app', 'DBInstanceArn': DB_ARN,
+              'DBInstanceStatus': 'available', 'Engine': 'postgres', 'DBName': 'appdb',
+              'PubliclyAccessible': False, 'DeletionProtection': True,
+              'DBSubnetGroup': {'VpcId': VPC},
+              'VpcSecurityGroups': [{'VpcSecurityGroupId': DB_GROUP}],
+              'MasterUserSecret': {'SecretArn': SECRET},
+              'Endpoint': {'Address': HOST, 'Port': 5432}}
+        def aws(args, **_kwargs):
+            if args[:2] == ['cloudformation', 'describe-stacks']:
+                return json.dumps({'Stacks': [stack]})
+            return json.dumps({'DBInstances': [db]})
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
+            result = self.provisioner.inspect(STACK)
+            self.assertEqual(result['secret_arn'], SECRET)
+            db['PubliclyAccessible'] = True
+            with self.assertRaisesRegex(AwsConfigurationError, '비공개'):
+                self.provisioner.inspect(STACK)
+            db['PubliclyAccessible'] = False
+            stack['Tags'][0]['Value'] = 'false'
+            with self.assertRaisesRegex(AwsConfigurationError, '소유 태그'):
+                self.provisioner.inspect(STACK)
+
+    def test_dry_run_never_creates_stack(self):
+        arguments = ['--application', 'demo-app', '--account', ACCOUNT, '--region', REGION,
+                     '--vpc-id', VPC, '--subnet-id', SUBNETS[0], '--subnet-id', SUBNETS[1],
+                     '--service-security-group', SERVICE_GROUP]
+        with patch('onedeploy.postgres.AwsPostgresProvisioner.preflight',
+                   return_value={'account': ACCOUNT}), \
+                patch('onedeploy.postgres.AwsPostgresProvisioner.create') as create:
+            main(arguments)
+            create.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()

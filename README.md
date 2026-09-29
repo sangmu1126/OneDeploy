@@ -79,6 +79,7 @@ AWS CLI와 Docker CLI가 필요합니다. AWS CLI에 로그인된 계정과 리�
 확인합니다. 생성 요청과 실제 ECS 구성에 이 그룹이 적용됐는지 확인하며, 같은 앱의 업데이트에서는
 처음 사용한 그룹을 바꿀 수 없습니다. 이 설정은 추가 네트워크 경로의 기반일 뿐 RDS나 DB 접속을
 프로비저닝하지 않으며, DB 의존 앱 차단도 그대로 유지됩니다.
+별도 PostgreSQL 리소스 생성 명령과 남은 연결 작업은 [AWS 데이터 배포 경로](docs/aws-database-path.md)에 기록했습니다.
 
 AWS 대상을 선택하고 **인터넷에 공개하기**를 명시적으로 선택하면, 배포 중
 [`onedeploy-core` CloudFormation 템플릿](onedeploy/infra/aws-ecs-express.yaml)을 적용합니다.
@@ -210,7 +211,7 @@ PYTHONPATH=.:tests python3 tests/smoke_aws_live_ai.py --account <AWS_ACCOUNT_ID>
 - 현재 상태 재검사: 성공 이력에서 버튼을 눌러 소유 리소스·실행 상태·HTTP 200을 다시 확인
 - 배포 종료: Local Docker, Cloud Run, AWS ECS Express는 성공 작업의 소유 리소스를 확인한 뒤 종료 가능
 - 제한: 배포 시도 최대 3회, AI 도구 호출 최대 24회, 개별 도구 시간 제한 및 루프의 경과 시간 검사
-- 미구현: 영속 DB 생성·이전, GitHub URL 입력, 실행 중 취소, 다중 사용자 격리. 실제 모델의 자동 대상 판단은 API 키 미설정으로 미검증
+- 미구현: 앱 배포와 연결된 영속 DB·스키마 이전, GitHub URL 입력, 실행 중 취소, 다중 사용자 격리. 별도의 AWS PostgreSQL 리소스 생성 명령은 있으나 앱 접속·마이그레이션을 검증하지 않아 DB 앱 차단을 유지. 실제 모델의 자동 대상 판단은 API 키 미설정으로 미검증
 
 AWS에서는 동일한 앱 ID로 다시 배포할 때 소유 중인 기존 ECS Express 서비스를 업데이트하므로 URL을 유지합니다.
 AWS의 카나리 전환을 사용하며 실패한 **진행 중** 배포에는 롤백을 요청할 수 있습니다. 완료된 릴리스는

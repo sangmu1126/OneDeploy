@@ -1,0 +1,74 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "OneDeploy retained private PostgreSQL instance for a single application",
+  "Parameters": {
+    "ApplicationId": {"Type": "String", "MinLength": 3, "MaxLength": 31,
+      "AllowedPattern": "[a-z][a-z0-9]*(-[a-z0-9]+)*"},
+    "VpcId": {"Type": "AWS::EC2::VPC::Id"},
+    "SubnetIds": {"Type": "List<AWS::EC2::Subnet::Id>"},
+    "ServiceSecurityGroupId": {"Type": "AWS::EC2::SecurityGroup::Id"}
+  },
+  "Resources": {
+    "DatabaseSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "PostgreSQL from one OneDeploy service security group",
+        "VpcId": {"Ref": "VpcId"},
+        "SecurityGroupIngress": [{
+          "IpProtocol": "tcp",
+          "FromPort": 5432,
+          "ToPort": 5432,
+          "SourceSecurityGroupId": {"Ref": "ServiceSecurityGroupId"}
+        }],
+        "Tags": [
+          {"Key": "onedeploy-managed", "Value": "true"},
+          {"Key": "onedeploy-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    },
+    "DatabaseSubnetGroup": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Properties": {
+        "DBSubnetGroupDescription": "OneDeploy PostgreSQL subnets",
+        "SubnetIds": {"Ref": "SubnetIds"},
+        "Tags": [
+          {"Key": "onedeploy-managed", "Value": "true"},
+          {"Key": "onedeploy-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    },
+    "Database": {
+      "Type": "AWS::RDS::DBInstance",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "DBInstanceIdentifier": {"Fn::Sub": "onedeploy-${ApplicationId}"},
+        "Engine": "postgres",
+        "DBInstanceClass": "db.t4g.micro",
+        "AllocatedStorage": "20",
+        "StorageType": "gp3",
+        "StorageEncrypted": true,
+        "BackupRetentionPeriod": 7,
+        "DeletionProtection": true,
+        "PubliclyAccessible": false,
+        "DBName": "appdb",
+        "MasterUsername": "onedeploy",
+        "ManageMasterUserPassword": true,
+        "DBSubnetGroupName": {"Ref": "DatabaseSubnetGroup"},
+        "VPCSecurityGroups": [{"Ref": "DatabaseSecurityGroup"}],
+        "Tags": [
+          {"Key": "onedeploy-managed", "Value": "true"},
+          {"Key": "onedeploy-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "DatabaseIdentifier": {"Value": {"Ref": "Database"}},
+    "DatabaseArn": {"Value": {"Fn::GetAtt": ["Database", "DBInstanceArn"]}},
+    "EndpointAddress": {"Value": {"Fn::GetAtt": ["Database", "Endpoint.Address"]}},
+    "EndpointPort": {"Value": {"Fn::GetAtt": ["Database", "Endpoint.Port"]}},
+    "SecretArn": {"Value": {"Fn::GetAtt": ["Database", "MasterUserSecret.SecretArn"]}},
+    "DatabaseSecurityGroupId": {"Value": {"Ref": "DatabaseSecurityGroup"}}
+  }
+}
