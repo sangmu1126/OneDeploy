@@ -119,6 +119,9 @@ def check_deployment(job: dict) -> dict:
                     or tags.get('onedeploy-attempt') != service.removeprefix('onedeploy-')
                     or public_url != url.rstrip('/')
                     or active.get('primaryContainer', {}).get('image') != result.get('image')
+                    or result.get('service_security_group', '') != settings.service_security_group
+                    or (settings.service_security_group and settings.service_security_group not in
+                        active.get('networkConfiguration', {}).get('securityGroups', []))
                     or (result.get('task_definition_arn')
                         and active.get('taskDefinitionArn') != result['task_definition_arn'])):
                 return {'healthy': False, 'checked_at': checked_at, 'reason': 'ECS Express service identity or state changed'}

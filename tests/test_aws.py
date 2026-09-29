@@ -12,6 +12,7 @@ from onedeploy.core import analyze
 
 ACCOUNT = '123456789012'
 REGION = 'ap-northeast-2'
+SERVICE_GROUP = 'sg-12345678'
 ATTEMPT = 'a' * 16 + '-a1'
 SERVICE = 'onedeploy-' + ATTEMPT
 ARN = f'arn:aws:ecs:{REGION}:{ACCOUNT}:service/default/{SERVICE}'
@@ -35,11 +36,15 @@ class AwsTests(unittest.TestCase):
             settings = AwsSettings.from_environment()
         self.assertIn('ONEDEPLOY_AWS_ACCOUNT_ID', settings.unavailable_reason())
         with patch.dict(os.environ, {'ONEDEPLOY_AWS_REGION': REGION,
-                                      'ONEDEPLOY_AWS_ACCOUNT_ID': ACCOUNT}), \
+                                      'ONEDEPLOY_AWS_ACCOUNT_ID': ACCOUNT,
+                                      'ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP': SERVICE_GROUP}), \
                 patch('onedeploy.aws.shutil.which', return_value='/usr/bin/tool'):
             settings = AwsSettings.from_environment()
             self.assertIsNone(settings.unavailable_reason())
         self.assertEqual(settings.expected_account, ACCOUNT)
+        self.assertEqual(settings.service_security_group, SERVICE_GROUP)
+        with self.assertRaisesRegex(AwsConfigurationError, '보안 그룹 ID'):
+            AwsSettings(REGION, service_security_group='sg-not-valid').validate()
 
     def test_wrong_account_stops_before_cloudformation(self):
         self.adapter.settings = AwsSettings(REGION, expected_account='999999999999')
@@ -52,6 +57,75 @@ class AwsTests(unittest.TestCase):
             with self.assertRaisesRegex(AwsConfigurationError, '리소스를 생성하지 않았습니다'):
                 self.adapter.prepare_infrastructure()
         self.assertEqual(calls, [['sts', 'get-caller-identity']])
+
+    def test_service_group_requires_default_vpc_and_no_ingress(self):
+        self.adapter.settings = AwsSettings(REGION, service_security_group=SERVICE_GROUP)
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['ec2', 'describe-vpcs']:
+                return json.dumps({'Vpcs': [{'VpcId': 'vpc-12345678'}]})
+            return json.dumps({'SecurityGroups': [{'GroupId': SERVICE_GROUP,
+                'VpcId': 'vpc-12345678', 'IpPermissions': []}]})
+        with patch.object(self.adapter, 'aws', side_effect=aws):
+            self.adapter.validate_service_security_group()
+        self.assertEqual([args[:2] for args in calls],
+                         [['ec2', 'describe-vpcs'], ['ec2', 'describe-security-groups']])
+        with patch.object(self.adapter, 'aws', side_effect=lambda args, **kwargs:
+                json.dumps({'Vpcs': [{'VpcId': 'vpc-12345678'}]}) if args[:2] == ['ec2', 'describe-vpcs']
+                else json.dumps({'SecurityGroups': [{'GroupId': SERVICE_GROUP,
+                    'VpcId': 'vpc-12345678', 'IpPermissions': [{'IpProtocol': '-1'}]}]})):
+            with self.assertRaisesRegex(AwsConfigurationError, '인바운드'):
+                self.adapter.validate_service_security_group()
+
+    def test_custom_group_is_sent_and_verified_on_create(self):
+        self.adapter.settings = AwsSettings(REGION, service_security_group=SERVICE_GROUP)
+        image = REPOSITORY + ':' + ATTEMPT
+        host = f'on-853b928a17804449916e1acb4141349b.ecs.{REGION}.on.aws'
+        submitted = []
+        def aws(args, **_kwargs):
+            if args[:2] == ['ecr', 'get-login-password']:
+                return 'synthetic-password'
+            if args[:2] == ['ecs', 'create-express-gateway-service']:
+                spec = Path(args[args.index('--cli-input-json') + 1].removeprefix('file://'))
+                submitted.append(json.loads(spec.read_text()))
+                return json.dumps({'service': {'serviceArn': ARN, 'currentDeployment': 'deployment-1'}})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                return json.dumps({'service': {'status': {'statusCode': 'ACTIVE'},
+                    'activeConfigurations': [{'primaryContainer': {'image': image},
+                        'networkConfiguration': {'securityGroups': [SERVICE_GROUP]},
+                        'taskDefinitionArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:1',
+                        'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': host}]}]}})
+            if args[:2] == ['ecs', 'describe-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'status': 'SUCCESSFUL'}]})
+            raise AssertionError(args)
+        def command(args, **_kwargs):
+            if args[:3] == ['docker', 'context', 'inspect']:
+                return 'unix:///var/run/docker.sock'
+            return ''
+        with patch.object(self.adapter, 'validate_service_security_group'), \
+                patch.object(self.adapter, 'prepare_infrastructure',
+                             return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
+                patch('onedeploy.aws.ImageBuilder.build'), \
+                patch.object(self.adapter, 'command', side_effect=command), \
+                patch.object(self.adapter, 'aws', side_effect=aws), \
+                patch.object(self.adapter, 'verify'):
+            result = self.adapter.deploy(self.project, self.plan, ATTEMPT)
+        self.assertEqual(submitted[0]['networkConfiguration'], {'securityGroups': [SERVICE_GROUP]})
+        self.assertEqual(result['service_security_group'], SERVICE_GROUP)
+
+    def test_release_update_rejects_changed_service_group_before_build(self):
+        prior = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
+                 'service': SERVICE, 'service_arn': ARN, 'image': REPOSITORY + ':' + ATTEMPT,
+                 'url': f'https://{SERVICE}.ecs.{REGION}.on.aws',
+                 'service_security_group': SERVICE_GROUP}
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(REGION), existing=prior)
+        with patch.object(adapter, 'prepare_infrastructure',
+                          return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
+                patch('onedeploy.aws.ImageBuilder.build') as build:
+            with self.assertRaisesRegex(AwsConfigurationError, '리소스 정보'):
+                adapter.deploy(self.project, self.plan, 'b' * 16 + '-a1')
+            build.assert_not_called()
 
     def test_cloudformation_prepares_repository_and_roles(self):
         outputs = [{'OutputKey': name, 'OutputValue': value} for name, value in {

@@ -109,6 +109,32 @@ class HealthTests(unittest.TestCase):
             self.assertFalse(check_deployment(job)['healthy'])
             self.assertEqual(probe.call_count, 1)
 
+    def test_aws_health_detects_removed_service_security_group(self):
+        service = f'onedeploy-{JOB_ID}-a1'
+        group = 'sg-12345678'
+        arn = f'arn:aws:ecs:ap-northeast-2:123456789012:service/default/{service}'
+        image = f'123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/onedeploy-managed:{JOB_ID}-a1'
+        url = f'https://{service}.ecs.ap-northeast-2.on.aws'
+        job = {'id': JOB_ID, 'status': 'succeeded', 'target': 'aws-ecs-express',
+               'plan': {'health_path': '/'},
+               'aws': {'region': 'ap-northeast-2', 'service_security_group': group},
+               'result': {'service': service, 'service_arn': arn, 'account': '123456789012',
+                          'region': 'ap-northeast-2', 'image': image, 'url': url,
+                          'service_security_group': group}}
+        active = {'primaryContainer': {'image': image},
+                  'networkConfiguration': {'securityGroups': [group]},
+                  'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': url.removeprefix('https://')}]}
+        service_data = {'service': {'serviceArn': arn, 'status': {'statusCode': 'ACTIVE'},
+            'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                     {'key': 'onedeploy-attempt', 'value': JOB_ID + '-a1'}],
+            'activeConfigurations': [active]}}
+        with patch('onedeploy.health.AwsExpressAdapter.aws',
+                   side_effect=lambda *_, **__: json.dumps(service_data)), \
+                patch('onedeploy.health.probe', return_value=True):
+            self.assertTrue(check_deployment(job)['healthy'])
+            active['networkConfiguration']['securityGroups'] = []
+            self.assertFalse(check_deployment(job)['healthy'])
+
     def test_updated_aws_release_uses_original_service_owner_and_new_image(self):
         newer_job_id = 'b' * 16
         owner_attempt = JOB_ID + '-a1'

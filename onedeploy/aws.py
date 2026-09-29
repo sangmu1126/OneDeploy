@@ -33,6 +33,7 @@ class AwsSettings:
     stack_name: str = 'onedeploy-core'
     expected_account: str = ''
     account_pin_required: bool = False
+    service_security_group: str = ''
 
     @classmethod
     def from_environment(cls):
@@ -44,7 +45,8 @@ class AwsSettings:
             except (OSError, subprocess.TimeoutExpired):
                 region = ''
         return cls(region or '', expected_account=os.getenv('ONEDEPLOY_AWS_ACCOUNT_ID', ''),
-                   account_pin_required=True)
+                   account_pin_required=True,
+                   service_security_group=os.getenv('ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP', ''))
 
     def validate(self):
         if not re.fullmatch(r'[a-z]{2}-[a-z]+-\d', self.region):
@@ -55,6 +57,8 @@ class AwsSettings:
             raise AwsConfigurationError('ONEDEPLOY_AWS_ACCOUNT_ID에 12자리 AWS 계정 ID를 설정하세요.')
         if self.account_pin_required and not self.expected_account:
             raise AwsConfigurationError('AWS 배포 전에 ONEDEPLOY_AWS_ACCOUNT_ID로 대상 계정을 지정하세요.')
+        if self.service_security_group and not re.fullmatch(r'sg-[a-f0-9]{8,17}', self.service_security_group):
+            raise AwsConfigurationError('ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP에 유효한 보안 그룹 ID를 설정하세요.')
 
     def unavailable_reason(self):
         try:
@@ -108,6 +112,23 @@ class AwsExpressAdapter:
     def aws(self, args, **kwargs):
         return self.command(['aws', *args, '--region', self.settings.region, '--no-cli-pager', '--output', 'json'], **kwargs)
 
+    def validate_service_security_group(self):
+        group_id = self.settings.service_security_group
+        if not group_id:
+            return
+        self.settings.validate()
+        vpcs = json.loads(self.aws(['ec2', 'describe-vpcs', '--filters', 'Name=isDefault,Values=true'],
+                                   private=True, quiet=True)).get('Vpcs', [])
+        if len(vpcs) != 1 or not re.fullmatch(r'vpc-[a-f0-9]{8,17}', vpcs[0].get('VpcId', '')):
+            raise AwsConfigurationError('AWS 기본 VPC를 하나로 확인하지 못했습니다.')
+        groups = json.loads(self.aws(['ec2', 'describe-security-groups', '--group-ids', group_id],
+                                     private=True, quiet=True)).get('SecurityGroups', [])
+        if (len(groups) != 1 or groups[0].get('GroupId') != group_id
+                or groups[0].get('VpcId') != vpcs[0]['VpcId']
+                or groups[0].get('IpPermissions') != []):
+            raise AwsConfigurationError('추가 서비스 보안 그룹은 기본 VPC에 있어야 하며 인바운드 규칙이 없어야 합니다.')
+        self.event('infrastructure', '추가 ECS 서비스 보안 그룹의 VPC와 인바운드 규칙을 확인했습니다.')
+
     def prepare_infrastructure(self):
         self.settings.validate()
         if not shutil.which('aws') or not shutil.which('docker'):
@@ -144,6 +165,7 @@ class AwsExpressAdapter:
             raise ValueError('AWS ECS Express adapter requires an aws-ecs-express plan')
         environment = validate_environment(environment, plan.required_env)
         self.sensitive.extend(environment.values())
+        self.validate_service_security_group()
         account, repository, execution, infrastructure = self.prepare_infrastructure()
         self.image = f'{repository}:{attempt_id}'
         owner_attempt = attempt_id
@@ -159,7 +181,8 @@ class AwsExpressAdapter:
             if (not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', owner_attempt)
                     or prior.get('service') != service or prior.get('service_arn') != expected_arn
                     or prior.get('account') != account or prior.get('region') != self.settings.region
-                    or prior.get('target') != 'aws-ecs-express'):
+                    or prior.get('target') != 'aws-ecs-express'
+                    or prior.get('service_security_group', '') != self.settings.service_security_group):
                 raise AwsConfigurationError('기존 AWS 배포의 리소스 정보가 예상과 다릅니다.')
             self.validate_url(prior.get('url', ''), service, self.settings.region)
             described = json.loads(self.aws(['ecs', 'describe-express-gateway-service',
@@ -177,6 +200,9 @@ class AwsExpressAdapter:
                                 if config.get('primaryContainer', {}).get('image') == prior['image']]
             if len(previous_configs) != 1:
                 raise AwsConfigurationError('이전 ECS 실행 구성을 하나로 확인할 수 없습니다.')
+            if (self.settings.service_security_group and self.settings.service_security_group not in
+                    previous_configs[0].get('networkConfiguration', {}).get('securityGroups', [])):
+                raise AwsConfigurationError('기존 ECS 서비스의 보안 그룹 구성이 배포 기록과 다릅니다.')
             previous_task_definition = previous_configs[0].get('taskDefinitionArn')
             deployments = json.loads(self.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
                                                '--service', service], private=True, quiet=True))
@@ -222,6 +248,9 @@ class AwsExpressAdapter:
                             'scalingTarget': {'minTaskCount': 1, 'maxTaskCount': 1},
                             'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
                                      {'key': 'onedeploy-attempt', 'value': attempt_id}]})
+            if self.settings.service_security_group:
+                payload['networkConfiguration'] = {
+                    'securityGroups': [self.settings.service_security_group]}
         else:
             payload['serviceArn'] = self.service_arn
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='onedeploy-aws-service-', encoding='utf-8') as spec:
@@ -283,6 +312,10 @@ class AwsExpressAdapter:
             active = ready.get('activeConfigurations', [])
             settled = (not ready.get('currentDeployment') and len(active) == 1
                        and active[0].get('primaryContainer', {}).get('image') == self.image)
+            if (settled and self.settings.service_security_group
+                    and self.settings.service_security_group not in
+                    active[0].get('networkConfiguration', {}).get('securityGroups', [])):
+                raise AwsConfigurationError('ECS 서비스에 추가 보안 그룹이 적용되지 않았습니다.')
             if state == 'ACTIVE' and paths and deployment_ready and settled:
                 break
             if state in {'FAILED', 'INACTIVE'}:
@@ -307,6 +340,7 @@ class AwsExpressAdapter:
         return {'url': url, 'health_url': url + plan.health_path, 'service': service,
                 'service_arn': self.service_arn, 'image': self.image, 'target': 'aws-ecs-express',
                 'region': self.settings.region, 'account': account, 'public': True,
+                'service_security_group': self.settings.service_security_group,
                 'owner_attempt': owner_attempt, 'images': [*previous_images, self.image],
                 'task_definition_arn': task_definition,
                 'previous_task_definition_arn': previous_task_definition}

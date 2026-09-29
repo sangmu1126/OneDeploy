@@ -74,6 +74,11 @@ AWS CLI와 Docker CLI가 필요합니다. AWS CLI에 로그인된 계정과 리�
 서버에서 AWS 배포를 사용하려면 `ONEDEPLOY_AWS_ACCOUNT_ID`에 배포할 12자리 계정 ID도 설정하세요.
 실제 로그인 계정이 이 값과 다르면 CloudFormation 등 유료 리소스를 만들기 전에 중단합니다.
 계정 ID를 설정하지 않으면 AWS 대상은 선택할 수 없습니다.
+기본 VPC의 기존 보안 그룹을 ECS 태스크에 추가하려면 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP=sg-...`를
+설정할 수 있습니다. 배포 전 해당 그룹이 기본 VPC에 있고 **인바운드 규칙이 비어 있는지** 읽기 전용으로
+확인합니다. 생성 요청과 실제 ECS 구성에 이 그룹이 적용됐는지 확인하며, 같은 앱의 업데이트에서는
+처음 사용한 그룹을 바꿀 수 없습니다. 이 설정은 추가 네트워크 경로의 기반일 뿐 RDS나 DB 접속을
+프로비저닝하지 않으며, DB 의존 앱 차단도 그대로 유지됩니다.
 
 AWS 대상을 선택하고 **인터넷에 공개하기**를 명시적으로 선택하면, 배포 중
 [`onedeploy-core` CloudFormation 템플릿](onedeploy/infra/aws-ecs-express.yaml)을 적용합니다.
