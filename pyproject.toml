@@ -1,0 +1,19 @@
+[project]
+name = "onedeploy"
+version = "0.1.0"
+description = "Local application deployment prototype"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+onedeploy = "onedeploy.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+onedeploy = ["static/*", "infra/*"]
+
+[tool.setuptools.packages.find]
+include = ["onedeploy*"]
