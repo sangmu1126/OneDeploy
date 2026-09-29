@@ -127,7 +127,8 @@ class PostgresTests(unittest.TestCase):
             if args[:2] == ['ec2', 'describe-security-groups']:
                 return json.dumps({'SecurityGroups': [group]})
             return json.dumps({'DBInstances': [db]})
-        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
+                patch.object(self.provisioner, 'verify_execution_role'):
             result = self.provisioner.inspect(STACK)
             self.assertEqual(result['secret_arn'], SECRET)
             self.assertEqual(result['execution_role_arn'], ROLE)
@@ -146,6 +147,47 @@ class PostgresTests(unittest.TestCase):
             db['StorageEncrypted'] = False
             with self.assertRaisesRegex(AwsConfigurationError, '비공개'):
                 self.provisioner.inspect(STACK)
+
+    def test_execution_role_must_only_read_owned_secret(self):
+        role_name = ROLE.rsplit('/', 1)[-1]
+        role = {'Arn': ROLE, 'RoleName': role_name,
+                'Tags': [{'Key': 'onedeploy-managed', 'Value': 'true'},
+                         {'Key': 'onedeploy-app', 'Value': 'demo-app'}],
+                'AssumeRolePolicyDocument': {'Version': '2012-10-17', 'Statement': [{
+                    'Effect': 'Allow', 'Principal': {'Service': 'ecs-tasks.amazonaws.com'},
+                    'Action': 'sts:AssumeRole'}]}}
+        managed = {'AttachedPolicies': [{'PolicyArn':
+            'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'}],
+            'IsTruncated': False}
+        inline = {'PolicyNames': ['ReadManagedDatabaseSecret'], 'IsTruncated': False}
+        policy = {'RoleName': role_name, 'PolicyName': 'ReadManagedDatabaseSecret',
+                  'PolicyDocument': {'Version': '2012-10-17', 'Statement': [{
+                      'Effect': 'Allow', 'Action': 'secretsmanager:GetSecretValue',
+                      'Resource': SECRET}]}}
+        def aws(args, **_kwargs):
+            if args[:2] == ['iam', 'get-role']:
+                return json.dumps({'Role': role})
+            if args[:2] == ['iam', 'list-attached-role-policies']:
+                return json.dumps(managed)
+            if args[:2] == ['iam', 'list-role-policies']:
+                return json.dumps(inline)
+            if args[:2] == ['iam', 'get-role-policy']:
+                return json.dumps(policy)
+            raise AssertionError(args)
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
+            self.provisioner.verify_execution_role(ROLE, SECRET)
+            role['AssumeRolePolicyDocument']['Statement'][0]['Principal'] = {'AWS': '*'}
+            with self.assertRaisesRegex(AwsConfigurationError, '신뢰 정책'):
+                self.provisioner.verify_execution_role(ROLE, SECRET)
+            role['AssumeRolePolicyDocument']['Statement'][0]['Principal'] = {
+                'Service': 'ecs-tasks.amazonaws.com'}
+            policy['PolicyDocument']['Statement'][0]['Resource'] = '*'
+            with self.assertRaisesRegex(AwsConfigurationError, '비밀 조회 권한'):
+                self.provisioner.verify_execution_role(ROLE, SECRET)
+            policy['PolicyDocument']['Statement'][0]['Resource'] = SECRET
+            managed['AttachedPolicies'].append({'PolicyArn': 'arn:aws:iam::aws:policy/AdministratorAccess'})
+            with self.assertRaisesRegex(AwsConfigurationError, '예상 밖의 정책'):
+                self.provisioner.verify_execution_role(ROLE, SECRET)
 
     def test_inspect_current_checks_account_and_stack_name(self):
         calls = []

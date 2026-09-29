@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import tempfile
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,19 @@ from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 
 
 TEMPLATE = Path(__file__).parent / 'infra' / 'aws-postgres.json'
+
+
+def policy_document(value):
+    """AWS CLI versions may return IAM policy documents as JSON or URL-encoded JSON."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(urllib.parse.unquote(value))
+            return decoded if isinstance(decoded, dict) else {}
+        except ValueError:
+            pass
+    return {}
 
 
 @dataclass(frozen=True)
@@ -138,6 +152,47 @@ class AwsPostgresProvisioner:
             raise AwsConfigurationError('지정한 앱의 PostgreSQL 스택을 확인하지 못했습니다.')
         return self.inspect(stacks[0]['StackId'])
 
+    def verify_execution_role(self, role_arn: str, secret_arn: str) -> None:
+        """Reject a role whose trust or grants drifted beyond the managed secret."""
+        req = self.request
+        role_name = role_arn.rsplit('/', 1)[-1]
+        role = json.loads(self.adapter.aws(['iam', 'get-role', '--role-name', role_name],
+                                           private=True, quiet=True)).get('Role', {})
+        tags = {item.get('Key'): item.get('Value') for item in role.get('Tags', [])}
+        trust = policy_document(role.get('AssumeRolePolicyDocument'))
+        trust_statements = trust.get('Statement', [])
+        if isinstance(trust_statements, dict):
+            trust_statements = [trust_statements]
+        expected_trust = {'Effect': 'Allow', 'Principal': {'Service': 'ecs-tasks.amazonaws.com'},
+                          'Action': 'sts:AssumeRole'}
+        if (role.get('Arn') != role_arn or role.get('RoleName') != role_name
+                or tags.get('onedeploy-managed') != 'true'
+                or tags.get('onedeploy-app') != req.application_id
+                or trust_statements != [expected_trust]):
+            raise AwsConfigurationError('PostgreSQL ECS 실행 역할의 소유권 또는 신뢰 정책이 예상과 다릅니다.')
+        managed = json.loads(self.adapter.aws(['iam', 'list-attached-role-policies', '--role-name', role_name],
+                                              private=True, quiet=True))
+        inline = json.loads(self.adapter.aws(['iam', 'list-role-policies', '--role-name', role_name],
+                                             private=True, quiet=True))
+        if (managed.get('IsTruncated') or inline.get('IsTruncated')
+                or {item.get('PolicyArn') for item in managed.get('AttachedPolicies', [])}
+                   != {'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'}
+                or inline.get('PolicyNames') != ['ReadManagedDatabaseSecret']):
+            raise AwsConfigurationError('PostgreSQL ECS 실행 역할에 예상 밖의 정책이 연결됐습니다.')
+        document = json.loads(self.adapter.aws(['iam', 'get-role-policy', '--role-name', role_name,
+                                                '--policy-name', 'ReadManagedDatabaseSecret'],
+                                               private=True, quiet=True))
+        policy = policy_document(document.get('PolicyDocument'))
+        expected_statement = {'Effect': 'Allow', 'Action': 'secretsmanager:GetSecretValue',
+                              'Resource': secret_arn}
+        statements = policy.get('Statement', [])
+        if isinstance(statements, dict):
+            statements = [statements]
+        if (document.get('RoleName') != role_name
+                or document.get('PolicyName') != 'ReadManagedDatabaseSecret'
+                or statements != [expected_statement]):
+            raise AwsConfigurationError('PostgreSQL ECS 실행 역할의 비밀 조회 권한이 예상과 다릅니다.')
+
     def inspect(self, stack_id: str) -> dict:
         """Verify owned stack, nonpublic instance, network, and secret ARN; never read secret value."""
         req = self.request
@@ -198,6 +253,7 @@ class AwsPostgresProvisioner:
                 or rule.get('IpRanges', []) or rule.get('Ipv6Ranges', [])
                 or rule.get('PrefixListIds', [])):
             raise AwsConfigurationError('PostgreSQL 보안 그룹의 인바운드 허용 범위가 예상과 다릅니다.')
+        self.verify_execution_role(execution_role_arn, secret_arn)
         return {'stack_id': stack_id, 'database_arn': db_arn, 'database_id': req.database_id,
                 'endpoint': outputs['EndpointAddress'], 'port': 5432,
                 'secret_arn': secret_arn, 'database_security_group': group_id,
