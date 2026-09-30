@@ -1,6 +1,6 @@
 # AWS 영속 데이터 배포 경로 설계
 
-현재 OneDeploy UI는 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 배포 전에 차단한다. 아래는 AWS에서 **PostgreSQL 한 경로**를 지원하기 위한 설계와 구현 경계다. 별도 DB 생성 명령과 기존 DB를 쓰는 명시적 API 업로드가 있다. 내부 AWS 어댑터와 서버 API의 실제 DB 데이터 경로는 검증했지만 UI의 자동 DB 생성·선택 흐름은 아직 없다.
+현재 OneDeploy UI는 일반 배포에서 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 차단한다. AWS ECS Express 대상의 기존 OneDeploy PostgreSQL을 명시하는 예외 경로가 있다. 아래는 AWS에서 **PostgreSQL 한 경로**를 지원하기 위한 설계와 구현 경계다. 별도 DB 생성 명령과 기존 DB를 쓰는 명시적 API 업로드가 있다. 내부 AWS 어댑터와 서버 API의 실제 DB 데이터 경로는 검증했고 UI의 기존 DB 수동 지정 경로를 추가했다. UI의 DB 목록 탐색·자동 생성과 브라우저 실계정 끝단 검증은 아직 없다.
 
 ## 먼저 결정할 경계
 
@@ -49,8 +49,8 @@ Secrets Manager의 `username`·`password` JSON 키를 ECS 환경에 참조로 �
 `PGHOST`·`PGPORT`·`PGDATABASE`·`PGSSLMODE`도 설정하고 실제 ECS 리비전의 설정을 대조한다.
 DB 재조회 시 IAM 역할의 소유 태그·ECS 태스크 신뢰 정책·관리형/인라인 정책을 읽기 전용으로
 대조하며, 다른 권한이 붙거나 비밀 ARN 범위가 넓어지면 연결을 거부한다.
-일반 업로드 UI는 아직 이 경로를 호출하지 않으며, 실패 복구·데이터 수명주기와
-DB 선택 흐름을 검증하기 전에는 UI의 DB 앱 배포를 계속 차단한다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
+업로드 UI에서 AWS ECS Express를 선택하면 기존 OneDeploy PostgreSQL을 명시할 수 있다.
+실패 복구·데이터 수명주기 및 브라우저 실제 AWS 끝단 검증은 아직 남아 있다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
 켜고 스택 종료 보호도 적용하므로, 앱 배포 실패·서비스 종료가 데이터를 지우지 않는다. 이 설정은 계속 비용이 발생할 수 있으며,
 DB 폐기는 별도 스냅샷·보호 해제·소유권 검증 절차가 필요하다.
 
@@ -67,7 +67,7 @@ MySQL·MongoDB·혼합/불명 엔진과 `DATABASE_URL` 접속 방식은 이 경�
 서버에는 `ONEDEPLOY_AWS_ACCOUNT_ID`와 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`도 고정돼 있어야 한다.
 업로드된 앱은 PostgreSQL 단일 엔진으로 확인돼야 하고 `migrations/` SQL 묶음이 있어야 한다.
 API는 작업 생성 전에 DB 소유권을 읽기 전용으로 확인하며, DB 리소스를 새로 만들지는 않는다.
-헤더를 생략한 일반 업로드와 UI의 DB 앱 차단은 유지한다.
+헤더를 생략한 일반 업로드에서의 DB 앱 차단은 유지한다. UI는 사용자가 기존 DB와 VPC·서브넷을 명시한 경우에만 위 헤더를 보낸다.
 
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.
@@ -120,8 +120,8 @@ python3 -m onedeploy.postgres --application demo-app --account <AWS_ACCOUNT_ID> 
 이 명령은 **DB 리소스만 준비**한다. 어댑터의 내부 옵션 경로에는 앱 접속 설정과
 마이그레이션과 앱 업데이트 뒤 데이터 보존은 실제 AWS에서 검증했다. 앱 종료와 DB의
 독립적인 수명주기 및 실패 복구 검증은 아직 남아 있다.
-`--apply`를 실행해도 OneDeploy 제품 UI에서
-DB 의존 앱 차단은 해제되지 않는다. `--inspect`는 지정한 AWS 계정과 스택 소유권을 확인하고,
+`--apply`만 실행해도 OneDeploy 제품 UI에서
+DB 의존 앱 차단이 자동 해제되지는 않는다. 기존 RDS 사용을 UI에서 명시해야 한다. `--inspect`는 지정한 AWS 계정과 스택 소유권을 확인하고,
 RDS의 암호화·삭제 보호·비공개 엔드포인트·서브넷, DB 보안 그룹의 5432 인바운드 범위를 대조한다.
 2026-10-01 실제 AWS 계정에서 `demo-app` 스택의 생성·점검을 통과했다. 생성된 RDS는
 비공개·암호화·삭제 보호 상태로 보존돼 있으며 비용이 계속 발생한다.
