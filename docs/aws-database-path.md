@@ -52,3 +52,17 @@ python3 -m onedeploy.postgres --application demo-app --account <AWS_ACCOUNT_ID> 
 DB 의존 앱 차단은 해제되지 않는다. `--inspect`는 지정한 AWS 계정과 스택 소유권을 확인하고,
 RDS의 암호화·삭제 보호·비공개 엔드포인트·서브넷, DB 보안 그룹의 5432 인바운드 범위를 대조한다.
 실제 AWS 계정에서 이 생성·점검 경로는 아직 검증하지 않았다.
+
+기존 DB를 이용한 라이브 데이터 경로 smoke는 별도로 준비했다. 기본 실행은 `--inspect`와 같은
+읽기 전용 검증만 한다. `--apply`를 지정하면 인증 헤더가 필요한 임시 Node.js 앱을 ECS에 배포해
+PostgreSQL에 임의 ID를 쓰고 읽은 뒤, 같은 서비스의 새 이미지 리비전에서도 그 값을 읽는다.
+성공 시 검증 행을 삭제하고 임시 ECS 서비스와 이미지 태그를 정리한다. RDS·비밀과 smoke용 테이블은 보존된다.
+실제 AWS 계정에서 이 smoke는 아직 실행하지 않았다.
+
+```sh
+PYTHONPATH=. python3 tests/smoke_aws_postgres.py --application demo-app \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --vpc-id <DEFAULT_VPC_ID> \
+  --subnet-id <SUBNET_A_ID> --subnet-id <SUBNET_B_ID> \
+  --service-security-group <NO_INGRESS_GROUP_ID>
+# ECS와 ECR을 실제 사용하고 비용을 발생시킬 때만 --apply 추가
+```
