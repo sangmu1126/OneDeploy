@@ -1,6 +1,6 @@
 # AWS 영속 데이터 배포 경로 설계
 
-현재 OneDeploy UI는 일반 배포에서 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 차단한다. AWS ECS Express 대상의 기존 OneDeploy PostgreSQL을 명시하는 예외 경로가 있다. 아래는 AWS에서 **PostgreSQL 한 경로**를 지원하기 위한 설계와 구현 경계다. 별도 DB 생성 명령과 기존 DB를 쓰는 명시적 API 업로드가 있다. 내부 AWS 어댑터와 서버 API의 실제 DB 데이터 경로는 검증했고 UI의 기존 DB 수동 지정 경로를 추가했다. UI의 DB 목록 탐색·자동 생성과 브라우저 실계정 끝단 검증은 아직 없다.
+현재 OneDeploy UI는 일반 배포에서 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 차단한다. AWS ECS Express 대상의 기존 OneDeploy PostgreSQL을 명시하는 예외 경로가 있다. 아래는 AWS에서 **PostgreSQL 한 경로**를 지원하기 위한 설계와 구현 경계다. 별도 DB 생성 명령과 기존 DB를 쓰는 명시적 API 업로드가 있다. 내부 AWS 어댑터와 서버 API의 실제 DB 데이터 경로는 검증했고 UI에 앱 ID 기반 기존 DB 조회·명시적 사용 경로를 추가했다. 조회 API의 실계정 읽기 전용 검증도 통과했다. UI의 DB 자동 생성·여러 DB 선택과 브라우저 실계정 배포 끝단 검증은 아직 없다.
 
 ## 먼저 결정할 경계
 
@@ -68,6 +68,7 @@ MySQL·MongoDB·혼합/불명 엔진과 `DATABASE_URL` 접속 방식은 이 경�
 업로드된 앱은 PostgreSQL 단일 엔진으로 확인돼야 하고 `migrations/` SQL 묶음이 있어야 한다.
 API는 작업 생성 전에 DB 소유권을 읽기 전용으로 확인하며, DB 리소스를 새로 만들지는 않는다.
 헤더를 생략한 일반 업로드에서의 DB 앱 차단은 유지한다. UI는 사용자가 기존 DB와 VPC·서브넷을 명시한 경우에만 위 헤더를 보낸다.
+`GET /api/applications/<앱 ID>/postgres`는 세션 토큰과 서버의 AWS 계정·앱 전용 보안 그룹을 사용해 해당 앱의 RDS 인스턴스를 찾고 전체 스택·DB 소유권을 다시 확인한다. 응답에는 DB ID·계정·리전·VPC·서브넷·엔진 버전·보존 상태만 포함하고 비밀 ARN·엔드포인트는 포함하지 않는다. UI의 **이 앱의 기존 RDS 조회**가 이 값을 입력란에 채운다. 조회와 업로드 시점은 다를 수 있어 업로드 API가 다시 검사한다. 2026-10-01 실제 AWS 계정에서 인증 HTTP 조회를 읽기 전용으로 통과했다.
 
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.

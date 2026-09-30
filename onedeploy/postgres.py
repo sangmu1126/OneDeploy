@@ -65,6 +65,36 @@ class PostgresRequest:
             raise ValueError('ECS 태스크에 추가할 서비스 보안 그룹 ID가 필요합니다.')
 
 
+def discover_existing_postgres(application_id: str, settings: AwsSettings) -> dict:
+    """Find only this app's database, then run the full read-only ownership audit."""
+    if not re.fullmatch(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*', application_id or '') \
+            or not 3 <= len(application_id) <= 31:
+        raise ValueError('DB 앱 ID가 올바르지 않습니다.')
+    settings.validate()
+    if not settings.expected_account or not settings.service_security_group:
+        raise AwsConfigurationError('AWS 계정과 앱 전용 서비스 보안 그룹을 서버에 고정하세요.')
+    adapter = AwsExpressAdapter(lambda *_: None, settings)
+    identity = json.loads(adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
+    if identity.get('Account') != settings.expected_account:
+        raise AwsConfigurationError('현재 AWS 계정이 지정한 계정과 다릅니다.')
+    database_id = 'onedeploy-' + application_id
+    instances = json.loads(adapter.aws(['rds', 'describe-db-instances',
+        '--db-instance-identifier', database_id], private=True, quiet=True)).get('DBInstances', [])
+    if len(instances) != 1 or instances[0].get('DBInstanceIdentifier') != database_id:
+        raise AwsConfigurationError('지정한 앱의 PostgreSQL 인스턴스를 확인하지 못했습니다.')
+    subnet_group = instances[0].get('DBSubnetGroup', {})
+    request = PostgresRequest(application_id, settings.expected_account, settings.region,
+        subnet_group.get('VpcId', ''), tuple(item.get('SubnetIdentifier', '')
+        for item in subnet_group.get('Subnets', [])), settings.service_security_group)
+    request.validate()
+    database = AwsPostgresProvisioner(request).inspect_current()
+    return {'database_id': database['database_id'], 'account': settings.expected_account,
+            'region': settings.region, 'vpc_id': request.vpc_id,
+            'subnet_ids': list(request.subnet_ids), 'engine_version': database['engine_version'],
+            'status': database['status'], 'deletion_protection': database['deletion_protection'],
+            'retained_on_stack_delete': database['retained_on_stack_delete']}
+
+
 class AwsPostgresProvisioner:
     def __init__(self, request: PostgresRequest, event=lambda *_: None):
         request.validate()

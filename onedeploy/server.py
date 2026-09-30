@@ -18,14 +18,14 @@ from pathlib import Path
 
 from onedeploy.analysis import AISettings, analyze_project, redact
 from onedeploy.agent import DeploymentAgent, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
-from onedeploy.aws import AwsExpressAdapter, AwsSettings
+from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 from onedeploy.cloud import CloudRunAdapter, CloudRunSettings
 from onedeploy.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from onedeploy.health import check_deployment
 from onedeploy.infrastructure import (TARGET_RESOURCES, OpenAIInfrastructurePlanner,
                                       inspect_infrastructure, plan_infrastructure, validate_infrastructure)
 from onedeploy.migrations import collect_sql_migrations
-from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
+from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest, discover_existing_postgres
 
 
 def postgres_request_from_job(job: dict) -> PostgresRequest | None:
@@ -854,6 +854,13 @@ def handler_for(app: App):
                 return
             if self.path == "/api/jobs":
                 self.json_response(200, app.summaries())
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, discover_existing_postgres(application_id, app.aws_settings))
+                except (ValueError, AwsConfigurationError) as exc:
+                    self.json_response(400, {"error": str(exc)})
                 return
             if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/releases", self.path):
                 application_id = self.path.split('/')[3]

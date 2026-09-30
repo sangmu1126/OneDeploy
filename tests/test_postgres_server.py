@@ -59,6 +59,30 @@ class PostgresServerTests(unittest.TestCase):
             handler.do_POST()
         return handler.json_response.call_args.args
 
+    def test_lookup_existing_database_returns_only_verified_network(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres'
+        handler.headers = {'X-OneDeploy-Token': self.app.token}
+        handler.json_response = Mock()
+        database = {'database_id': 'onedeploy-demo-app', 'account': ACCOUNT,
+                    'region': REGION, 'vpc_id': 'vpc-12345678',
+                    'subnet_ids': ['subnet-11111111', 'subnet-22222222'],
+                    'status': 'available'}
+        with patch('onedeploy.server.discover_existing_postgres', return_value=database) as discover:
+            handler.do_GET()
+        discover.assert_called_once_with('demo-app', self.settings)
+        self.assertEqual(handler.json_response.call_args.args, (200, database))
+
+    def test_lookup_requires_session_token(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres'
+        handler.headers = {}
+        handler.json_response = Mock()
+        with patch('onedeploy.server.discover_existing_postgres') as discover:
+            handler.do_GET()
+        discover.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+
     def test_opt_in_upload_persists_and_restores_postgres_request(self):
         database = {'database_id': 'onedeploy-demo-app'}
         with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',

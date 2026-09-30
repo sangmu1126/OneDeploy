@@ -8,7 +8,7 @@
 **배포하기**를 누르면 작업용 소스의 읽기·수정, Dockerfile 준비, 빌드·실행, HTTP 검증을 진행합니다.
 자동 선택에서는 AI가 소스 근거와 이유를 제시하고, 서버가 현재 사용 가능한 대상·공개 범위·지원 작업 유형을 검증합니다.
 일반 배포에서 실행 가능한 인프라는 **영속 데이터와 별도 워커가 없는 단일 HTTP 컨테이너**입니다. AWS ECS Express Mode에서는 기존 OneDeploy PostgreSQL RDS를 명시해 연결하는 제한된 경로도 있습니다. 그 외 SQLite·MySQL·MongoDB·로컬 파일 저장·백그라운드 워커 의존이 감지되면 데이터 손실이나 작업 누락을 막기 위해 배포를 시작하지 않습니다.
-기존 RDS를 연결하려면 **AWS ECS Express Mode**와 **인터넷에 공개하기**를 선택하고 **기존 OneDeploy PostgreSQL RDS 사용**을 체크하세요. 앱 ID에 해당하는 RDS의 VPC ID와 서로 다른 서브넷 ID 2~8개를 입력합니다. 서버에는 `ONEDEPLOY_AWS_ACCOUNT_ID`와 앱 전용 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`을 고정해야 합니다. 업로드 앱은 PostgreSQL 단일 엔진과 `migrations/` SQL 묶음을 사용해야 합니다. 서버가 DB 소유권을 확인한 뒤 배포하며, 이 흐름은 DB를 새로 만들지 않습니다. ECS와 기존 RDS 비용이 발생하고 앱 종료 후에도 DB는 남습니다.
+기존 RDS를 연결하려면 **AWS ECS Express Mode**와 **인터넷에 공개하기**를 선택하고 **기존 OneDeploy PostgreSQL RDS 사용**을 체크하세요. **이 앱의 기존 RDS 조회**를 눌러 서버가 소유권을 확인한 VPC·서브넷 ID를 채우거나, 해당 ID를 직접 입력합니다. 서버에는 `ONEDEPLOY_AWS_ACCOUNT_ID`와 앱 전용 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`을 고정해야 합니다. 업로드 앱은 PostgreSQL 단일 엔진과 `migrations/` SQL 묶음을 사용해야 합니다. 서버가 DB 소유권을 확인한 뒤 배포하며, 이 흐름은 DB를 새로 만들지 않습니다. ECS와 기존 RDS 비용이 발생하고 앱 종료 후에도 DB는 남습니다.
 빌드 또는 실행이 실패하면 결과를 AI에 전달하고 최대 두 번 수정·재시도합니다.
 분석 결과를 검토·승인하는 단계는 없습니다. 필요한 환경변수 값만 진행 중에 요청합니다.
 
@@ -214,7 +214,7 @@ PYTHONPATH=.:tests python3 tests/smoke_aws_live_ai.py --account <AWS_ACCOUNT_ID>
 - 현재 상태 재검사: 성공 이력에서 버튼을 눌러 소유 리소스·실행 상태·HTTP 200을 다시 확인
 - 배포 종료: Local Docker, Cloud Run, AWS ECS Express는 성공 작업의 소유 리소스를 확인한 뒤 종료 가능
 - 제한: 배포 시도 최대 3회, AI 도구 호출 최대 24회, 개별 도구 시간 제한 및 루프의 경과 시간 검사
-- 미구현: UI의 영속 DB 자동 생성·목록 탐색·데이터 이전, GitHub URL 입력, 실행 중 취소, 다중 사용자 격리. 기존 OneDeploy RDS를 명시한 AWS API 업로드와 내부 어댑터의 RDS·마이그레이션·데이터 경로는 실계정 smoke를 통과. UI의 기존 RDS 명시 경로는 입력 검증 테스트를 통과했으며 브라우저에서의 실제 AWS 끝단 검증은 아직 없음. 실제 모델의 자동 대상 판단은 API 키 미설정으로 미검증
+- 미구현: UI의 영속 DB 자동 생성·여러 DB 선택·데이터 이전, GitHub URL 입력, 실행 중 취소, 다중 사용자 격리. 기존 OneDeploy RDS를 명시한 AWS API 업로드와 내부 어댑터의 RDS·마이그레이션·데이터 경로는 실계정 smoke를 통과. UI의 기존 RDS 명시 경로는 입력 검증 테스트를 통과했으며 브라우저에서의 실제 AWS 끝단 검증은 아직 없음. 실제 모델의 자동 대상 판단은 API 키 미설정으로 미검증
 
 AWS에서는 동일한 앱 ID로 다시 배포할 때 소유 중인 기존 ECS Express 서비스를 업데이트하므로 URL을 유지합니다.
 AWS의 카나리 전환을 사용하며 실패한 **진행 중** 배포에는 롤백을 요청할 수 있습니다. 완료된 릴리스는

@@ -3,8 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from onedeploy.aws import AwsConfigurationError
-from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest, TEMPLATE, main
+from onedeploy.aws import AwsConfigurationError, AwsSettings
+from onedeploy.postgres import (AwsPostgresProvisioner, PostgresRequest, TEMPLATE,
+                                discover_existing_postgres, main)
 
 
 ACCOUNT = '123456789012'
@@ -306,6 +307,39 @@ class PostgresTests(unittest.TestCase):
             with self.assertRaisesRegex(AwsConfigurationError, '계정'):
                 self.provisioner.inspect_current()
             inspect.assert_not_called()
+
+    def test_discovery_uses_app_instance_network_then_checks_full_ownership(self):
+        settings = AwsSettings(REGION, expected_account=ACCOUNT,
+                               service_security_group=SERVICE_GROUP)
+        calls = []
+        def aws(_adapter, args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            return json.dumps({'DBInstances': [{'DBInstanceIdentifier': 'onedeploy-demo-app',
+                'DBSubnetGroup': {'VpcId': VPC, 'Subnets': [
+                    {'SubnetIdentifier': subnet} for subnet in SUBNETS]}}]})
+        verified = {'database_id': 'onedeploy-demo-app', 'engine_version': '18.3',
+                    'status': 'available', 'deletion_protection': True,
+                    'retained_on_stack_delete': True, 'secret_arn': SECRET}
+        with patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws), \
+                patch('onedeploy.postgres.AwsPostgresProvisioner.inspect_current',
+                      return_value=verified) as inspect:
+            result = discover_existing_postgres('demo-app', settings)
+        self.assertEqual(calls[1][:4], ['rds', 'describe-db-instances',
+                                        '--db-instance-identifier', 'onedeploy-demo-app'])
+        self.assertEqual(inspect.call_args.args, ())
+        self.assertEqual(result['subnet_ids'], list(SUBNETS))
+        self.assertNotIn('secret_arn', result)
+
+    def test_discovery_rejects_wrong_account_before_database_read(self):
+        settings = AwsSettings(REGION, expected_account=ACCOUNT,
+                               service_security_group=SERVICE_GROUP)
+        with patch('onedeploy.postgres.AwsExpressAdapter.aws',
+                   return_value=json.dumps({'Account': '999999999999'})) as aws:
+            with self.assertRaisesRegex(AwsConfigurationError, '계정'):
+                discover_existing_postgres('demo-app', settings)
+        self.assertEqual(aws.call_count, 1)
 
     def test_dry_run_never_creates_stack(self):
         arguments = ['--application', 'demo-app', '--account', ACCOUNT, '--region', REGION,
