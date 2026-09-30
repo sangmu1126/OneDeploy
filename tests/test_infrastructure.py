@@ -77,6 +77,7 @@ class InfrastructureTests(unittest.TestCase):
             profile = inspect_infrastructure(project)
             self.assertEqual(profile.storage, 'database')
             self.assertEqual(profile.requirements, ('database',))
+            self.assertEqual(profile.database_engines, ('postgresql',))
             self.assertEqual(profile.evidence, ('package.json', 'schema.prisma'))
             with self.assertRaisesRegex(ValueError, '마이그레이션'):
                 validate_infrastructure(profile, 'aws-ecs-express')
@@ -91,6 +92,7 @@ class InfrastructureTests(unittest.TestCase):
             profile = inspect_infrastructure(project)
             self.assertEqual(profile.requirements, ('database',))
             self.assertEqual(profile.evidence, ('app.py', 'requirements.txt'))
+            self.assertEqual(profile.database_engines, ('mongodb', 'postgresql'))
 
     def test_detects_database_from_pyproject_runtime_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -99,7 +101,24 @@ class InfrastructureTests(unittest.TestCase):
                 '[project]\ndependencies = ["psycopg[binary]>=3.1"]\n')
             profile = inspect_infrastructure(project)
             self.assertEqual(profile.requirements, ('database',))
+            self.assertEqual(profile.database_engines, ('postgresql',))
             self.assertEqual(profile.evidence, ('pyproject.toml',))
+
+    def test_mixed_or_unknown_database_engine_is_not_mistaken_for_postgres(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'package.json').write_text(json.dumps({
+                'dependencies': {'pg': '8.23.0', 'mysql2': '3.0.0'}}))
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.database_engines, ('mysql', 'postgresql'))
+            with self.assertRaisesRegex(ValueError, 'mysql'):
+                validate_infrastructure(profile, 'aws-ecs-express', postgres=True)
+            (project / 'package.json').write_text(json.dumps({
+                'dependencies': {'@prisma/client': '6.0.0'}}))
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.database_engines, ('unknown',))
+            with self.assertRaisesRegex(ValueError, 'unknown'):
+                validate_infrastructure(profile, 'aws-ecs-express', postgres=True)
 
     def test_database_dependency_only_in_dev_does_not_block(self):
         with tempfile.TemporaryDirectory() as directory:

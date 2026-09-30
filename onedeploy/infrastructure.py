@@ -30,6 +30,25 @@ DATABASE_DEPENDENCIES = {
     'psycopg', 'psycopg2', 'psycopg2-binary', 'asyncpg', 'pymysql', 'mysqlclient',
     'pymongo', 'motor', 'sqlalchemy',
 }
+DATABASE_ENGINE_DEPENDENCIES = {
+    'postgresql': {'pg', 'postgres', 'psycopg', 'psycopg2', 'psycopg2-binary', 'asyncpg'},
+    'mysql': {'mysql', 'mysql2', 'mariadb', 'pymysql', 'mysqlclient'},
+    'mongodb': {'mongodb', 'mongoose', 'pymongo', 'motor'},
+}
+DATABASE_ENGINE_SOURCE = {
+    'postgresql': re.compile(
+        r"\b(?:require\s*\(?\s*|from\s+)['\"](?:pg|postgres)['\"]|"
+        r"\b(?:import|from)\s+(?:psycopg2?|asyncpg)(?:\b|\.)|"
+        r"\bprovider\s*=\s*['\"]postgresql['\"]|\bpostgres(?:ql)?(?:\+\w+)?://", re.I),
+    'mysql': re.compile(
+        r"\b(?:require\s*\(?\s*|from\s+)['\"](?:mysql2?|mariadb)['\"]|"
+        r"\b(?:import|from)\s+(?:pymysql|MySQLdb)(?:\b|\.)|"
+        r"\bprovider\s*=\s*['\"]mysql['\"]|\bmysql(?:\+\w+)?://", re.I),
+    'mongodb': re.compile(
+        r"\b(?:require\s*\(?\s*|from\s+)['\"](?:mongodb|mongoose)['\"]|"
+        r"\b(?:import|from)\s+(?:pymongo|motor)(?:\b|\.)|"
+        r"\bprovider\s*=\s*['\"]mongodb['\"]|\bmongodb(?:\+\w+)?://", re.I),
+}
 DATABASE_SOURCE = re.compile(
     r"\b(?:require\s*\(?\s*|from\s+)['\"](?:pg|postgres|mysql2?|mariadb|mongodb|mongoose)['\"]|"
     r"\b(?:import|from)\s+(?:psycopg2?|asyncpg|pymysql|MySQLdb|pymongo|motor|sqlalchemy)(?:\b|\.)|"
@@ -78,6 +97,7 @@ class InfrastructureProfile:
     evidence: tuple[str, ...]
     scanned_files: int
     requirements: tuple[str, ...] = ()
+    database_engines: tuple[str, ...] = ()
 
     def as_dict(self):
         return asdict(self)
@@ -87,6 +107,7 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     """Find known durable-storage needs; absence of signals is not a statelessness proof."""
     evidence = []
     requirements = set()
+    database_engines = set()
     scanned = 0
     budget = 1024 * 1024
     for path in sorted(project.rglob('*')):
@@ -118,6 +139,9 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                     found.add('sqlite')
                 if any(name.lower() in DATABASE_DEPENDENCIES for name in runtime_dependencies):
                     found.add('database')
+                for engine, names in DATABASE_ENGINE_DEPENDENCIES.items():
+                    if any(name.lower() in names for name in runtime_dependencies):
+                        database_engines.add(engine)
                 if (any(name.lower() in WORKER_DEPENDENCIES for name in runtime_dependencies)
                         or any(name.lower() in {'worker', 'queue', 'jobs'} for name in package.get('scripts', {}))):
                     found.add('background-worker')
@@ -128,6 +152,11 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                 found.add('sqlite')
             if re.search(r'(?im)^\s*["\']?(?:psycopg2?(?:-binary)?|asyncpg|pymysql|mysqlclient|pymongo|motor|sqlalchemy)(?:\[[^\]]+\])?["\']?(?:\s|[=<>~;,{]|$)', content):
                 found.add('database')
+            for engine, names in DATABASE_ENGINE_DEPENDENCIES.items():
+                if any(re.search(r'(?im)^\s*["\']?' + re.escape(name)
+                                 + r'(?:\[[^\]]+\])?["\']?(?:\s|[=<>~;,{]|$)', content)
+                       for name in names):
+                    database_engines.add(engine)
             if (re.search(r'(?im)^\s*(?:["\']?)(?:celery|rq|huey|dramatiq|sidekiq|resque)(?:["\']?)(?:\s|[=<>~;,{]|$)', content)
                     or (path.name == 'Procfile' and re.search(r'(?im)^\s*worker\s*:', content))):
                 found.add('background-worker')
@@ -143,6 +172,9 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                         names.extend(name.lower() for name in poetry)
                     if any(name in DATABASE_DEPENDENCIES for name in names):
                         found.add('database')
+                    for engine, names_for_engine in DATABASE_ENGINE_DEPENDENCIES.items():
+                        if any(name in names_for_engine for name in names):
+                            database_engines.add(engine)
                 except (ValueError, TypeError, AttributeError):
                     pass
         if path.suffix in SOURCE_EXTENSIONS:
@@ -150,6 +182,9 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                 found.add('sqlite')
             if DATABASE_SOURCE.search(content):
                 found.add('database')
+            for engine, pattern in DATABASE_ENGINE_SOURCE.items():
+                if pattern.search(content):
+                    database_engines.add(engine)
             if LOCAL_WRITE.search(content):
                 found.add('local-files')
         if found:
@@ -158,15 +193,21 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                 evidence.append(relative.as_posix())
     storage = ('sqlite' if 'sqlite' in requirements else 'database' if 'database' in requirements
                else 'local-files' if 'local-files' in requirements else 'unconfirmed')
-    return InfrastructureProfile(storage, tuple(evidence), scanned, tuple(sorted(requirements)))
+    if 'database' in requirements and not database_engines:
+        database_engines.add('unknown')
+    return InfrastructureProfile(storage, tuple(evidence), scanned, tuple(sorted(requirements)),
+                                 tuple(sorted(database_engines)))
 
 
-def validate_infrastructure(profile: InfrastructureProfile, target: str) -> None:
+def validate_infrastructure(profile: InfrastructureProfile, target: str, *, postgres: bool = False) -> None:
     problems = []
     if 'sqlite' in profile.requirements or profile.storage == 'sqlite':
         problems.append('SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다')
     if 'database' in profile.requirements or profile.storage == 'database':
-        problems.append('데이터베이스 서비스 연결·마이그레이션 검증이 필요합니다')
+        if not (postgres and target == 'aws-ecs-express'
+                and profile.database_engines == ('postgresql',)):
+            engines = ', '.join(profile.database_engines) if profile.database_engines else '불명'
+            problems.append(f'{engines} 데이터베이스 서비스 연결·마이그레이션 검증이 필요합니다')
     if 'local-files' in profile.requirements:
         problems.append('로컬 파일 쓰기에 영속 저장소가 필요합니다')
     if 'background-worker' in profile.requirements:
