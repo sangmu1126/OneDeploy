@@ -94,23 +94,44 @@ class AwsPostgresProvisioner:
                        or not item.get('AvailabilityZone') for item in subnets)
                 or len({item['AvailabilityZone'] for item in subnets}) < 2):
             raise AwsConfigurationError('DB 서브넷은 같은 VPC의 사용 가능한 서로 다른 가용 영역 두 곳 이상에 있어야 합니다.')
+        versions = json.loads(self.adapter.aws(['rds', 'describe-db-engine-versions', '--engine',
+            'postgres', '--default-only'], private=True, quiet=True)).get('DBEngineVersions', [])
+        version = versions[0].get('EngineVersion') if len(versions) == 1 else None
+        if (not isinstance(version, str) or not re.fullmatch(r'\d+\.\d+(?:\.\d+)?', version)
+                or versions[0].get('Engine') != 'postgres'):
+            raise AwsConfigurationError('이 리전의 기본 PostgreSQL 엔진 버전을 확인하지 못했습니다.')
         orderable = json.loads(self.adapter.aws(['rds', 'describe-orderable-db-instance-options',
-            '--engine', 'postgres', '--db-instance-class', 'db.t4g.micro', '--max-items', '1'],
+            '--engine', 'postgres', '--engine-version', version,
+            '--db-instance-class', 'db.t4g.micro', '--vpc'],
             private=True, quiet=True)).get('OrderableDBInstanceOptions', [])
-        if not orderable or orderable[0].get('DBInstanceClass') != 'db.t4g.micro':
-            raise AwsConfigurationError('이 리전에서 PostgreSQL db.t4g.micro 구성을 확인하지 못했습니다.')
+        zones = {item['AvailabilityZone'] for item in subnets}
+        if not any(option.get('Engine') == 'postgres'
+                   and option.get('EngineVersion') == version
+                   and option.get('DBInstanceClass') == 'db.t4g.micro'
+                   and option.get('StorageType') == 'gp3'
+                   and option.get('Vpc') is True
+                   and option.get('SupportsStorageEncryption') is True
+                   and isinstance(option.get('MinStorageSize'), int)
+                   and option['MinStorageSize'] <= 20
+                   and isinstance(option.get('MaxStorageSize'), int)
+                   and option['MaxStorageSize'] >= 20
+                   and zones.issubset({az.get('Name') for az in option.get('AvailabilityZones', [])})
+                   for option in orderable):
+            raise AwsConfigurationError('이 리전·가용 영역에서 기본 PostgreSQL 버전의 암호화된 db.t4g.micro/gp3 20GiB 구성을 확인하지 못했습니다.')
         return {'account': req.account, 'region': req.region, 'vpc_id': req.vpc_id,
                 'subnet_ids': list(req.subnet_ids), 'availability_zones': sorted({
                     item['AvailabilityZone'] for item in subnets}),
                 'service_security_group': req.service_security_group,
                 'stack_name': req.stack_name, 'database_id': req.database_id,
-                'instance_class': 'db.t4g.micro', 'storage_gib': 20,
+                'instance_class': 'db.t4g.micro', 'engine_version': version,
+                'storage_type': 'gp3', 'storage_gib': 20,
+                'extended_support': False,
                 'publicly_accessible': False, 'deletion_protection': True,
                 'retained_on_stack_delete': True}
 
     def create(self) -> dict:
         """Create one new stack only; never update or auto-delete a database."""
-        self.preflight()
+        plan = self.preflight()
         req = self.request
         template = TEMPLATE.read_text(encoding='utf-8')
         payload = {'StackName': req.stack_name, 'TemplateBody': template,
@@ -118,6 +139,7 @@ class AwsPostgresProvisioner:
                    'Capabilities': ['CAPABILITY_IAM'],
                    'Parameters': [
                        {'ParameterKey': 'ApplicationId', 'ParameterValue': req.application_id},
+                       {'ParameterKey': 'EngineVersion', 'ParameterValue': plan['engine_version']},
                        {'ParameterKey': 'VpcId', 'ParameterValue': req.vpc_id},
                        {'ParameterKey': 'SubnetIds', 'ParameterValue': ','.join(req.subnet_ids)},
                        {'ParameterKey': 'ServiceSecurityGroupId', 'ParameterValue': req.service_security_group}],
@@ -210,8 +232,11 @@ class AwsPostgresProvisioner:
         secret_arn = outputs.get('SecretArn', '')
         execution_role_arn = outputs.get('DatabaseExecutionRoleArn', '')
         group_id = outputs.get('DatabaseSecurityGroupId', '')
+        requested_version = outputs.get('RequestedEngineVersion', '')
         if (tags.get('onedeploy-managed') != 'true' or tags.get('onedeploy-app') != req.application_id
                 or outputs.get('DatabaseIdentifier') != req.database_id or outputs.get('DatabaseArn') != db_arn
+                or not isinstance(requested_version, str)
+                or not re.fullmatch(r'\d+\.\d+(?:\.\d+)?', requested_version)
                 or not isinstance(secret_arn, str) or not secret_arn.startswith(
                     f'arn:aws:secretsmanager:{req.region}:{req.account}:secret:')
                 or not isinstance(execution_role_arn, str) or not re.fullmatch(
@@ -230,6 +255,11 @@ class AwsPostgresProvisioner:
         attached = {item.get('VpcSecurityGroupId') for item in db.get('VpcSecurityGroups', [])}
         if (db.get('DBInstanceIdentifier') != req.database_id or db.get('DBInstanceArn') != db_arn
                 or db.get('DBInstanceStatus') != 'available' or db.get('Engine') != 'postgres'
+                or not isinstance(db.get('EngineVersion'), str)
+                or db['EngineVersion'].split('.')[0] != requested_version.split('.')[0]
+                or db.get('DBInstanceClass') != 'db.t4g.micro'
+                or db.get('StorageType') != 'gp3' or db.get('AllocatedStorage') != 20
+                or db.get('EngineLifecycleSupport') != 'open-source-rds-extended-support-disabled'
                 or db.get('DBName') != 'appdb' or db.get('PubliclyAccessible') is not False
                 or db.get('DeletionProtection') is not True or db.get('StorageEncrypted') is not True
                 or db.get('DBSubnetGroup', {}).get('VpcId') != req.vpc_id
@@ -258,6 +288,8 @@ class AwsPostgresProvisioner:
         self.verify_execution_role(execution_role_arn, secret_arn)
         return {'stack_id': stack_id, 'database_arn': db_arn, 'database_id': req.database_id,
                 'endpoint': outputs['EndpointAddress'], 'port': 5432,
+                'engine_version': db['EngineVersion'], 'storage_type': 'gp3', 'storage_gib': 20,
+                'extended_support': False,
                 'secret_arn': secret_arn, 'database_security_group': group_id,
                 'execution_role_arn': execution_role_arn,
                 'migration_log_group': outputs['MigrationLogGroupName'],

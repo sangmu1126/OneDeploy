@@ -35,6 +35,9 @@ class PostgresTests(unittest.TestCase):
         self.assertTrue(properties['DeletionProtection'])
         self.assertTrue(properties['StorageEncrypted'])
         self.assertTrue(properties['ManageMasterUserPassword'])
+        self.assertEqual(properties['EngineVersion'], {'Ref': 'EngineVersion'})
+        self.assertEqual(properties['EngineLifecycleSupport'],
+                         'open-source-rds-extended-support-disabled')
         self.assertNotIn('MasterUserPassword', properties)
         self.assertEqual(template['Resources']['DatabaseSecurityGroup']['Properties']
                          ['SecurityGroupIngress'][0]['SourceSecurityGroupId'],
@@ -65,17 +68,35 @@ class PostgresTests(unittest.TestCase):
                     {'SubnetId': SUBNETS[0], 'VpcId': VPC, 'State': 'available', 'AvailabilityZone': 'a'},
                     {'SubnetId': SUBNETS[1], 'VpcId': VPC, 'State': 'available', 'AvailabilityZone': 'b'}]})
             if args[:2] == ['rds', 'describe-orderable-db-instance-options']:
-                return json.dumps({'OrderableDBInstanceOptions': [{'DBInstanceClass': 'db.t4g.micro'}]})
+                return json.dumps({'OrderableDBInstanceOptions': [{
+                    'Engine': 'postgres', 'EngineVersion': '17.5',
+                    'DBInstanceClass': 'db.t4g.micro', 'StorageType': 'gp3', 'Vpc': True,
+                    'SupportsStorageEncryption': True, 'MinStorageSize': 20,
+                    'MaxStorageSize': 65536,
+                    'AvailabilityZones': [{'Name': 'a'}, {'Name': 'b'}]}]})
+            if args[:2] == ['rds', 'describe-db-engine-versions']:
+                return json.dumps({'DBEngineVersions': [{'Engine': 'postgres', 'EngineVersion': '17.5'}]})
             raise AssertionError(args)
         with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
             result = self.provisioner.preflight()
         self.assertEqual(result['availability_zones'], ['a', 'b'])
+        self.assertEqual(result['engine_version'], '17.5')
+        self.assertEqual(result['storage_type'], 'gp3')
         self.assertEqual(calls, [['sts', 'get-caller-identity'], ['ec2', 'describe-vpcs'],
                                  ['ec2', 'describe-security-groups'], ['ec2', 'describe-subnets'],
+                                 ['rds', 'describe-db-engine-versions'],
                                  ['rds', 'describe-orderable-db-instance-options']])
         with patch.object(self.provisioner.adapter, 'aws',
                           side_effect=lambda args, **kwargs: json.dumps({'Account': '999999999999'})):
             with self.assertRaisesRegex(AwsConfigurationError, '현재 AWS 계정'):
+                self.provisioner.preflight()
+        def wrong_storage(args, **kwargs):
+            result = json.loads(aws(args, **kwargs))
+            if args[:2] == ['rds', 'describe-orderable-db-instance-options']:
+                result['OrderableDBInstanceOptions'][0]['StorageType'] = 'gp2'
+            return json.dumps(result)
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=wrong_storage):
+            with self.assertRaisesRegex(AwsConfigurationError, 'gp3'):
                 self.provisioner.preflight()
 
     def test_create_uses_create_only_and_checks_output_after_wait(self):
@@ -89,13 +110,15 @@ class PostgresTests(unittest.TestCase):
                 self.assertEqual(payload['StackName'], self.request.stack_name)
                 self.assertTrue(payload['EnableTerminationProtection'])
                 self.assertEqual(payload['Capabilities'], ['CAPABILITY_IAM'])
+                self.assertIn({'ParameterKey': 'EngineVersion', 'ParameterValue': '17.5'},
+                              payload['Parameters'])
                 self.assertEqual(json.loads(payload['TemplateBody'])['Resources']['Database']
                                  ['Properties']['PubliclyAccessible'], False)
                 return json.dumps({'StackId': STACK})
             if args[:2] == ['cloudformation', 'wait']:
                 return ''
             raise AssertionError(args)
-        with patch.object(self.provisioner, 'preflight'), \
+        with patch.object(self.provisioner, 'preflight', return_value={'engine_version': '17.5'}), \
                 patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
                 patch.object(self.provisioner, 'inspect', return_value={'status': 'available'}) as inspect:
             self.assertEqual(self.provisioner.create(), {'status': 'available'})
@@ -108,12 +131,16 @@ class PostgresTests(unittest.TestCase):
                           {'Key': 'onedeploy-app', 'Value': 'demo-app'}],
                  'Outputs': [{'OutputKey': key, 'OutputValue': value} for key, value in {
                      'DatabaseIdentifier': 'onedeploy-demo-app', 'DatabaseArn': DB_ARN,
+                     'RequestedEngineVersion': '17.5',
                      'EndpointAddress': HOST, 'EndpointPort': '5432',
                      'SecretArn': SECRET, 'DatabaseExecutionRoleArn': ROLE,
                      'MigrationLogGroupName': '/onedeploy/migrations/demo-app',
                      'DatabaseSecurityGroupId': DB_GROUP}.items()]}
         db = {'DBInstanceIdentifier': 'onedeploy-demo-app', 'DBInstanceArn': DB_ARN,
-              'DBInstanceStatus': 'available', 'Engine': 'postgres', 'DBName': 'appdb',
+              'DBInstanceStatus': 'available', 'Engine': 'postgres', 'EngineVersion': '17.5',
+              'DBInstanceClass': 'db.t4g.micro', 'StorageType': 'gp3', 'AllocatedStorage': 20,
+              'EngineLifecycleSupport': 'open-source-rds-extended-support-disabled',
+              'DBName': 'appdb',
               'PubliclyAccessible': False, 'DeletionProtection': True, 'StorageEncrypted': True,
               'DBSubnetGroup': {'VpcId': VPC, 'Subnets': [
                   {'SubnetIdentifier': subnet} for subnet in SUBNETS]},
@@ -134,6 +161,11 @@ class PostgresTests(unittest.TestCase):
             result = self.provisioner.inspect(STACK)
             self.assertEqual(result['secret_arn'], SECRET)
             self.assertEqual(result['execution_role_arn'], ROLE)
+            self.assertEqual(result['engine_version'], '17.5')
+            db['EngineLifecycleSupport'] = 'open-source-rds-extended-support'
+            with self.assertRaisesRegex(AwsConfigurationError, '실제 인스턴스'):
+                self.provisioner.inspect(STACK)
+            db['EngineLifecycleSupport'] = 'open-source-rds-extended-support-disabled'
             db['PubliclyAccessible'] = True
             with self.assertRaisesRegex(AwsConfigurationError, '비공개'):
                 self.provisioner.inspect(STACK)
