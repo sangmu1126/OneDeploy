@@ -1,11 +1,13 @@
 import json
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from onedeploy.aws_migrations import AwsMigrationRunner
+from onedeploy.aws_migrations import AwsMigrationRunner, inspect_migration_task, main
 from onedeploy.migrations import collect_sql_migrations
 from onedeploy.postgres import PostgresRequest
 
@@ -14,7 +16,7 @@ ACCOUNT = '123456789012'
 REGION = 'ap-northeast-2'
 ATTEMPT = 'a' * 16 + '-a1'
 TASK_DEF = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/onedeploy-migrate-{ATTEMPT}:1'
-TASK = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task/default/1234567890abcdef'
+TASK = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task/default/' + '1234567890abcdef' * 2
 
 
 class AwsMigrationTests(unittest.TestCase):
@@ -31,7 +33,7 @@ class AwsMigrationTests(unittest.TestCase):
                          'execution_role_arn': f'arn:aws:iam::{ACCOUNT}:role/db-role',
                          'endpoint': f'db.{REGION}.rds.amazonaws.com', 'port': 5432,
                          'secret_arn': f'arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:managed-id'}
-        self.adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(REGION))
+        self.adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(REGION, expected_account=ACCOUNT))
         self.runner = AwsMigrationRunner(self.adapter, self.request, self.database,
             collect_sql_migrations(project),
             f'{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/onedeploy-managed', ATTEMPT)
@@ -60,6 +62,8 @@ class AwsMigrationTests(unittest.TestCase):
                 {'key': 'onedeploy-app', 'value': 'demo-app'},
                 {'key': 'onedeploy-attempt', 'value': ATTEMPT}]
         task = {'taskArn': TASK, 'taskDefinitionArn': TASK_DEF, 'lastStatus': 'STOPPED',
+                'clusterArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/default',
+                'launchType': 'FARGATE',
                 'tags': tags, 'containers': [{'name': 'migration', 'exitCode': 0}]}
         def aws(args, **_kwargs):
             if '--cli-input-json' in args:
@@ -89,6 +93,56 @@ class AwsMigrationTests(unittest.TestCase):
             with self.assertRaisesRegex(AwsConfigurationError, '마이그레이션이 실패'):
                 self.runner.run_task()
             self.assertFalse(self.runner.completed)
+
+    def test_read_only_inspection_distinguishes_running_failed_and_expired(self):
+        task = {'taskArn': TASK, 'taskDefinitionArn': TASK_DEF,
+                'clusterArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/default',
+                'launchType': 'FARGATE', 'lastStatus': 'RUNNING',
+                'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                         {'key': 'onedeploy-app', 'value': 'demo-app'},
+                         {'key': 'onedeploy-attempt', 'value': ATTEMPT}],
+                'containers': [{'name': 'migration'}]}
+        args = (self.adapter, 'demo-app', ACCOUNT, REGION, ATTEMPT, TASK, TASK_DEF)
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [task]})) as aws:
+            self.assertEqual(inspect_migration_task(*args)['status'], 'running')
+            aws.assert_called_once()
+            self.assertEqual(aws.call_args.args[0][:2], ['ecs', 'describe-tasks'])
+        task['lastStatus'] = 'STOPPED'
+        task['containers'][0]['exitCode'] = 1
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [task]})):
+            self.assertEqual(inspect_migration_task(*args)['status'], 'failed')
+        task['containers'] = []
+        task['stopCode'] = 'TaskFailedToStart'
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [task]})):
+            self.assertEqual(inspect_migration_task(*args)['status'], 'failed')
+        task['tags'][1]['value'] = 'another-app'
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [task]})):
+            with self.assertRaisesRegex(AwsConfigurationError, '소유권'):
+                inspect_migration_task(*args)
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [], 'failures': [
+                {'arn': TASK, 'reason': 'MISSING'}]})):
+            self.assertEqual(inspect_migration_task(*args)['status'], 'unknown')
+        with patch.object(self.adapter, 'aws') as aws:
+            with self.assertRaisesRegex(ValueError, 'ARN'):
+                inspect_migration_task(*args[:-2], TASK + '-wrong', TASK_DEF)
+            aws.assert_not_called()
+
+    def test_inspect_command_pins_account_before_describing_task(self):
+        arguments = ['--application', 'demo-app', '--account', ACCOUNT, '--region', REGION,
+                     '--attempt', ATTEMPT, '--task-arn', TASK,
+                     '--task-definition-arn', TASK_DEF]
+        with patch.object(AwsExpressAdapter, 'aws', return_value=json.dumps({'Account': '000000000000'})) as aws:
+            with self.assertRaisesRegex(AwsConfigurationError, '현재 AWS 계정'):
+                main(arguments)
+            self.assertEqual(aws.call_count, 1)
+        def aws(args, **_kwargs):
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            return json.dumps({'tasks': [], 'failures': [{'arn': TASK, 'reason': 'MISSING'}]})
+        output = io.StringIO()
+        with patch.object(AwsExpressAdapter, 'aws', side_effect=aws), redirect_stdout(output):
+            main(arguments)
+        self.assertEqual(json.loads(output.getvalue())['status'], 'unknown')
 
     def test_uncertain_task_result_is_recorded_and_stops_retry(self):
         self.runner.subnet = self.request.subnet_ids[0]

@@ -57,6 +57,21 @@ Fargate 태스크에서 이 실행기를 돌린다. 태스크 종료 코드가 0
 **이 경로는 아직 AWS 실계정에서 실행하지 않았고 서버 업로드 API에도 노출하지 않는다.**
 마이그레이션은 기존 앱 버전과 호환되는 SQL이어야 하며, DB 스키마 변경 자체를 롤백하지 않는다.
 
+결과 확인이 불확실한 태스크는 기록된 `aws_migration_task_arn`과
+`aws_migration_task_definition_arn`으로 다음 읽기 전용 명령을 실행한다. 먼저 STS 계정을
+고정한 뒤 ECS 태스크의 클러스터·Fargate 실행 방식·정의·소유 태그·컨테이너 종료 코드를 대조한다.
+결과는 `running`, `succeeded`, `failed`, `unknown` 중 하나다. `unknown`은 성공으로 취급하지
+않으며, 이 명령은 작업 기록을 수정하거나 서비스를 재배포하지 않는다. ECS의 [종료된 태스크 조회](https://docs.aws.amazon.com/cli/latest/reference/ecs/describe-tasks.html)는
+최소 1시간만 보장되므로 오래된 결과는 CloudWatch 로그와 DB 마이그레이션 이력을 별도로 확인해야 한다.
+
+```sh
+python3 -m onedeploy.aws_migrations --application demo-app \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --attempt <DEPLOYMENT_ATTEMPT_ID> \
+  --task-arn <AWS_MIGRATION_TASK_ARN> \
+  --task-definition-arn <AWS_MIGRATION_TASK_DEFINITION_ARN>
+```
+
 ```sh
 python3 -m onedeploy.postgres --application demo-app --account <AWS_ACCOUNT_ID> \
   --region ap-northeast-2 --vpc-id <DEFAULT_VPC_ID> \

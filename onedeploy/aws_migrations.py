@@ -1,15 +1,66 @@
-"""Opt-in one-shot ECS Fargate runner for checked PostgreSQL migrations."""
+"""Opt-in one-shot ECS Fargate runner and read-only migration recovery check."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
 import tempfile
 from pathlib import Path
 
-from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter
+from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 from onedeploy.migrations import MigrationBundle, stage_migrator_context
 from onedeploy.postgres import PostgresRequest
+
+
+def inspect_migration_task(adapter: AwsExpressAdapter, application_id: str, account: str,
+                           region: str, attempt_id: str, task_arn: str,
+                           definition_arn: str) -> dict:
+    """Read a single owned task; an expired or missing ECS result remains unknown."""
+    if (not re.fullmatch(r'[a-z][a-z0-9]*(-[a-z0-9]+)*', application_id)
+            or not re.fullmatch(r'\d{12}', account)
+            or not re.fullmatch(r'[a-z]{2}-[a-z]+-\d', region)
+            or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id)):
+        raise ValueError('마이그레이션 소유자 정보가 올바르지 않습니다.')
+    task_prefix = f'arn:aws:ecs:{region}:{account}:task/default/'
+    definition_prefix = f'arn:aws:ecs:{region}:{account}:task-definition/onedeploy-migrate-{attempt_id}:'
+    if (not isinstance(task_arn, str) or not task_arn.startswith(task_prefix)
+            or not re.fullmatch(r'[a-f0-9]{32}', task_arn.removeprefix(task_prefix))
+            or not isinstance(definition_arn, str) or not definition_arn.startswith(definition_prefix)
+            or not definition_arn.removeprefix(definition_prefix).isdigit()):
+        raise ValueError('마이그레이션 태스크 ARN 또는 정의 ARN이 예상과 다릅니다.')
+    if adapter.settings.region != region or adapter.settings.expected_account != account:
+        raise AwsConfigurationError('마이그레이션 조회 계정·리전 설정이 소유자 정보와 다릅니다.')
+    response = json.loads(adapter.aws(['ecs', 'describe-tasks', '--cluster', 'default',
+        '--tasks', task_arn, '--include', 'TAGS'], private=True, quiet=True))
+    tasks = response.get('tasks', [])
+    if response.get('failures') or len(tasks) != 1:
+        return {'status': 'unknown', 'task_arn': task_arn, 'task_definition_arn': definition_arn}
+    task = tasks[0]
+    tags = {item.get('key'): item.get('value') for item in task.get('tags', [])}
+    containers = task.get('containers', [])
+    if (task.get('taskArn') != task_arn or task.get('taskDefinitionArn') != definition_arn
+            or task.get('clusterArn') != f'arn:aws:ecs:{region}:{account}:cluster/default'
+            or task.get('launchType') != 'FARGATE'
+            or tags.get('onedeploy-managed') != 'true'
+            or tags.get('onedeploy-app') != application_id
+            or tags.get('onedeploy-attempt') != attempt_id
+            or len(containers) > 1
+            or (containers and containers[0].get('name') != 'migration')):
+        raise AwsConfigurationError('마이그레이션 태스크의 소유권·실행 구성이 예상과 다릅니다.')
+    last_status = task.get('lastStatus')
+    if last_status == 'STOPPED':
+        if containers:
+            status = 'succeeded' if containers[0].get('exitCode') == 0 else 'failed'
+        else:
+            status = 'failed' if task.get('stopCode') == 'TaskFailedToStart' else 'unknown'
+    elif last_status in {'PROVISIONING', 'PENDING', 'ACTIVATING', 'RUNNING',
+                         'DEACTIVATING', 'STOPPING', 'DEPROVISIONING'}:
+        status = 'running'
+    else:
+        status = 'unknown'
+    return {'status': status, 'task_arn': task_arn, 'task_definition_arn': definition_arn,
+            'last_status': last_status, 'exit_code': containers[0].get('exitCode') if containers else None}
 
 
 class AwsMigrationRunner:
@@ -135,23 +186,15 @@ class AwsMigrationRunner:
         try:
             self.adapter.aws(['ecs', 'wait', 'tasks-stopped', '--cluster', 'default', '--tasks', task_arn],
                              timeout=900, private=True, quiet=True)
-            described = json.loads(self.adapter.aws(['ecs', 'describe-tasks', '--cluster', 'default',
-                '--tasks', task_arn, '--include', 'TAGS'], private=True, quiet=True)).get('tasks', [])
+            outcome = inspect_migration_task(self.adapter, req.application_id, req.account,
+                                             req.region, self.attempt_id, task_arn, arn)
         except Exception as exc:
             raise AwsConfigurationError(f'마이그레이션 종료를 확인하지 못했습니다. 태스크 {task_arn}과 정의 {arn}을 확인하세요: {exc}') from None
-        task = described[0] if len(described) == 1 else {}
-        tags = {item.get('key'): item.get('value') for item in task.get('tags', [])}
-        containers = task.get('containers', [])
-        if (task.get('taskArn') != task_arn or task.get('taskDefinitionArn') != arn
-                or task.get('lastStatus') != 'STOPPED'
-                or tags.get('onedeploy-managed') != 'true'
-                or tags.get('onedeploy-app') != req.application_id
-                or tags.get('onedeploy-attempt') != self.attempt_id
-                or len(containers) != 1 or containers[0].get('name') != 'migration'):
-            raise AwsConfigurationError(f'마이그레이션 태스크의 종료·소유 상태를 확인하지 못했습니다: {task_arn}')
-        if containers[0].get('exitCode') != 0:
+        if outcome['status'] == 'failed':
             raise AwsConfigurationError(f'마이그레이션이 실패했습니다. 태스크 {task_arn}와 CloudWatch 로그 '
                                         f'{self.database["migration_log_group"]}을 확인하세요.')
+        if outcome['status'] != 'succeeded':
+            raise AwsConfigurationError(f'마이그레이션 종료를 확인하지 못했습니다: {task_arn}')
         self.completed = True
         return {'task_arn': task_arn, 'task_definition_arn': arn,
                 'image': self.image, 'bundle_digest': self.bundle.digest,
@@ -217,3 +260,27 @@ class AwsMigrationRunner:
             result['cleanup_complete'] = False
             self.adapter.event('cleanup', str(exc) + ' 리소스: ' + self.image)
         return result
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description='Read-only check of one owned ECS migration task')
+    parser.add_argument('--application', required=True)
+    parser.add_argument('--account', required=True)
+    parser.add_argument('--region', required=True)
+    parser.add_argument('--attempt', required=True)
+    parser.add_argument('--task-arn', required=True)
+    parser.add_argument('--task-definition-arn', required=True)
+    args = parser.parse_args(argv)
+    settings = AwsSettings(args.region, expected_account=args.account, account_pin_required=True)
+    settings.validate()
+    adapter = AwsExpressAdapter(lambda *_: None, settings)
+    caller = json.loads(adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
+    if caller.get('Account') != args.account:
+        raise AwsConfigurationError('현재 AWS 계정이 지정한 마이그레이션 계정과 다릅니다.')
+    outcome = inspect_migration_task(adapter, args.application, args.account, args.region,
+                                     args.attempt, args.task_arn, args.task_definition_arn)
+    print(json.dumps(outcome, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    main()
