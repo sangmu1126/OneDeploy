@@ -15,6 +15,7 @@ from pathlib import Path
 
 from onedeploy.aws import AwsExpressAdapter, AwsSettings
 from onedeploy.core import analyze
+from onedeploy.migrations import collect_sql_migrations
 from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
 
 
@@ -76,20 +77,29 @@ def main(argv=None):
         shutil.copytree(source, project)
         plan = replace(analyze(project), target='aws-ecs-express', health_path='/health',
                        required_env=['PROBE_KEY'])
+        migrations = collect_sql_migrations(project)
         try:
-            first_result = first.deploy(project, plan, first_attempt, {'PROBE_KEY': key}, postgres=request)
+            first_result = first.deploy(project, plan, first_attempt, {'PROBE_KEY': key},
+                                        postgres=request, migrations=migrations)
+            if (first_result.get('migration', {}).get('bundle_digest') != migrations.digest
+                    or first_result['migration'].get('cleanup_complete') is not True):
+                raise AssertionError('First ECS release did not complete the checked migration')
             probe(first_result['url'], key, record_id, 'POST')
             probe(first_result['url'], key, record_id, 'GET')
             second = AwsExpressAdapter(lambda stage, message: print(f'[v2:{stage}] {message}', flush=True),
                                        settings, existing=first_result)
-            second_result = second.deploy(project, plan, second_attempt, {'PROBE_KEY': key}, postgres=request)
+            second_result = second.deploy(project, plan, second_attempt, {'PROBE_KEY': key},
+                                          postgres=request, migrations=migrations)
+            if (second_result.get('migration', {}).get('bundle_digest') != migrations.digest
+                    or second_result['migration'].get('cleanup_complete') is not True):
+                raise AssertionError('Updated ECS release did not confirm migration idempotency')
             if (second_result['url'] != first_result['url']
                     or second_result['service_arn'] != first_result['service_arn']
                     or second_result['image'] == first_result['image']):
                 raise AssertionError('ECS service update did not preserve the URL and replace the image')
             probe(second_result['url'], key, record_id, 'GET')
             probe(second_result['url'], key, record_id, 'DELETE')
-            print('PASS: PostgreSQL write/read survived an ECS service revision update.', flush=True)
+            print('PASS: PostgreSQL migration and write/read survived an ECS service revision update.', flush=True)
         finally:
             try:
                 if first_result:

@@ -32,16 +32,15 @@ http.createServer(async (request, response) => {
   }
   try {
     if (request.method === 'DELETE') {
-      const deleted = await pool.query('DELETE FROM onedeploy_probe WHERE id = $1', [match[1]]);
+      const deleted = await pool.query('DELETE FROM onedeploy_probe_migrated WHERE id = $1', [match[1]]);
       reply(response, 200, {deleted: deleted.rowCount === 1});
       return;
     }
     if (request.method === 'POST') {
-      await pool.query('CREATE TABLE IF NOT EXISTS onedeploy_probe (id text PRIMARY KEY, value text NOT NULL)');
-      await pool.query('INSERT INTO onedeploy_probe (id, value) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value',
+      await pool.query('INSERT INTO onedeploy_probe_migrated (id, value) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value',
         [match[1], match[1]]);
     }
-    const result = await pool.query('SELECT value FROM onedeploy_probe WHERE id = $1', [match[1]]);
+    const result = await pool.query('SELECT value FROM onedeploy_probe_migrated WHERE id = $1', [match[1]]);
     reply(response, result.rows.length ? 200 : 404,
       {value: result.rows[0]?.value || null});
   } catch (_error) {
