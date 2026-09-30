@@ -73,6 +73,22 @@ class AwsPostgresProvisioner:
             request.region, expected_account=request.account, account_pin_required=True,
             service_security_group=request.service_security_group))
 
+    def verify_service_group(self) -> None:
+        """Require an app-owned group so another service cannot inherit DB access."""
+        req = self.request
+        groups = json.loads(self.adapter.aws(['ec2', 'describe-security-groups', '--group-ids',
+                                              req.service_security_group], private=True,
+                                             quiet=True)).get('SecurityGroups', [])
+        group = groups[0] if len(groups) == 1 else {}
+        tags = {item.get('Key'): item.get('Value') for item in group.get('Tags', [])}
+        if (group.get('GroupId') != req.service_security_group
+                or group.get('VpcId') != req.vpc_id
+                or group.get('OwnerId') != req.account
+                or tags.get('onedeploy-managed') != 'true'
+                or tags.get('onedeploy-app') != req.application_id
+                or not service_group_ingress_is_restricted(group)):
+            raise AwsConfigurationError('서비스 보안 그룹은 지정한 계정·VPC의 앱 전용 소유 태그가 있어야 하며 인바운드는 단일 보안 그룹의 앱 포트만 허용해야 합니다.')
+
     def preflight(self) -> dict:
         """Read-only account and network checks; no DB or stack mutations."""
         req = self.request
@@ -83,12 +99,7 @@ class AwsPostgresProvisioner:
                                            private=True, quiet=True)).get('Vpcs', [])
         if len(vpcs) != 1 or vpcs[0].get('VpcId') != req.vpc_id or not vpcs[0].get('IsDefault'):
             raise AwsConfigurationError('ECS Express 공개 경로와 같은 기본 VPC가 필요합니다.')
-        groups = json.loads(self.adapter.aws(['ec2', 'describe-security-groups', '--group-ids',
-                                              req.service_security_group], private=True, quiet=True)).get('SecurityGroups', [])
-        if (len(groups) != 1 or groups[0].get('GroupId') != req.service_security_group
-                or groups[0].get('VpcId') != req.vpc_id
-                or not service_group_ingress_is_restricted(groups[0])):
-            raise AwsConfigurationError('서비스 보안 그룹은 지정한 기본 VPC에 있고 인바운드는 단일 보안 그룹의 앱 포트만 허용해야 합니다.')
+        self.verify_service_group()
         subnets = json.loads(self.adapter.aws(['ec2', 'describe-subnets', '--subnet-ids', *req.subnet_ids],
                                               private=True, quiet=True)).get('Subnets', [])
         by_id = {item.get('SubnetId'): item for item in subnets}
@@ -293,6 +304,7 @@ class AwsPostgresProvisioner:
                 or rule.get('IpRanges', []) or rule.get('Ipv6Ranges', [])
                 or rule.get('PrefixListIds', [])):
             raise AwsConfigurationError('PostgreSQL 보안 그룹의 인바운드 허용 범위가 예상과 다릅니다.')
+        self.verify_service_group()
         self.verify_execution_role(execution_role_arn, secret_arn)
         return {'stack_id': stack_id, 'database_arn': db_arn, 'database_id': req.database_id,
                 'endpoint': outputs['EndpointAddress'], 'port': 5432,

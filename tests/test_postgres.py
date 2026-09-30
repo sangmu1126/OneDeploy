@@ -62,7 +62,9 @@ class PostgresTests(unittest.TestCase):
                 return json.dumps({'Vpcs': [{'VpcId': VPC, 'IsDefault': True}]})
             if args[:2] == ['ec2', 'describe-security-groups']:
                 return json.dumps({'SecurityGroups': [{'GroupId': SERVICE_GROUP,
-                    'VpcId': VPC, 'IpPermissions': []}]})
+                    'VpcId': VPC, 'OwnerId': ACCOUNT, 'IpPermissions': [],
+                    'Tags': [{'Key': 'onedeploy-managed', 'Value': 'true'},
+                             {'Key': 'onedeploy-app', 'Value': 'demo-app'}]}]})
             if args[:2] == ['ec2', 'describe-subnets']:
                 return json.dumps({'Subnets': [
                     {'SubnetId': SUBNETS[0], 'VpcId': VPC, 'State': 'available', 'AvailabilityZone': 'a'},
@@ -112,7 +114,10 @@ class PostgresTests(unittest.TestCase):
                 return json.dumps({'Vpcs': [{'VpcId': VPC, 'IsDefault': True}]})
             if args[:2] == ['ec2', 'describe-security-groups']:
                 return json.dumps({'SecurityGroups': [{'GroupId': SERVICE_GROUP,
-                    'VpcId': VPC, 'OwnerId': ACCOUNT, 'IpPermissions': [{
+                    'VpcId': VPC, 'OwnerId': ACCOUNT,
+                    'Tags': [{'Key': 'onedeploy-managed', 'Value': 'true'},
+                             {'Key': 'onedeploy-app', 'Value': 'demo-app'}],
+                    'IpPermissions': [{
                         'IpProtocol': 'tcp', 'FromPort': 3000, 'ToPort': 3000,
                         'UserIdGroupPairs': [{'GroupId': 'sg-55555555',
                                               'UserId': ACCOUNT, 'VpcId': VPC}]}]}]})
@@ -134,6 +139,16 @@ class PostgresTests(unittest.TestCase):
                 patch('onedeploy.postgres.estimate_postgres_base_capacity',
                       return_value={'baseline_730h_usd': '20.87'}):
             self.assertEqual(self.provisioner.preflight()['engine_version'], '17.5')
+
+    def test_service_group_rejects_another_apps_group(self):
+        group = {'GroupId': SERVICE_GROUP, 'VpcId': VPC, 'OwnerId': ACCOUNT,
+                 'IpPermissions': [], 'Tags': [
+                     {'Key': 'onedeploy-managed', 'Value': 'true'},
+                     {'Key': 'onedeploy-app', 'Value': 'other-app'}]}
+        with patch.object(self.provisioner.adapter, 'aws',
+                          return_value=json.dumps({'SecurityGroups': [group]})):
+            with self.assertRaisesRegex(AwsConfigurationError, '앱 전용 소유 태그'):
+                self.provisioner.verify_service_group()
 
     def test_create_uses_create_only_and_checks_output_after_wait(self):
         calls = []
@@ -192,11 +207,16 @@ class PostgresTests(unittest.TestCase):
         group = {'GroupId': DB_GROUP, 'VpcId': VPC, 'IpPermissions': [{
             'IpProtocol': 'tcp', 'FromPort': 5432, 'ToPort': 5432,
             'UserIdGroupPairs': [{'GroupId': SERVICE_GROUP, 'UserId': ACCOUNT, 'VpcId': VPC}]}]}
+        service_group = {'GroupId': SERVICE_GROUP, 'VpcId': VPC, 'OwnerId': ACCOUNT,
+                         'IpPermissions': [], 'Tags': [
+                             {'Key': 'onedeploy-managed', 'Value': 'true'},
+                             {'Key': 'onedeploy-app', 'Value': 'demo-app'}]}
         def aws(args, **_kwargs):
             if args[:2] == ['cloudformation', 'describe-stacks']:
                 return json.dumps({'Stacks': [stack]})
             if args[:2] == ['ec2', 'describe-security-groups']:
-                return json.dumps({'SecurityGroups': [group]})
+                selected = service_group if SERVICE_GROUP in args else group
+                return json.dumps({'SecurityGroups': [selected]})
             return json.dumps({'DBInstances': [db]})
         with patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
                 patch.object(self.provisioner, 'verify_execution_role'):
@@ -222,6 +242,10 @@ class PostgresTests(unittest.TestCase):
             group['IpPermissions'][0].pop('IpRanges')
             db['StorageEncrypted'] = False
             with self.assertRaisesRegex(AwsConfigurationError, '비공개'):
+                self.provisioner.inspect(STACK)
+            db['StorageEncrypted'] = True
+            service_group['Tags'][1]['Value'] = 'other-app'
+            with self.assertRaisesRegex(AwsConfigurationError, '앱 전용 소유 태그'):
                 self.provisioner.inspect(STACK)
 
     def test_execution_role_must_only_read_owned_secret(self):
