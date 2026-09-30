@@ -27,6 +27,31 @@ class AwsConfigurationError(RuntimeError):
     retryable = False
 
 
+def service_group_ingress_is_restricted(group: dict) -> bool:
+    """Allow an empty group or one ECS gateway-to-container-port rule only."""
+    rules = group.get('IpPermissions')
+    if rules == []:
+        return True
+    if not isinstance(rules, list) or len(rules) != 1:
+        return False
+    rule = rules[0]
+    pairs = rule.get('UserIdGroupPairs', [])
+    if (rule.get('IpProtocol') != 'tcp'
+            or not isinstance(rule.get('FromPort'), int)
+            or not 1 <= rule['FromPort'] <= 65535
+            or rule.get('ToPort') != rule['FromPort']
+            or len(pairs) != 1
+            or rule.get('IpRanges', []) or rule.get('Ipv6Ranges', [])
+            or rule.get('PrefixListIds', [])):
+        return False
+    pair = pairs[0]
+    return (isinstance(pair.get('GroupId'), str)
+            and re.fullmatch(r'sg-[a-f0-9]{8,17}', pair['GroupId']) is not None
+            and pair['GroupId'] != group.get('GroupId')
+            and pair.get('UserId', group.get('OwnerId')) == group.get('OwnerId')
+            and pair.get('VpcId', group.get('VpcId')) == group.get('VpcId'))
+
+
 def database_configuration_matches(configuration, database):
     if database is None:
         return True
@@ -145,8 +170,8 @@ class AwsExpressAdapter:
                                      private=True, quiet=True)).get('SecurityGroups', [])
         if (len(groups) != 1 or groups[0].get('GroupId') != group_id
                 or groups[0].get('VpcId') != vpcs[0]['VpcId']
-                or groups[0].get('IpPermissions') != []):
-            raise AwsConfigurationError('추가 서비스 보안 그룹은 기본 VPC에 있어야 하며 인바운드 규칙이 없어야 합니다.')
+                or not service_group_ingress_is_restricted(groups[0])):
+            raise AwsConfigurationError('추가 서비스 보안 그룹은 기본 VPC에 있어야 하며 인바운드는 단일 보안 그룹의 앱 포트만 허용해야 합니다.')
         self.event('infrastructure', '추가 ECS 서비스 보안 그룹의 VPC와 인바운드 규칙을 확인했습니다.')
 
     def prepare_infrastructure(self):

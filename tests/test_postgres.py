@@ -104,6 +104,37 @@ class PostgresTests(unittest.TestCase):
                 self.provisioner.preflight()
             pricing.assert_not_called()
 
+    def test_preflight_accepts_existing_express_gateway_ingress(self):
+        def aws(args, **_kwargs):
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ec2', 'describe-vpcs']:
+                return json.dumps({'Vpcs': [{'VpcId': VPC, 'IsDefault': True}]})
+            if args[:2] == ['ec2', 'describe-security-groups']:
+                return json.dumps({'SecurityGroups': [{'GroupId': SERVICE_GROUP,
+                    'VpcId': VPC, 'OwnerId': ACCOUNT, 'IpPermissions': [{
+                        'IpProtocol': 'tcp', 'FromPort': 3000, 'ToPort': 3000,
+                        'UserIdGroupPairs': [{'GroupId': 'sg-55555555',
+                                              'UserId': ACCOUNT, 'VpcId': VPC}]}]}]})
+            if args[:2] == ['ec2', 'describe-subnets']:
+                return json.dumps({'Subnets': [
+                    {'SubnetId': SUBNETS[0], 'VpcId': VPC, 'State': 'available', 'AvailabilityZone': 'a'},
+                    {'SubnetId': SUBNETS[1], 'VpcId': VPC, 'State': 'available', 'AvailabilityZone': 'b'}]})
+            if args[:2] == ['rds', 'describe-db-engine-versions']:
+                return json.dumps({'DBEngineVersions': [{'Engine': 'postgres', 'EngineVersion': '17.5'}]})
+            if args[:2] == ['rds', 'describe-orderable-db-instance-options']:
+                return json.dumps({'OrderableDBInstanceOptions': [{
+                    'Engine': 'postgres', 'EngineVersion': '17.5',
+                    'DBInstanceClass': 'db.t4g.micro', 'StorageType': 'gp3', 'Vpc': True,
+                    'SupportsStorageEncryption': True, 'MinStorageSize': 20,
+                    'MaxStorageSize': 65536,
+                    'AvailabilityZones': [{'Name': 'a'}, {'Name': 'b'}]}]})
+            raise AssertionError(args)
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
+                patch('onedeploy.postgres.estimate_postgres_base_capacity',
+                      return_value={'baseline_730h_usd': '20.87'}):
+            self.assertEqual(self.provisioner.preflight()['engine_version'], '17.5')
+
     def test_create_uses_create_only_and_checks_output_after_wait(self):
         calls = []
         events = []

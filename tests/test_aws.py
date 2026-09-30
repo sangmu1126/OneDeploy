@@ -6,7 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings, database_configuration_matches
+from onedeploy.aws import (AwsConfigurationError, AwsExpressAdapter, AwsSettings,
+                           database_configuration_matches, service_group_ingress_is_restricted)
 from onedeploy.core import analyze
 from onedeploy.postgres import PostgresRequest
 from onedeploy.migrations import MigrationBundle, SqlMigration
@@ -79,6 +80,28 @@ class AwsTests(unittest.TestCase):
                     'VpcId': 'vpc-12345678', 'IpPermissions': [{'IpProtocol': '-1'}]}]})):
             with self.assertRaisesRegex(AwsConfigurationError, '인바운드'):
                 self.adapter.validate_service_security_group()
+
+    def test_service_group_accepts_only_gateway_security_group_on_one_port(self):
+        group = {'GroupId': SERVICE_GROUP, 'VpcId': 'vpc-12345678',
+                 'OwnerId': ACCOUNT, 'IpPermissions': [{
+                     'IpProtocol': 'tcp', 'FromPort': 3000, 'ToPort': 3000,
+                     'UserIdGroupPairs': [{'GroupId': 'sg-87654321',
+                                           'UserId': ACCOUNT, 'VpcId': 'vpc-12345678'}]}]}
+        self.assertTrue(service_group_ingress_is_restricted(group))
+        self.adapter.settings = AwsSettings(REGION, service_security_group=SERVICE_GROUP)
+        def aws(args, **_kwargs):
+            if args[:2] == ['ec2', 'describe-vpcs']:
+                return json.dumps({'Vpcs': [{'VpcId': 'vpc-12345678'}]})
+            return json.dumps({'SecurityGroups': [group]})
+        with patch.object(self.adapter, 'aws', side_effect=aws):
+            self.adapter.validate_service_security_group()
+        for change in ({'IpRanges': [{'CidrIp': '0.0.0.0/0'}]},
+                       {'FromPort': 1, 'ToPort': 65535},
+                       {'UserIdGroupPairs': [{'GroupId': SERVICE_GROUP}]},
+                       {'UserIdGroupPairs': [{'GroupId': 'sg-87654321',
+                                              'UserId': '999999999999'}]}):
+            altered = {**group, 'IpPermissions': [{**group['IpPermissions'][0], **change}]}
+            self.assertFalse(service_group_ingress_is_restricted(altered))
 
     def test_custom_group_is_sent_and_verified_on_create(self):
         self.adapter.settings = AwsSettings(REGION, service_security_group=SERVICE_GROUP)

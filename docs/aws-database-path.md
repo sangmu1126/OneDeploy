@@ -19,8 +19,11 @@
 
 이 기준을 충족하고 실제 AWS 계정에서 재현하기 전까지는 DB 의존 앱 차단을 유지한다.
 
-현재 구현은 기본 VPC에서 인바운드 규칙이 없는 추가 ECS 서비스 보안 그룹 하나를 선택하고 실제 적용을
-검증한다. 별도의 `onedeploy.postgres` 명령은 지정한 기본 VPC의 두 가용 영역을 확인하고,
+현재 구현은 기본 VPC의 추가 ECS 서비스 보안 그룹 하나를 선택하고 실제 적용을
+검증한다. 새 그룹은 인바운드 규칙이 없어야 한다. ECS Express가 배포 후 로드 밸런서
+보안 그룹에서 앱 포트로 들어오는 규칙 하나를 추가할 수 있으므로, 이후 점검에서는
+동일 VPC·계정의 단일 보안 그룹을 출처로 하는 단일 포트 규칙만 허용한다.
+CIDR 공개 규칙이나 다른 인바운드 규칙은 거부한다. 별도의 `onedeploy.postgres` 명령은 지정한 기본 VPC의 두 가용 영역을 확인하고,
 PostgreSQL 인스턴스·DB 보안 그룹·서브넷 그룹을 **명시적 `--apply`일 때만** 새 스택으로 생성한다.
 사전 점검은 해당 리전의 기본 PostgreSQL 엔진 버전을 조회하고 지정한 가용 영역 모두에서
 `db.t4g.micro`·암호화된 `gp3` 20 GiB 구성이 주문 가능한지 확인한다
@@ -101,7 +104,7 @@ python3 -m onedeploy.aws_migrations --application demo-app \
 python3 -m onedeploy.postgres --application demo-app --account <AWS_ACCOUNT_ID> \
   --region ap-northeast-2 --vpc-id <DEFAULT_VPC_ID> \
   --subnet-id <SUBNET_A_ID> --subnet-id <SUBNET_B_ID> \
-  --service-security-group <NO_INGRESS_GROUP_ID>
+  --service-security-group <RESTRICTED_SERVICE_GROUP_ID>
 # 실제 생성할 때만 마지막에 --apply 추가
 # 기존 DB의 소유권·암호화·비공개 설정·서브넷·보안 그룹을 읽기 전용으로 재확인하려면 --inspect 추가
 ```
@@ -125,6 +128,6 @@ PostgreSQL에 임의 ID를 쓰고 읽는다. 같은 서비스의 새 이미지 �
 PYTHONPATH=. python3 tests/smoke_aws_postgres.py --application demo-app \
   --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --vpc-id <DEFAULT_VPC_ID> \
   --subnet-id <SUBNET_A_ID> --subnet-id <SUBNET_B_ID> \
-  --service-security-group <NO_INGRESS_GROUP_ID>
+  --service-security-group <RESTRICTED_SERVICE_GROUP_ID>
 # ECS와 ECR을 실제 사용하고 비용을 발생시킬 때만 --apply 추가
 ```

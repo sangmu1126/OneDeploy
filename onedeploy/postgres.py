@@ -9,7 +9,8 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from onedeploy.aws import (AwsConfigurationError, AwsExpressAdapter, AwsSettings,
+                           service_group_ingress_is_restricted)
 from onedeploy.aws_pricing import estimate_postgres_base_capacity
 
 
@@ -85,8 +86,9 @@ class AwsPostgresProvisioner:
         groups = json.loads(self.adapter.aws(['ec2', 'describe-security-groups', '--group-ids',
                                               req.service_security_group], private=True, quiet=True)).get('SecurityGroups', [])
         if (len(groups) != 1 or groups[0].get('GroupId') != req.service_security_group
-                or groups[0].get('VpcId') != req.vpc_id or groups[0].get('IpPermissions') != []):
-            raise AwsConfigurationError('서비스 보안 그룹은 지정한 기본 VPC에 있고 인바운드 규칙이 없어야 합니다.')
+                or groups[0].get('VpcId') != req.vpc_id
+                or not service_group_ingress_is_restricted(groups[0])):
+            raise AwsConfigurationError('서비스 보안 그룹은 지정한 기본 VPC에 있고 인바운드는 단일 보안 그룹의 앱 포트만 허용해야 합니다.')
         subnets = json.loads(self.adapter.aws(['ec2', 'describe-subnets', '--subnet-ids', *req.subnet_ids],
                                               private=True, quiet=True)).get('Subnets', [])
         by_id = {item.get('SubnetId'): item for item in subnets}
