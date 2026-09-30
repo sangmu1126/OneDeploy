@@ -47,6 +47,7 @@ class PostgresTests(unittest.TestCase):
             'Resource': {'Fn::GetAtt': ['Database', 'MasterUserSecret.SecretArn']}}])
         self.assertEqual(template['Outputs']['DatabaseExecutionRoleArn']['Value'],
                          {'Fn::GetAtt': ['DatabaseExecutionRole', 'Arn']})
+        self.assertEqual(template['Resources']['MigrationLogGroup']['Properties']['RetentionInDays'], 14)
 
     def test_preflight_checks_account_vpc_group_and_two_azs(self):
         calls = []
@@ -109,6 +110,7 @@ class PostgresTests(unittest.TestCase):
                      'DatabaseIdentifier': 'onedeploy-demo-app', 'DatabaseArn': DB_ARN,
                      'EndpointAddress': HOST, 'EndpointPort': '5432',
                      'SecretArn': SECRET, 'DatabaseExecutionRoleArn': ROLE,
+                     'MigrationLogGroupName': '/onedeploy/migrations/demo-app',
                      'DatabaseSecurityGroupId': DB_GROUP}.items()]}
         db = {'DBInstanceIdentifier': 'onedeploy-demo-app', 'DBInstanceArn': DB_ARN,
               'DBInstanceStatus': 'available', 'Engine': 'postgres', 'DBName': 'appdb',

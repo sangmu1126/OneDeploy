@@ -9,6 +9,7 @@ from unittest.mock import patch
 from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings, database_configuration_matches
 from onedeploy.core import analyze
 from onedeploy.postgres import PostgresRequest
+from onedeploy.migrations import MigrationBundle, SqlMigration
 
 
 ACCOUNT = '123456789012'
@@ -154,7 +155,9 @@ class AwsTests(unittest.TestCase):
                 return 'unix:///var/run/docker.sock'
             return ''
         self.plan.required_env = ['PGHOST', 'PGPASSWORD']
+        bundle = MigrationBundle(self.project / 'migrations', (SqlMigration('0001_init.sql', 'a' * 64),), 'b' * 64)
         with patch('onedeploy.postgres.AwsPostgresProvisioner.inspect_current', return_value=database), \
+                patch('onedeploy.aws_migrations.AwsMigrationRunner') as migrator, \
                 patch.object(adapter, 'validate_service_security_group'), \
                 patch.object(adapter, 'prepare_infrastructure',
                              return_value=(ACCOUNT, REPOSITORY, 'base-execution', 'infra')), \
@@ -162,8 +165,17 @@ class AwsTests(unittest.TestCase):
                 patch.object(adapter, 'command', side_effect=command), \
                 patch.object(adapter, 'aws', side_effect=aws), \
                 patch.object(adapter, 'verify'):
-            result = adapter.deploy(self.project, self.plan, ATTEMPT, postgres=request)
+            migrator.return_value.repository = REPOSITORY
+            migrator.return_value.build_and_run.return_value = {'bundle_digest': bundle.digest}
+            result = adapter.deploy(self.project, self.plan, ATTEMPT, postgres=request, migrations=bundle)
+            migrator.return_value.preflight.assert_called_once_with()
+            migrator.return_value.build_and_run.assert_called_once_with()
+            migrator.return_value.build_and_run.side_effect = AwsConfigurationError('마이그레이션 실패')
+            with self.assertRaisesRegex(AwsConfigurationError, '마이그레이션 실패'):
+                adapter.deploy(self.project, self.plan, ATTEMPT, postgres=request, migrations=bundle)
         self.assertEqual(result['database'], database)
+        self.assertEqual(result['migration'], {'bundle_digest': bundle.digest})
+        self.assertEqual(len(submitted), 1)
         self.assertEqual(submitted[0]['executionRoleArn'], database['execution_role_arn'])
         self.assertEqual(submitted[0]['primaryContainer']['secrets'], [
             {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},

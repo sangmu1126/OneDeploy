@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from onedeploy.analysis import AISettings, redact
 from onedeploy.core import SOURCE_FILENAMES, SOURCE_SUFFIXES, LocalDockerAdapter, make_plan, validate_environment
 from onedeploy.infrastructure import inspect_infrastructure, validate_infrastructure
+from onedeploy.migrations import collect_sql_migrations
 from onedeploy.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
 
 
@@ -246,6 +247,7 @@ class DeploymentTools:
             raise ValueError("Configure deployment after the most recent edit first")
         validate_infrastructure(inspect_infrastructure(self.work), self.target,
                                 postgres=self.postgres_request is not None)
+        migrations = collect_sql_migrations(self.work) if self.postgres_request is not None else None
         missing = [name for name in self.plan.required_env if name not in
                    (MANAGED_POSTGRES_ENV if self.postgres_request else ())
                    and not self.environment.get(name)]
@@ -263,7 +265,7 @@ class DeploymentTools:
         try:
             if self.postgres_request is not None:
                 self.result = adapter.deploy(context, self.plan, attempt_id, self.environment,
-                                             postgres=self.postgres_request)
+                                             postgres=self.postgres_request, migrations=migrations)
             else:
                 self.result = adapter.deploy(context, self.plan, attempt_id, self.environment)
             return {"verified": True, **self.result}

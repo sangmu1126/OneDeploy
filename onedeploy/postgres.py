@@ -219,7 +219,8 @@ class AwsPostgresProvisioner:
                 or not isinstance(group_id, str) or not re.fullmatch(r'sg-[a-f0-9]{8,17}', group_id)
                 or not isinstance(outputs.get('EndpointAddress'), str)
                 or not outputs['EndpointAddress'].endswith(f'.{req.region}.rds.amazonaws.com')
-                or outputs.get('EndpointPort') != '5432'):
+                or outputs.get('EndpointPort') != '5432'
+                or outputs.get('MigrationLogGroupName') != f'/onedeploy/migrations/{req.application_id}'):
             raise AwsConfigurationError('PostgreSQL 스택 출력 또는 소유 태그가 예상과 다릅니다.')
         instances = json.loads(self.adapter.aws(['rds', 'describe-db-instances', '--db-instance-identifier',
                                                  req.database_id], private=True, quiet=True)).get('DBInstances', [])
@@ -259,6 +260,7 @@ class AwsPostgresProvisioner:
                 'endpoint': outputs['EndpointAddress'], 'port': 5432,
                 'secret_arn': secret_arn, 'database_security_group': group_id,
                 'execution_role_arn': execution_role_arn,
+                'migration_log_group': outputs['MigrationLogGroupName'],
                 'service_security_group': req.service_security_group,
                 'vpc_id': req.vpc_id, 'subnet_ids': list(req.subnet_ids),
                 'status': 'available', 'deletion_protection': True, 'retained_on_stack_delete': True}

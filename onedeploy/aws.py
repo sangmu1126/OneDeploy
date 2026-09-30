@@ -178,11 +178,13 @@ class AwsExpressAdapter:
             raise AwsConfigurationError('ECS 인프라 역할 ARN이 예상과 다릅니다.')
         return account, repository, execution, infrastructure
 
-    def deploy(self, project, plan, attempt_id, environment=None, postgres=None):
+    def deploy(self, project, plan, attempt_id, environment=None, postgres=None, migrations=None):
         if not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id):
             raise ValueError('Invalid deployment attempt ID')
         if plan.target != 'aws-ecs-express':
             raise ValueError('AWS ECS Express adapter requires an aws-ecs-express plan')
+        if migrations is not None and postgres is None:
+            raise ValueError('SQL 마이그레이션에는 검증된 PostgreSQL 연결 요청이 필요합니다.')
         database = None
         if postgres is not None:
             from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
@@ -205,7 +207,18 @@ class AwsExpressAdapter:
             raise AwsConfigurationError('기존 AWS 서비스의 PostgreSQL 연결 구성이 배포 기록과 다릅니다.')
         self.sensitive.extend(environment.values())
         self.validate_service_security_group()
+        migration_runner = None
+        if migrations is not None:
+            from onedeploy.aws_migrations import AwsMigrationRunner
+            from onedeploy.migrations import MigrationBundle
+            if not isinstance(migrations, MigrationBundle):
+                raise ValueError('SQL 마이그레이션 묶음이 올바르지 않습니다.')
+            migration_runner = AwsMigrationRunner(self, postgres, database, migrations,
+                f'{postgres.account}.dkr.ecr.{postgres.region}.amazonaws.com/onedeploy-managed', attempt_id)
+            migration_runner.preflight()
         account, repository, execution, infrastructure = self.prepare_infrastructure()
+        if migration_runner is not None and repository != migration_runner.repository:
+            raise AwsConfigurationError('마이그레이션 ECR 저장소가 AWS 기반 스택 결과와 다릅니다.')
         self.image = f'{repository}:{attempt_id}'
         owner_attempt = attempt_id
         service = f'onedeploy-{attempt_id}'
@@ -279,6 +292,7 @@ class AwsExpressAdapter:
                         raise
                     self.event('retry', f'ECR 업로드 시간 초과, {push_attempt + 2}/3 재시도')
                     time.sleep(5)
+        migration_result = migration_runner.build_and_run() if migration_runner else None
         payload = {'healthCheckPath': plan.health_path,
                    'primaryContainer': {'image': self.image, 'containerPort': plan.port,
                                         'environment': [{'name': 'PORT', 'value': str(plan.port)}] +
@@ -396,6 +410,7 @@ class AwsExpressAdapter:
                 'service_security_group': self.settings.service_security_group,
                 'owner_attempt': owner_attempt, 'images': [*previous_images, self.image],
                 **({'database': database} if database is not None else {}),
+                **({'migration': migration_result} if migration_result is not None else {}),
                 'task_definition_arn': task_definition,
                 'previous_task_definition_arn': previous_task_definition}
 

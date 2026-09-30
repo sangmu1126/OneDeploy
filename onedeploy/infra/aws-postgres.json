@@ -90,6 +90,17 @@
           {"Key": "onedeploy-app", "Value": {"Ref": "ApplicationId"}}
         ]
       }
+    },
+    "MigrationLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {"Fn::Sub": "/onedeploy/migrations/${ApplicationId}"},
+        "RetentionInDays": 14,
+        "Tags": [
+          {"Key": "onedeploy-managed", "Value": "true"},
+          {"Key": "onedeploy-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
     }
   },
   "Outputs": {
@@ -99,6 +110,7 @@
     "EndpointPort": {"Value": {"Fn::GetAtt": ["Database", "Endpoint.Port"]}},
     "SecretArn": {"Value": {"Fn::GetAtt": ["Database", "MasterUserSecret.SecretArn"]}},
     "DatabaseExecutionRoleArn": {"Value": {"Fn::GetAtt": ["DatabaseExecutionRole", "Arn"]}},
+    "MigrationLogGroupName": {"Value": {"Ref": "MigrationLogGroup"}},
     "DatabaseSecurityGroupId": {"Value": {"Ref": "DatabaseSecurityGroup"}}
   }
 }

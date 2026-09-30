@@ -13,8 +13,8 @@ class PostgresAgentTests(unittest.TestCase):
                                   ('subnet-11111111', 'subnet-22222222'), 'sg-33333333')
         calls = []
         class Adapter:
-            def deploy(self, project, plan, attempt_id, environment, postgres=None):
-                calls.append((plan.required_env, environment, postgres, attempt_id))
+            def deploy(self, project, plan, attempt_id, environment, postgres=None, migrations=None):
+                calls.append((plan.required_env, environment, postgres, attempt_id, migrations))
                 return {'url': 'https://example.test'}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -23,6 +23,8 @@ class PostgresAgentTests(unittest.TestCase):
             (project / 'package.json').write_text(json.dumps({
                 'scripts': {'start': 'node server.js'}, 'dependencies': {'pg': '8.23.0'}}))
             (project / 'server.js').write_text('const {Pool} = require("pg");')
+            (project / 'migrations').mkdir()
+            (project / 'migrations' / '0001_init.sql').write_text('CREATE TABLE demo (id int);')
             tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None,
                                     lambda **_: None, target='aws-ecs-express',
                                     adapter_factory=lambda _event: Adapter(), postgres_request=request)
@@ -43,6 +45,7 @@ class PostgresAgentTests(unittest.TestCase):
             self.assertTrue(tools.deploy_application()['verified'])
             self.assertEqual(calls[0][1], {})
             self.assertEqual(calls[0][2], request)
+            self.assertEqual(calls[0][4].migrations[0].name, '0001_init.sql')
             with self.assertRaisesRegex(ValueError, 'DATABASE_URL'):
                 tools.configure_deployment('start', None, 3000, '/', ['DATABASE_URL'])
 
