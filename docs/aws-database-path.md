@@ -43,6 +43,13 @@ PostgreSQL 엔진만 확인된 AWS 앱에만 적용하고, `PGHOST`·`PGPASSWORD
 MySQL·MongoDB·혼합/불명 엔진과 `DATABASE_URL` 접속 방식은 이 경로에서 차단한다.
 서버 업로드 API에는 아직 이 옵션을 노출하지 않는다.
 
+마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
+최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.
+실행기는 PostgreSQL의 트랜잭션별 advisory lock과 `onedeploy_schema_migrations` 이력으로
+같은 파일의 중복 적용을 건너뛰고, 적용한 파일의 체크섬이 바뀌면 실패한다.
+파일 안의 트랜잭션 제어문은 허용하지 않는다. **이 실행기를 ECS 일회성 태스크로 호출하는 경로는
+아직 없으며**, 원클릭 DB 앱 배포의 마이그레이션 완료를 주장하지 않는다.
+
 ```sh
 python3 -m onedeploy.postgres --application demo-app --account <AWS_ACCOUNT_ID> \
   --region ap-northeast-2 --vpc-id <DEFAULT_VPC_ID> \
