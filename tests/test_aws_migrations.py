@@ -54,6 +54,8 @@ class AwsMigrationTests(unittest.TestCase):
 
     def test_run_task_verifies_owned_exit_zero(self):
         self.runner.subnet = self.request.subnet_ids[0]
+        checkpoints = []
+        self.adapter.checkpoint = lambda **fields: checkpoints.append(fields)
         tags = [{'key': 'onedeploy-managed', 'value': 'true'},
                 {'key': 'onedeploy-app', 'value': 'demo-app'},
                 {'key': 'onedeploy-attempt', 'value': ATTEMPT}]
@@ -80,10 +82,51 @@ class AwsMigrationTests(unittest.TestCase):
             result = self.runner.run_task()
             self.assertEqual(result['task_arn'], TASK)
             self.assertTrue(self.runner.completed)
+            self.assertEqual([item['aws_migration_status'] for item in checkpoints],
+                             ['registered', 'running'])
+            self.assertEqual(checkpoints[1]['aws_migration_task_arn'], TASK)
             task['containers'][0]['exitCode'] = 1
             with self.assertRaisesRegex(AwsConfigurationError, '마이그레이션이 실패'):
                 self.runner.run_task()
             self.assertFalse(self.runner.completed)
+
+    def test_uncertain_task_result_is_recorded_and_stops_retry(self):
+        self.runner.subnet = self.request.subnet_ids[0]
+        self.runner.registered_arn = TASK_DEF
+        self.runner.task_arn = TASK
+        checkpoints = []
+        self.adapter.checkpoint = lambda **fields: checkpoints.append(fields)
+        def command(args, **_kwargs):
+            return 'unix:///var/run/docker.sock' if args[:3] == ['docker', 'context', 'inspect'] else ''
+        def aws(args, **_kwargs):
+            self.assertEqual(args[:2], ['ecr', 'get-login-password'])
+            return 'synthetic-password'
+        with patch.object(self.adapter, 'command', side_effect=command), \
+                patch.object(self.adapter, 'aws', side_effect=aws), \
+                patch.object(self.runner, 'run_task', side_effect=RuntimeError('wait timed out')):
+            with self.assertRaises(AwsConfigurationError) as error:
+                self.runner.build_and_run()
+        self.assertFalse(error.exception.retryable)
+        self.assertIn(TASK, str(error.exception))
+        self.assertEqual(checkpoints[-1]['aws_migration_status'], 'needs_attention')
+
+    def test_success_is_checkpointed_before_cleanup(self):
+        self.runner.subnet = self.request.subnet_ids[0]
+        checkpoints = []
+        self.adapter.checkpoint = lambda **fields: checkpoints.append(fields)
+        def command(args, **_kwargs):
+            return 'unix:///var/run/docker.sock' if args[:3] == ['docker', 'context', 'inspect'] else ''
+        with patch.object(self.adapter, 'command', side_effect=command), \
+                patch.object(self.adapter, 'aws', return_value='synthetic-password'), \
+                patch.object(self.runner, 'run_task', return_value={'task_arn': TASK,
+                    'bundle_digest': self.runner.bundle.digest}) as run, \
+                patch.object(self.runner, 'cleanup_completed', return_value=True) as cleanup:
+            result = self.runner.build_and_run()
+        run.assert_called_once_with()
+        cleanup.assert_called_once_with()
+        self.assertEqual(result['cleanup_complete'], True)
+        self.assertEqual(checkpoints[0]['aws_migration_status'], 'succeeded')
+        self.assertEqual(checkpoints[0]['aws_migration_result']['task_arn'], TASK)
 
     def test_cleanup_only_known_completed_task_artifacts(self):
         with patch.object(self.adapter, 'aws') as aws:

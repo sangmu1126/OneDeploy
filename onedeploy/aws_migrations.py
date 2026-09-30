@@ -103,6 +103,11 @@ class AwsMigrationRunner:
                 or not arn.removeprefix(prefix).isdigit()):
             raise AwsConfigurationError('마이그레이션 태스크 정의 ARN을 확인하지 못했습니다.')
         self.registered_arn = arn
+        if self.adapter.checkpoint:
+            self.adapter.checkpoint(aws_migration_status='registered',
+                                    aws_migration_task_definition_arn=arn,
+                                    aws_migration_image=self.image,
+                                    aws_migration_bundle_digest=self.bundle.digest)
         payload = {'cluster': 'default', 'launchType': 'FARGATE', 'count': 1,
                    'taskDefinition': arn,
                    'networkConfiguration': {'awsvpcConfiguration': {
@@ -125,6 +130,8 @@ class AwsMigrationRunner:
                 or not task_arn.startswith(expected) or len(tasks) != 1):
             raise AwsConfigurationError(f'마이그레이션 태스크 시작 상태를 확인하지 못했습니다. {arn}을 확인하세요.')
         self.task_arn = task_arn
+        if self.adapter.checkpoint:
+            self.adapter.checkpoint(aws_migration_status='running', aws_migration_task_arn=task_arn)
         try:
             self.adapter.aws(['ecs', 'wait', 'tasks-stopped', '--cluster', 'default', '--tasks', task_arn],
                              timeout=900, private=True, quiet=True)
@@ -190,13 +197,23 @@ class AwsMigrationRunner:
         self.adapter.event('migrating', '검증된 SQL 마이그레이션을 일회성 ECS 태스크로 실행합니다.')
         try:
             result = self.run_task()
-        except Exception:
-            self.adapter.event('cleanup', '마이그레이션 결과가 불확실합니다. ECS 태스크·정의와 ECR 이미지 '
+            if self.adapter.checkpoint:
+                self.adapter.checkpoint(aws_migration_status='succeeded',
+                                        aws_migration_result=result)
+        except Exception as exc:
+            if self.adapter.checkpoint:
+                try:
+                    self.adapter.checkpoint(aws_migration_status='needs_attention')
+                except Exception:
+                    pass
+            self.adapter.event('cleanup', '마이그레이션이 실패했거나 결과가 불확실합니다. ECS 태스크·정의와 ECR 이미지 '
                                + self.image + '를 직접 확인하세요.')
-            raise
+            raise AwsConfigurationError(f'마이그레이션 결과를 확인하지 못했습니다. '
+                                        f'태스크 {self.task_arn or "미시작"}, 정의 '
+                                        f'{self.registered_arn or "미등록"}: {exc}') from None
         try:
             result['cleanup_complete'] = self.cleanup_completed()
-        except AwsConfigurationError as exc:
+        except Exception as exc:
             result['cleanup_complete'] = False
             self.adapter.event('cleanup', str(exc) + ' 리소스: ' + self.image)
         return result
