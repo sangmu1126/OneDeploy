@@ -49,7 +49,12 @@ MySQL·MongoDB·혼합/불명 엔진과 `DATABASE_URL` 접속 방식은 이 경�
 같은 파일의 중복 적용을 건너뛰고, 적용한 파일의 체크섬이 바뀌면 실패한다.
 파일 안의 트랜잭션 제어문은 허용하지 않는다. 내부 `postgres_request` 경로에서는
 DB 스택의 14일 보존 CloudWatch 로그 그룹과 공개 서브넷을 확인한 뒤 일회성
-Fargate 태스크에서 이 실행기를 돌린다. 태스크 종료 코드가 0일 때만 웹 서비스 배포를 계속하며,
+Fargate 태스크에서 이 실행기를 돌린다. ECR에 업로드한 이미지의 계정·저장소·태그와
+SHA-256 digest를 재조회하고 태스크 정의에는 변경 불가능한 digest 참조를 사용한다
+([ECR 이미지 조회](https://docs.aws.amazon.com/cli/latest/reference/ecr/describe-images.html),
+[ECS 컨테이너 이미지 형식](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDefinition.html)).
+이는 실행 이미지를 고정하지만, `node:22-alpine`과 잠금 파일 없는 `npm install`까지
+동일한 결과로 재빌드하게 하지는 않는다. 태스크 종료 코드가 0일 때만 웹 서비스 배포를 계속하며,
 성공 후 마이그레이션 태스크 정의와 임시 ECR 이미지 태그를 정리한다.
 태스크 정의·태스크 ARN·이미지·SQL 묶음 체크섬과 성공 결과를 작업 기록에 저장한다.
 실행 결과가 불확실하면 해당 태스크·정의·이미지를 남기고 자동 재시도 없이 수동 확인을 요구한다.

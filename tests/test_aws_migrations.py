@@ -17,6 +17,7 @@ REGION = 'ap-northeast-2'
 ATTEMPT = 'a' * 16 + '-a1'
 TASK_DEF = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/onedeploy-migrate-{ATTEMPT}:1'
 TASK = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task/default/' + '1234567890abcdef' * 2
+IMAGE_DIGEST = 'sha256:' + 'a' * 64
 
 
 class AwsMigrationTests(unittest.TestCase):
@@ -50,12 +51,18 @@ class AwsMigrationTests(unittest.TestCase):
                                               'retentionInDays': 14}]})
         with patch.object(self.adapter, 'aws', side_effect=aws):
             self.assertEqual(self.runner.preflight(), self.request.subnet_ids[1])
+        with self.assertRaisesRegex(AwsConfigurationError, 'digest'):
+            self.runner.task_definition()
+        self.runner.image_digest = IMAGE_DIGEST
+        self.assertEqual(self.runner.task_definition()['containerDefinitions'][0]['image'],
+                         self.runner.repository + '@' + IMAGE_DIGEST)
         self.assertEqual(self.runner.task_definition()['containerDefinitions'][0]['secrets'][1],
                          {'name': 'PGPASSWORD', 'valueFrom': self.database['secret_arn'] + ':password::'})
         self.assertNotIn('password', json.dumps(self.runner.task_definition()['containerDefinitions'][0]['environment']))
 
     def test_run_task_verifies_owned_exit_zero(self):
         self.runner.subnet = self.request.subnet_ids[0]
+        self.runner.image_digest = IMAGE_DIGEST
         checkpoints = []
         self.adapter.checkpoint = lambda **fields: checkpoints.append(fields)
         tags = [{'key': 'onedeploy-managed', 'value': 'true'},
@@ -72,6 +79,8 @@ class AwsMigrationTests(unittest.TestCase):
                 payload = json.loads(file.read_text())
                 if args[:2] == ['ecs', 'register-task-definition']:
                     self.assertEqual(payload['executionRoleArn'], self.database['execution_role_arn'])
+                    self.assertEqual(payload['containerDefinitions'][0]['image'],
+                                     self.runner.repository + '@' + IMAGE_DIGEST)
                     return json.dumps({'taskDefinition': {'taskDefinitionArn': TASK_DEF}})
                 self.assertEqual(payload['networkConfiguration']['awsvpcConfiguration'], {
                     'subnets': [self.request.subnet_ids[0]],
@@ -85,6 +94,7 @@ class AwsMigrationTests(unittest.TestCase):
         with patch.object(self.adapter, 'aws', side_effect=aws):
             result = self.runner.run_task()
             self.assertEqual(result['task_arn'], TASK)
+            self.assertEqual(result['image_digest'], IMAGE_DIGEST)
             self.assertTrue(self.runner.completed)
             self.assertEqual([item['aws_migration_status'] for item in checkpoints],
                              ['registered', 'running'])
@@ -153,8 +163,9 @@ class AwsMigrationTests(unittest.TestCase):
         def command(args, **_kwargs):
             return 'unix:///var/run/docker.sock' if args[:3] == ['docker', 'context', 'inspect'] else ''
         def aws(args, **_kwargs):
-            self.assertEqual(args[:2], ['ecr', 'get-login-password'])
-            return 'synthetic-password'
+            if args[:2] == ['ecr', 'get-login-password']:
+                return 'synthetic-password'
+            return self.image_details()
         with patch.object(self.adapter, 'command', side_effect=command), \
                 patch.object(self.adapter, 'aws', side_effect=aws), \
                 patch.object(self.runner, 'run_task', side_effect=RuntimeError('wait timed out')):
@@ -170,8 +181,10 @@ class AwsMigrationTests(unittest.TestCase):
         self.adapter.checkpoint = lambda **fields: checkpoints.append(fields)
         def command(args, **_kwargs):
             return 'unix:///var/run/docker.sock' if args[:3] == ['docker', 'context', 'inspect'] else ''
+        def aws(args, **_kwargs):
+            return 'synthetic-password' if args[:2] == ['ecr', 'get-login-password'] else self.image_details()
         with patch.object(self.adapter, 'command', side_effect=command), \
-                patch.object(self.adapter, 'aws', return_value='synthetic-password'), \
+                patch.object(self.adapter, 'aws', side_effect=aws), \
                 patch.object(self.runner, 'run_task', return_value={'task_arn': TASK,
                     'bundle_digest': self.runner.bundle.digest}) as run, \
                 patch.object(self.runner, 'cleanup_completed', return_value=True) as cleanup:
@@ -179,8 +192,26 @@ class AwsMigrationTests(unittest.TestCase):
         run.assert_called_once_with()
         cleanup.assert_called_once_with()
         self.assertEqual(result['cleanup_complete'], True)
-        self.assertEqual(checkpoints[0]['aws_migration_status'], 'succeeded')
-        self.assertEqual(checkpoints[0]['aws_migration_result']['task_arn'], TASK)
+        self.assertEqual([item['aws_migration_status'] for item in checkpoints],
+                         ['image_pushed', 'image_verified', 'succeeded'])
+        self.assertEqual(checkpoints[1]['aws_migration_image_digest'], IMAGE_DIGEST)
+        self.assertEqual(checkpoints[2]['aws_migration_result']['task_arn'], TASK)
+
+    def image_details(self):
+        return json.dumps({'imageDetails': [{'registryId': ACCOUNT,
+            'repositoryName': 'onedeploy-managed', 'imageTags': [ATTEMPT + '-db'],
+            'imageDigest': IMAGE_DIGEST}]})
+
+    def test_image_digest_requires_owned_ecr_tag(self):
+        with patch.object(self.adapter, 'aws', return_value=self.image_details()):
+            self.assertEqual(self.runner.verify_pushed_image(), IMAGE_DIGEST)
+        self.runner.image_digest = None
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'imageDetails': [
+                {'registryId': ACCOUNT, 'repositoryName': 'onedeploy-managed',
+                 'imageTags': ['different'], 'imageDigest': IMAGE_DIGEST}]})):
+            with self.assertRaisesRegex(AwsConfigurationError, 'digest'):
+                self.runner.verify_pushed_image()
+        self.assertIsNone(self.runner.image_digest)
 
     def test_cleanup_only_known_completed_task_artifacts(self):
         with patch.object(self.adapter, 'aws') as aws:

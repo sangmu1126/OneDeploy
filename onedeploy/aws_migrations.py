@@ -78,6 +78,7 @@ class AwsMigrationRunner:
         self.adapter, self.request, self.database = adapter, request, database
         self.bundle, self.repository, self.attempt_id = bundle, repository, attempt_id
         self.image = f'{repository}:{attempt_id}-db'
+        self.image_digest = None
         self.family = f'onedeploy-migrate-{attempt_id}'
         self.subnet = None
         self.registered_arn = None
@@ -115,12 +116,15 @@ class AwsMigrationRunner:
         return self.subnet
 
     def task_definition(self) -> dict:
+        if not isinstance(self.image_digest, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', self.image_digest):
+            raise AwsConfigurationError('마이그레이션 이미지 digest 확인이 필요합니다.')
         req, db = self.request, self.database
         return {'family': self.family, 'networkMode': 'awsvpc',
                 'requiresCompatibilities': ['FARGATE'], 'cpu': '256', 'memory': '512',
                 'runtimePlatform': {'cpuArchitecture': 'X86_64', 'operatingSystemFamily': 'LINUX'},
                 'executionRoleArn': db['execution_role_arn'],
-                'containerDefinitions': [{'name': 'migration', 'image': self.image, 'essential': True,
+                'containerDefinitions': [{'name': 'migration',
+                    'image': f'{self.repository}@{self.image_digest}', 'essential': True,
                     'environment': [
                         {'name': 'PGHOST', 'value': db['endpoint']},
                         {'name': 'PGPORT', 'value': str(db['port'])},
@@ -158,6 +162,7 @@ class AwsMigrationRunner:
             self.adapter.checkpoint(aws_migration_status='registered',
                                     aws_migration_task_definition_arn=arn,
                                     aws_migration_image=self.image,
+                                    aws_migration_image_digest=self.image_digest,
                                     aws_migration_bundle_digest=self.bundle.digest)
         payload = {'cluster': 'default', 'launchType': 'FARGATE', 'count': 1,
                    'taskDefinition': arn,
@@ -197,8 +202,26 @@ class AwsMigrationRunner:
             raise AwsConfigurationError(f'마이그레이션 종료를 확인하지 못했습니다: {task_arn}')
         self.completed = True
         return {'task_arn': task_arn, 'task_definition_arn': arn,
-                'image': self.image, 'bundle_digest': self.bundle.digest,
+                'image': self.image, 'image_digest': self.image_digest,
+                'bundle_digest': self.bundle.digest,
                 'log_group': self.database['migration_log_group']}
+
+    def verify_pushed_image(self) -> str:
+        self.image_digest = None
+        tag = self.attempt_id + '-db'
+        details = json.loads(self.adapter.aws(['ecr', 'describe-images',
+            '--registry-id', self.request.account, '--repository-name', 'onedeploy-managed',
+            '--image-ids', f'imageTag={tag}'], private=True, quiet=True)).get('imageDetails', [])
+        image = details[0] if len(details) == 1 else {}
+        digest = image.get('imageDigest', '')
+        if (image.get('registryId') != self.request.account
+                or image.get('repositoryName') != 'onedeploy-managed'
+                or tag not in image.get('imageTags', [])
+                or not isinstance(digest, str)
+                or not re.fullmatch(r'sha256:[a-f0-9]{64}', digest)):
+            raise AwsConfigurationError('마이그레이션 ECR 이미지의 소유권·digest를 확인하지 못했습니다.')
+        self.image_digest = digest
+        return digest
 
     def cleanup_completed(self) -> bool:
         """Delete only the known stopped task's definition and migration image tag."""
@@ -237,6 +260,21 @@ class AwsMigrationRunner:
             self.adapter.command(docker + ['login', '--username', 'AWS', '--password-stdin',
                                            self.repository.split('/')[0]], stdin=password, private=True)
             self.adapter.command(docker + ['push', self.image], timeout=600)
+        try:
+            if self.adapter.checkpoint:
+                self.adapter.checkpoint(aws_migration_status='image_pushed',
+                                        aws_migration_image=self.image,
+                                        aws_migration_bundle_digest=self.bundle.digest)
+            self.verify_pushed_image()
+            if self.adapter.checkpoint:
+                self.adapter.checkpoint(aws_migration_status='image_verified',
+                                        aws_migration_image=self.image,
+                                        aws_migration_image_digest=self.image_digest,
+                                        aws_migration_bundle_digest=self.bundle.digest)
+        except Exception as exc:
+            self.adapter.event('cleanup', '마이그레이션 이미지 업로드 상태를 확인하지 못했습니다. '
+                               + self.image + '를 직접 확인하세요.')
+            raise AwsConfigurationError(f'마이그레이션 이미지 digest 조회 실패: {exc}') from None
         self.adapter.event('migrating', '검증된 SQL 마이그레이션을 일회성 ECS 태스크로 실행합니다.')
         try:
             result = self.run_task()
