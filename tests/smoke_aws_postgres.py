@@ -86,6 +86,10 @@ def main(argv=None):
                 raise AssertionError('First ECS release did not complete the checked migration')
             probe(first_result['url'], key, record_id, 'POST')
             probe(first_result['url'], key, record_id, 'GET')
+            # ImageBuilder adds .dockerignore to the smoke copy on the first build.
+            # Re-analyze that exact copy before the second immutable-source check.
+            plan = replace(analyze(project), target='aws-ecs-express', health_path='/health',
+                           required_env=['PROBE_KEY'])
             second = AwsExpressAdapter(lambda stage, message: print(f'[v2:{stage}] {message}', flush=True),
                                        settings, existing=first_result)
             second_result = second.deploy(project, plan, second_attempt, {'PROBE_KEY': key},

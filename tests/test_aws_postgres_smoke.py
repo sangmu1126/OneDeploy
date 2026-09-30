@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from onedeploy.core import source_digest
 from tests.smoke_aws_postgres import main
 
 
@@ -33,6 +34,9 @@ class AwsPostgresSmokeTests(unittest.TestCase):
                 self.image_pushed = True
             def deploy(self, project, plan, attempt, environment, postgres=None, migrations=None):
                 self.assertions(project, migrations)
+                assert plan.source_digest == source_digest(project)
+                if self.image == 'v1':
+                    (Path(project) / '.dockerignore').write_text('node_modules\n')
                 calls.append(('deploy', self.image, migrations.digest))
                 return {'url': 'https://example.test', 'service_arn': service_arn,
                         'image': self.image, 'migration': {
