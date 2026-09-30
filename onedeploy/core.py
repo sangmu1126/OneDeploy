@@ -220,7 +220,8 @@ class ImageBuilder:
     def __init__(self, command, event):
         self.command, self.event = command, event
 
-    def build(self, project: Path, plan: DeploymentPlan, image: str, platform: str | None = None):
+    def build(self, project: Path, plan: DeploymentPlan, image: str,
+              platform: str | None = None, extra_ca_bundle: Path | None = None):
         if not plan.source_digest or source_digest(project) != plan.source_digest:
             raise ValueError("Source changed after analysis; upload and analyze again")
         if plan.dockerfile_source == "existing":
@@ -228,9 +229,19 @@ class ImageBuilder:
                 raise ValueError("Existing Dockerfile changed after analysis")
         else:
             (project / "Dockerfile").write_text(plan.dockerfile)
+        if extra_ca_bundle is not None:
+            ca_name = '.onedeploy-rds-ca.pem'
+            shutil.copyfile(extra_ca_bundle, project / ca_name)
+            dockerfile = project / 'Dockerfile'
+            content = dockerfile.read_text()
+            directive = ('\nCOPY .onedeploy-rds-ca.pem /app/.onedeploy-rds-ca.pem\n'
+                         'ENV NODE_EXTRA_CA_CERTS=/app/.onedeploy-rds-ca.pem\n')
+            if directive not in content:
+                dockerfile.write_text(content.rstrip('\n') + directive)
         ignore = project / ".dockerignore"
         current_ignore = ignore.read_text() if ignore.exists() else ""
-        ignore.write_text(current_ignore.rstrip("\n") + "\n.git\nnode_modules\n.venv\nvenv\n__pycache__\n.env\n.env.*\n")
+        ignore.write_text(current_ignore.rstrip("\n") + "\n.git\nnode_modules\n.venv\nvenv\n__pycache__\n.env\n.env.*\n"
+                          + ("!.onedeploy-rds-ca.pem\n" if extra_ca_bundle is not None else ""))
         self.event("building", "Building application image")
         args = ["docker", "build", "--label", "app=onedeploy"]
         if platform:

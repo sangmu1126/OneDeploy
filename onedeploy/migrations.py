@@ -14,6 +14,14 @@ TRANSACTION_CONTROL = re.compile(r'\b(?:BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)
 MAX_FILES = 32
 MAX_FILE_BYTES = 64 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
+RDS_CA_SHA256 = 'fe45bbebf92ad3e27a583bbb2ddd1553c521ed4d49af5514dc0a40372ea5395c'
+
+
+def trusted_rds_ca_bundle() -> Path:
+    bundle = Path(__file__).parent / 'infra' / 'rds-global-bundle.pem'
+    if hashlib.sha256(bundle.read_bytes()).hexdigest() != RDS_CA_SHA256:
+        raise ValueError('RDS CA 번들 체크섬이 예상과 다릅니다.')
+    return bundle
 
 
 @dataclass(frozen=True)
@@ -83,6 +91,7 @@ def stage_migrator_context(bundle: MigrationBundle, destination: Path) -> Path:
     shutil.copyfile(source / 'postgres-migrator-package.json', destination / 'package.json')
     shutil.copyfile(source / 'postgres-migrator-package-lock.json', destination / 'package-lock.json')
     shutil.copyfile(source / 'postgres-migrator.js', destination / 'postgres-migrator.js')
+    shutil.copyfile(trusted_rds_ca_bundle(), destination / 'rds-global-bundle.pem')
     migration_dir = destination / 'migrations'
     migration_dir.mkdir(mode=0o700)
     for item in fresh.migrations:

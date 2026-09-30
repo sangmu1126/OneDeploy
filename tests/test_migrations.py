@@ -24,6 +24,9 @@ class MigrationBundleTests(unittest.TestCase):
             dockerfile = (staged / 'Dockerfile').read_text()
             self.assertIn('npm ci', dockerfile)
             self.assertIn('FROM node:22-alpine@sha256:', dockerfile)
+            self.assertIn('NODE_EXTRA_CA_CERTS=/app/rds-global-bundle.pem', dockerfile)
+            self.assertGreater((staged / 'rds-global-bundle.pem').read_text().count(
+                '-----BEGIN CERTIFICATE-----'), 10)
             lock = json.loads((staged / 'package-lock.json').read_text())
             package = json.loads((staged / 'package.json').read_text())
             self.assertEqual(lock['packages']['']['dependencies'], package['dependencies'])

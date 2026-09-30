@@ -295,7 +295,12 @@ class AwsExpressAdapter:
             if not isinstance(previous_images, list) or prior['image'] not in previous_images:
                 raise AwsConfigurationError('기존 이미지 이력이 올바르지 않습니다.')
             self.service_arn = expected_arn
-        ImageBuilder(self.command, self.event).build(project, plan, self.image, platform='linux/amd64')
+        ca_bundle = None
+        if database is not None:
+            from onedeploy.migrations import trusted_rds_ca_bundle
+            ca_bundle = trusted_rds_ca_bundle()
+        ImageBuilder(self.command, self.event).build(project, plan, self.image,
+                                                      platform='linux/amd64', extra_ca_bundle=ca_bundle)
         self.image_built = True
         registry = repository.split('/')[0]
         password = self.aws(['ecr', 'get-login-password'], private=True)

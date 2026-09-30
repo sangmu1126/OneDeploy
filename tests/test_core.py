@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from onedeploy.core import ImageBuilder, LocalDockerAdapter, analyze, extract_project, make_plan
+from onedeploy.migrations import trusted_rds_ca_bundle
 
 
 class CoreTests(unittest.TestCase):
@@ -61,6 +62,21 @@ class CoreTests(unittest.TestCase):
             self.assertIn('coverage\n', (root / '.dockerignore').read_text())
             self.assertIn('.env.*\n', (root / '.dockerignore').read_text())
             self.assertEqual(commands[0][-3:], ['-t', 'test:latest', str(root)])
+
+    def test_postgres_build_adds_verified_ca_to_existing_dockerfile_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'Dockerfile').write_text('FROM node:22-alpine\nCMD ["node", "app.js"]\n')
+            (root / '.dockerignore').write_text('*.pem\n')
+            builder = ImageBuilder(lambda *_: None, lambda *_: None)
+            bundle = trusted_rds_ca_bundle()
+            builder.build(root, analyze(root), 'db:test', extra_ca_bundle=bundle)
+            dockerfile = (root / 'Dockerfile').read_text()
+            self.assertIn('NODE_EXTRA_CA_CERTS=/app/.onedeploy-rds-ca.pem', dockerfile)
+            self.assertEqual((root / '.onedeploy-rds-ca.pem').read_bytes(), bundle.read_bytes())
+            self.assertIn('!.onedeploy-rds-ca.pem', (root / '.dockerignore').read_text())
+            builder.build(root, analyze(root), 'db:second', extra_ca_bundle=bundle)
+            self.assertEqual((root / 'Dockerfile').read_text(), dockerfile)
 
     def test_dockerfile_only_archive_is_valid_project(self):
         with tempfile.TemporaryDirectory() as tmp:

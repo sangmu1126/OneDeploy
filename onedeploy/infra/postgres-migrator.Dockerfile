@@ -3,5 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY postgres-migrator.js ./
+COPY rds-global-bundle.pem /app/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/app/rds-global-bundle.pem
 COPY migrations ./migrations
 CMD ["node", "postgres-migrator.js"]
