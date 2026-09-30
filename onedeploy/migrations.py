@@ -81,6 +81,7 @@ def stage_migrator_context(bundle: MigrationBundle, destination: Path) -> Path:
     source = Path(__file__).parent / 'infra'
     shutil.copyfile(source / 'postgres-migrator.Dockerfile', destination / 'Dockerfile')
     shutil.copyfile(source / 'postgres-migrator-package.json', destination / 'package.json')
+    shutil.copyfile(source / 'postgres-migrator-package-lock.json', destination / 'package-lock.json')
     shutil.copyfile(source / 'postgres-migrator.js', destination / 'postgres-migrator.js')
     migration_dir = destination / 'migrations'
     migration_dir.mkdir(mode=0o700)

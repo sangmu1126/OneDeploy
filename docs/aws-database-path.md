@@ -53,8 +53,9 @@ Fargate 태스크에서 이 실행기를 돌린다. ECR에 업로드한 이미�
 SHA-256 digest를 재조회하고 태스크 정의에는 변경 불가능한 digest 참조를 사용한다
 ([ECR 이미지 조회](https://docs.aws.amazon.com/cli/latest/reference/ecr/describe-images.html),
 [ECS 컨테이너 이미지 형식](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDefinition.html)).
-이는 실행 이미지를 고정하지만, `node:22-alpine`과 잠금 파일 없는 `npm install`까지
-동일한 결과로 재빌드하게 하지는 않는다. 태스크 종료 코드가 0일 때만 웹 서비스 배포를 계속하며,
+마이그레이터 Dockerfile도 Node 22 Alpine 베이스 이미지 digest와 `pg` 의존성 lockfile을
+고정하고 `npm ci`로 설치한다. 베이스 이미지·의존성 갱신은 lockfile과 digest를 함께 검토해야 한다.
+태스크 종료 코드가 0일 때만 웹 서비스 배포를 계속하며,
 성공 후 마이그레이션 태스크 정의와 임시 ECR 이미지 태그를 정리한다.
 태스크 정의·태스크 ARN·이미지·SQL 묶음 체크섬과 성공 결과를 작업 기록에 저장한다.
 실행 결과가 불확실하면 해당 태스크·정의·이미지를 남기고 자동 재시도 없이 수동 확인을 요구한다.

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,15 @@ class MigrationBundleTests(unittest.TestCase):
             self.assertIn('0001_users.sql', bundle.manifest())
             staged = stage_migrator_context(bundle, project / 'build-context')
             self.assertTrue((staged / 'Dockerfile').is_file())
+            dockerfile = (staged / 'Dockerfile').read_text()
+            self.assertIn('npm ci', dockerfile)
+            self.assertIn('FROM node:22-alpine@sha256:', dockerfile)
+            lock = json.loads((staged / 'package-lock.json').read_text())
+            package = json.loads((staged / 'package.json').read_text())
+            self.assertEqual(lock['packages']['']['dependencies'], package['dependencies'])
+            self.assertEqual(lock['packages']['node_modules/pg']['version'], '8.23.0')
+            self.assertTrue(all(item.get('integrity', '').startswith('sha512-')
+                                for name, item in lock['packages'].items() if name))
             self.assertEqual((staged / 'migrations' / '0001_users.sql').read_text(),
                              'CREATE TABLE users (name text);\n')
             self.assertEqual((staged / 'migrations' / 'manifest.json').read_text(), bundle.manifest())
