@@ -1,6 +1,6 @@
 # AWS 영속 데이터 배포 경로 설계
 
-현재 OneDeploy UI는 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 배포 전에 차단한다. 아래는 AWS에서 **PostgreSQL 한 경로**를 실제로 지원하기 위한 설계와 부분 구현이다. DB 생성·접속 연결·스키마 마이그레이션 코드는 있지만 서버의 원클릭 배포와 실제 AWS 검증은 완성되지 않았다.
+현재 OneDeploy UI는 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 배포 전에 차단한다. 아래는 AWS에서 **PostgreSQL 한 경로**를 실제로 지원하기 위한 설계와 부분 구현이다. 별도 DB 생성 명령, 기존 DB를 쓰는 명시적 API 업로드, 접속 연결·스키마 마이그레이션 코드는 있지만 UI의 자동 DB 생성과 실제 AWS 검증은 완성되지 않았다.
 
 ## 먼저 결정할 경계
 
@@ -51,7 +51,16 @@ DB 폐기는 별도 스냅샷·보호 해제·소유권 검증 절차가 필요�
 PostgreSQL 엔진만 확인된 AWS 앱에만 적용하고, `PGHOST`·`PGPASSWORD` 등 관리형 변수는
 사용자에게 다시 요청하지 않고 검증된 DB 바인딩을 AWS 어댑터에 전달한다.
 MySQL·MongoDB·혼합/불명 엔진과 `DATABASE_URL` 접속 방식은 이 경로에서 차단한다.
-서버 업로드 API에는 아직 이 옵션을 노출하지 않는다.
+서버 업로드 API에는 **기존에 생성된 OneDeploy RDS 스택**을 사용하는 명시적 옵션만 노출한다.
+`POST /api/deployments`에서 일반 세션 토큰과 앱 ZIP/폴더 업로드 외에 다음 헤더가 필요하다.
+`X-Deploy-Target: aws-ecs-express`, `X-Public-Access: true`,
+`X-Application-Id: <DB_APP_ID>`, `X-Postgres-Existing: true`,
+`X-Postgres-Vpc-Id: <DEFAULT_VPC_ID>`,
+`X-Postgres-Subnet-Ids: <SUBNET_A_ID>,<SUBNET_B_ID>`.
+서버에는 `ONEDEPLOY_AWS_ACCOUNT_ID`와 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`도 고정돼 있어야 한다.
+업로드된 앱은 PostgreSQL 단일 엔진으로 확인돼야 하고 `migrations/` SQL 묶음이 있어야 한다.
+API는 작업 생성 전에 DB 소유권을 읽기 전용으로 확인하며, DB 리소스를 새로 만들지는 않는다.
+헤더를 생략한 일반 업로드와 UI의 DB 앱 차단은 유지한다.
 
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.
@@ -70,7 +79,7 @@ SHA-256 digest를 재조회하고 태스크 정의에는 변경 불가능한 dig
 태스크 정의·태스크 ARN·이미지·SQL 묶음 체크섬과 성공 결과를 작업 기록에 저장한다.
 실행 결과가 불확실하면 해당 태스크·정의·이미지를 남기고 자동 재시도 없이 수동 확인을 요구한다.
 스키마 적용 뒤 웹 서비스 배포에 실패해도 마이그레이션 성공 기록은 남는다.
-**이 경로는 아직 AWS 실계정에서 실행하지 않았고 서버 업로드 API에도 노출하지 않는다.**
+**이 경로는 아직 AWS 실계정에서 실행하지 않았으며, API 옵션은 기존 DB를 명시한 경우에만 작동한다.**
 마이그레이션은 기존 앱 버전과 호환되는 SQL이어야 하며, DB 스키마 변경 자체를 롤백하지 않는다.
 
 결과 확인이 불확실한 태스크는 기록된 `aws_migration_task_arn`과

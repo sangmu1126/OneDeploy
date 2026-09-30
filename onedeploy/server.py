@@ -24,6 +24,31 @@ from onedeploy.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extra
 from onedeploy.health import check_deployment
 from onedeploy.infrastructure import (TARGET_RESOURCES, OpenAIInfrastructurePlanner,
                                       inspect_infrastructure, plan_infrastructure, validate_infrastructure)
+from onedeploy.migrations import collect_sql_migrations
+from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
+
+
+def postgres_request_from_job(job: dict) -> PostgresRequest | None:
+    configuration = job.get('postgres')
+    if configuration is None:
+        return None
+    if not isinstance(configuration, dict) or set(configuration) != {
+            'application_id', 'account', 'region', 'vpc_id', 'subnet_ids',
+            'service_security_group'} or not isinstance(configuration['subnet_ids'], list):
+        raise ValueError('저장된 PostgreSQL 연결 요청이 올바르지 않습니다.')
+    request = PostgresRequest(configuration['application_id'], configuration['account'],
+                              configuration['region'], configuration['vpc_id'],
+                              tuple(configuration['subnet_ids']),
+                              configuration['service_security_group'])
+    request.validate()
+    aws = job.get('aws') or {}
+    if (job.get('target') != 'aws-ecs-express'
+            or job.get('application_id') != request.application_id
+            or aws.get('region') != request.region
+            or aws.get('expected_account') != request.account
+            or aws.get('service_security_group') != request.service_security_group):
+        raise ValueError('저장된 PostgreSQL 연결 요청이 AWS 배포 대상과 다릅니다.')
+    return request
 
 
 def dockerfile_diff(source: Path, plan: dict) -> str:
@@ -103,6 +128,7 @@ class App:
                     DeploymentPlan(**job["plan"])
                 elif job.get("mode") != "agent":
                     raise ValueError("Missing deployment plan")
+                postgres_request_from_job(job)
                 if job["status"] not in {"planned", "running", "waiting_input", "succeeded", "failed", "interrupted", "cancelled"}:
                     raise ValueError("Invalid job status")
                 if (not isinstance(job["events"], list) or any(
@@ -352,7 +378,8 @@ class App:
             tools = DeploymentTools(Path(job["project"]), self.root / job_id / "work", job_id,
                                     environment, lambda s, m: self.event(job_id, s, m), checkpoint,
                                     attempts=job.get("attempts", 0), adapter_factory=adapter_factory, target=target,
-                                    infrastructure_plan=job.get('infrastructure_plan'))
+                                    infrastructure_plan=job.get('infrastructure_plan'),
+                                    postgres_request=postgres_request_from_job(job))
             self.event(job_id, "starting", "AI가 작업용 소스에서 배포를 준비합니다.")
             result = DeploymentAgent(self.agent_factory(self.ai_settings), tools,
                                      steps=job.get("steps", 0)).run()
@@ -956,6 +983,24 @@ def handler_for(app: App):
                     application_id = self.headers.get("X-Application-Id", "app-" + job_id)
                     if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
                         raise ValueError("Application ID must be 3-31 lowercase letters, digits or hyphens, starting with a letter")
+                    postgres_flag = self.headers.get('X-Postgres-Existing', 'false')
+                    if postgres_flag not in {'true', 'false'}:
+                        raise ValueError('기존 PostgreSQL 선택 값이 올바르지 않습니다.')
+                    postgres_headers = ('X-Postgres-Vpc-Id', 'X-Postgres-Subnet-Ids')
+                    if postgres_flag != 'true' and any(self.headers.get(name) for name in postgres_headers):
+                        raise ValueError('PostgreSQL 연결 정보에는 기존 DB 명시적 선택이 필요합니다.')
+                    postgres_request = None
+                    if postgres_flag == 'true':
+                        settings = app.aws_settings
+                        if (target != 'aws-ecs-express' or public_flag != 'true'
+                                or not settings.expected_account or not settings.service_security_group):
+                            raise ValueError('기존 PostgreSQL 경로에는 공개 AWS 대상과 계정·서비스 보안 그룹 고정이 필요합니다.')
+                        subnet_ids = tuple(part.strip() for part in
+                                           self.headers.get('X-Postgres-Subnet-Ids', '').split(','))
+                        postgres_request = PostgresRequest(application_id, settings.expected_account,
+                            settings.region, self.headers.get('X-Postgres-Vpc-Id', ''), subnet_ids,
+                            settings.service_security_group)
+                        postgres_request.validate()
                     directory = app.root / job_id
                     directory.mkdir()
                     try:
@@ -972,7 +1017,11 @@ def handler_for(app: App):
                         finally:
                             archive.unlink(missing_ok=True)
                         infrastructure_profile = inspect_infrastructure(project)
-                        validate_infrastructure(infrastructure_profile, target)
+                        validate_infrastructure(infrastructure_profile, target,
+                                                postgres=postgres_request is not None)
+                        if postgres_request is not None:
+                            collect_sql_migrations(project)
+                            database = AwsPostgresProvisioner(postgres_request).inspect_current()
                         if target == 'auto':
                             available_targets = ['local-docker']
                             if app.cloud_settings.unavailable_reason() is None:
@@ -988,6 +1037,20 @@ def handler_for(app: App):
                                 'evidence': [], 'resources': TARGET_RESOURCES[target], 'planner': 'user'}
                         with app.lock:
                             app.ensure_application_available(application_id, target)
+                            latest = None
+                            if target == 'aws-ecs-express':
+                                previous = [old for old in app.jobs.values()
+                                            if old.get('application_id') == application_id
+                                            and old.get('target') == 'aws-ecs-express'
+                                            and old.get('status') == 'succeeded'
+                                            and old.get('deployment_state', 'active') == 'active'
+                                            and old.get('result')]
+                                if previous:
+                                    latest = max(previous, key=lambda item: item.get('created_at', ''))
+                                    if postgres_request is None and latest['result'].get('database') is not None:
+                                        raise ValueError('기존 PostgreSQL 서비스 업데이트에는 동일한 DB 연결 요청이 필요합니다.')
+                                    if postgres_request is not None and latest['result'].get('database') != database:
+                                        raise ValueError('기존 AWS 서비스의 PostgreSQL 연결 기록이 현재 DB와 다릅니다.')
                             app.jobs[job_id] = {"id": job_id, "mode": "agent", "target": target,
                                 "requested_target": requested_target, "infrastructure_plan": infrastructure_plan,
                                 "application_id": application_id,
@@ -1000,14 +1063,11 @@ def handler_for(app: App):
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
                             elif target == "aws-ecs-express":
                                 app.jobs[job_id]["aws"] = asdict(app.aws_settings)
-                                previous = [old for old in app.jobs.values() if old['id'] != job_id
-                                            and old.get('application_id') == application_id
-                                            and old.get('target') == 'aws-ecs-express'
-                                            and old.get('status') == 'succeeded'
-                                            and old.get('deployment_state', 'active') == 'active'
-                                            and old.get('result')]
-                                if previous:
-                                    latest = max(previous, key=lambda item: item.get('created_at', ''))
+                                if postgres_request is not None:
+                                    app.jobs[job_id]['postgres'] = {
+                                        **asdict(postgres_request),
+                                        'subnet_ids': list(postgres_request.subnet_ids)}
+                                if latest is not None:
                                     app.jobs[job_id]['prior_result'] = latest['result']
                                     app.jobs[job_id]['replaces_job_id'] = latest['id']
                             app.save(job_id)
