@@ -1,0 +1,51 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from onedeploy.agent import AgentError, DeploymentAgent, DeploymentTools
+from onedeploy.postgres import PostgresRequest
+
+
+class PostgresAgentTests(unittest.TestCase):
+    def test_explicit_postgres_agent_path_supplies_managed_environment(self):
+        request = PostgresRequest('demo-app', '123456789012', 'ap-northeast-2', 'vpc-12345678',
+                                  ('subnet-11111111', 'subnet-22222222'), 'sg-33333333')
+        calls = []
+        class Adapter:
+            def deploy(self, project, plan, attempt_id, environment, postgres=None):
+                calls.append((plan.required_env, environment, postgres, attempt_id))
+                return {'url': 'https://example.test'}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'source'
+            project.mkdir()
+            (project / 'package.json').write_text(json.dumps({
+                'scripts': {'start': 'node server.js'}, 'dependencies': {'pg': '8.23.0'}}))
+            (project / 'server.js').write_text('const {Pool} = require("pg");')
+            tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None,
+                                    lambda **_: None, target='aws-ecs-express',
+                                    adapter_factory=lambda _event: Adapter(), postgres_request=request)
+            ready = tools.configure_deployment('start', None, 3000, '/', ['PGHOST', 'PGPASSWORD'])
+            self.assertEqual(ready['missing_environment'], [])
+            self.assertTrue(tools.request_environment(['PGHOST', 'PGPASSWORD'], 'DB')['available'])
+            class Provider:
+                def next(self, history):
+                    initial = json.loads(history[0]['content'])
+                    self.assert_managed(initial)
+                    return [{'type': 'function_call', 'call_id': 'stop', 'name': 'report_blocker',
+                             'arguments': json.dumps({'reason': 'fixture done'})}]
+                def assert_managed(self, initial):
+                    assert initial['managed_postgres_connection'] is True
+                    assert 'PGPASSWORD' in initial['available_environment_names']
+            with self.assertRaises(AgentError):
+                DeploymentAgent(Provider(), tools).run()
+            self.assertTrue(tools.deploy_application()['verified'])
+            self.assertEqual(calls[0][1], {})
+            self.assertEqual(calls[0][2], request)
+            with self.assertRaisesRegex(ValueError, 'DATABASE_URL'):
+                tools.configure_deployment('start', None, 3000, '/', ['DATABASE_URL'])
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -13,6 +13,7 @@ from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 
 
 TEMPLATE = Path(__file__).parent / 'infra' / 'aws-postgres.json'
+MANAGED_POSTGRES_ENV = frozenset({'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSSLMODE'})
 
 
 def policy_document(value):

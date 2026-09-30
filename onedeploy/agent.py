@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from onedeploy.analysis import AISettings, redact
 from onedeploy.core import SOURCE_FILENAMES, SOURCE_SUFFIXES, LocalDockerAdapter, make_plan, validate_environment
 from onedeploy.infrastructure import inspect_infrastructure, validate_infrastructure
+from onedeploy.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
 
 
 def tool(name, description, properties):
@@ -108,7 +109,7 @@ class OpenAIDeployAgent:
 class DeploymentTools:
     def __init__(self, original: Path, work: Path, job_id: str, environment, event, checkpoint,
                  attempts=0, adapter_factory=LocalDockerAdapter, target="local-docker",
-                 infrastructure_plan=None):
+                 infrastructure_plan=None, postgres_request: PostgresRequest | None = None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
         self.emit, self.checkpoint = event, checkpoint
@@ -116,6 +117,13 @@ class DeploymentTools:
         if target not in {"local-docker", "cloud-run", "aws-ecs-express"}:
             raise ValueError("Unsupported deployment target")
         self.target = target
+        if postgres_request is not None:
+            if target != 'aws-ecs-express' or not isinstance(postgres_request, PostgresRequest):
+                raise ValueError('PostgreSQL 연결은 AWS ECS Express 대상에서만 사용할 수 있습니다.')
+            postgres_request.validate()
+            if MANAGED_POSTGRES_ENV.intersection(self.environment) or 'DATABASE_URL' in self.environment:
+                raise ValueError('PostgreSQL 연결값은 사용자가 직접 덮어쓸 수 없습니다.')
+        self.postgres_request = postgres_request
         self.infrastructure_plan = infrastructure_plan
         self.plan = None
         self.result = None
@@ -201,6 +209,8 @@ class DeploymentTools:
         if not isinstance(required_env, list) or len(required_env) > 40:
             raise ValueError("Invalid required environment names")
         validate_environment({name: "placeholder" for name in required_env}, [])
+        if self.postgres_request is not None and 'DATABASE_URL' in required_env:
+            raise ValueError('이 PostgreSQL 경로는 DATABASE_URL 대신 PG 환경변수를 사용하는 앱만 지원합니다.')
         self.plan = make_plan(self.work, start_script, build_script, port, health_path,
                               target=self.target,
                               required_env=sorted(set(required_env)), analyzer="agent",
@@ -208,13 +218,17 @@ class DeploymentTools:
         self.checkpoint(plan=asdict(self.plan))
         self.event("preparing", "Dockerfile과 컨테이너 실행 설정 준비 완료")
         return {"ready": True, "dockerfile": self.plan.dockerfile,
-                "missing_environment": [name for name in required_env if not self.environment.get(name)]}
+                "missing_environment": [name for name in required_env if name not in
+                                        (MANAGED_POSTGRES_ENV if self.postgres_request else ())
+                                        and not self.environment.get(name)]}
 
     def request_environment(self, names, reason):
         if not isinstance(names, list) or not names or len(names) > 40 or not isinstance(reason, str):
             raise ValueError("Required environment names and reason are needed")
         validate_environment({name: "placeholder" for name in names}, [])
-        missing = sorted({name for name in names if not self.environment.get(name)})
+        missing = sorted({name for name in names if name not in
+                          (MANAGED_POSTGRES_ENV if self.postgres_request else ())
+                          and not self.environment.get(name)})
         if not missing:
             return {"available": True}
         raise NeedsEnvironment(missing, self.clean(reason[:1000]))
@@ -230,8 +244,11 @@ class DeploymentTools:
     def deploy_application(self):
         if self.plan is None:
             raise ValueError("Configure deployment after the most recent edit first")
-        validate_infrastructure(inspect_infrastructure(self.work), self.target)
-        missing = [name for name in self.plan.required_env if not self.environment.get(name)]
+        validate_infrastructure(inspect_infrastructure(self.work), self.target,
+                                postgres=self.postgres_request is not None)
+        missing = [name for name in self.plan.required_env if name not in
+                   (MANAGED_POSTGRES_ENV if self.postgres_request else ())
+                   and not self.environment.get(name)]
         if missing:
             raise NeedsEnvironment(missing, "배포에 필요한 환경변수 값을 입력하세요.")
         if self.attempts >= 3:
@@ -244,7 +261,11 @@ class DeploymentTools:
         adapter = self.adapter_factory(self.event)
         self.event("deploying", f"실제 배포 시도 {self.attempts}/3")
         try:
-            self.result = adapter.deploy(context, self.plan, attempt_id, self.environment)
+            if self.postgres_request is not None:
+                self.result = adapter.deploy(context, self.plan, attempt_id, self.environment,
+                                             postgres=self.postgres_request)
+            else:
+                self.result = adapter.deploy(context, self.plan, attempt_id, self.environment)
             return {"verified": True, **self.result}
         except Exception as exc:
             self.event("attempt_failed", str(exc))
@@ -282,7 +303,10 @@ class DeploymentAgent:
             "request": "이 앱을 선택한 대상에 배포하고 접속 URL을 반환하세요.",
             "target": self.tools.target,
             "infrastructure_plan": self.tools.infrastructure_plan,
-            "files": inventory[:100], "available_environment_names": sorted(self.tools.environment),
+            "files": inventory[:100], "available_environment_names": sorted(
+                set(self.tools.environment) |
+                (MANAGED_POSTGRES_ENV if self.tools.postgres_request else set())),
+            "managed_postgres_connection": self.tools.postgres_request is not None,
             "attempts_used": self.tools.attempts}, ensure_ascii=False)}]
         started = time.monotonic()
         while self.steps < self.max_steps:

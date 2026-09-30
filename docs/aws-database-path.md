@@ -1,6 +1,6 @@
 # AWS 영속 데이터 배포 경로 설계
 
-현재 OneDeploy는 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 배포 전에 차단한다. 아래는 AWS에서 **PostgreSQL 한 경로**를 실제로 지원하기 위한 설계이며, 아직 DB 생성·이전 기능이 구현됐다는 뜻은 아니다.
+현재 OneDeploy UI는 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 배포 전에 차단한다. 아래는 AWS에서 **PostgreSQL 한 경로**를 실제로 지원하기 위한 설계와 부분 구현이다. DB 생성·접속 연결 코드는 있지만 서버의 원클릭 배포와 데이터 이전은 완성되지 않았다.
 
 ## 먼저 결정할 경계
 
@@ -36,6 +36,12 @@ DB 재조회 시 IAM 역할의 소유 태그·ECS 태스크 신뢰 정책·관�
 DB 앱 배포를 계속 차단한다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
 켜고 스택 종료 보호도 적용하므로, 앱 배포 실패·서비스 종료가 데이터를 지우지 않는다. 이 설정은 계속 비용이 발생할 수 있으며,
 DB 폐기는 별도 스냅샷·보호 해제·소유권 검증 절차가 필요하다.
+
+내부 배포 도구에는 명시적 `postgres_request` 입력 경로가 있다. 이 경로는 소스에서
+PostgreSQL 엔진만 확인된 AWS 앱에만 적용하고, `PGHOST`·`PGPASSWORD` 등 관리형 변수는
+사용자에게 다시 요청하지 않고 검증된 DB 바인딩을 AWS 어댑터에 전달한다.
+MySQL·MongoDB·혼합/불명 엔진과 `DATABASE_URL` 접속 방식은 이 경로에서 차단한다.
+서버 업로드 API에는 아직 이 옵션을 노출하지 않는다.
 
 ```sh
 python3 -m onedeploy.postgres --application demo-app --account <AWS_ACCOUNT_ID> \
