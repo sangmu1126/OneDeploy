@@ -26,8 +26,12 @@ PostgreSQL 인스턴스·DB 보안 그룹·서브넷 그룹을 **명시적 `--ap
 `db.t4g.micro`·암호화된 `gp3` 20 GiB 구성이 주문 가능한지 확인한다
 ([RDS 주문 가능 옵션](https://docs.aws.amazon.com/cli/latest/reference/rds/describe-orderable-db-instance-options.html)).
 생성 요청에는 확인한 엔진 버전을 고정하고, [RDS Extended Support 기본 등록](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-rds-dbinstance.html)을
-해제해 표준 지원 종료 후 추가 요금이 붙는 구성을 거부한다. 이는 전체 월간 비용 견적이나 예산
-상한을 대신하지 않는다. 실제 생성 전 DB 인스턴스·스토리지·백업 비용을 별도 확인해야 한다.
+해제해 표준 지원 종료 후 추가 요금이 붙는 구성을 거부한다. 사전 점검은 AWS
+[Price List Query API](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/using-price-list-query-api.html)에서
+해당 리전의 단일 AZ 인스턴스 시간당 요금과 `gp3` 스토리지 GiB·월 요금을 각각 정확한 SKU로 조회하고,
+730시간·20GiB 기준 용량 비용만 USD로 표시한다. 가격 조회 권한이 없거나 SKU·단위가 불명확하면
+DB 생성을 시작하지 않는다. 백업 초과분·추가 IOPS/처리량·전송·비밀·로그·ECS·세금 등은 제외하므로
+이 수치는 총액이나 예산 상한이 아니다. 실제 생성 전 전체 예상 비용을 별도로 확인해야 한다.
 DB 보안 그룹은 지정한 서비스 보안 그룹에서 포트 5432로 오는 연결만 허용한다. RDS 암호는 관리형
 Secrets Manager 비밀로 두고 원문을 출력하지 않는다. 같은 스택에 DB 전용 ECS 실행 역할도 생성하며,
 기본 ECS 실행 권한에 더해 해당 RDS 비밀 ARN 하나의 `secretsmanager:GetSecretValue`만 허용한다

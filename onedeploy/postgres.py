@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from onedeploy.aws_pricing import estimate_postgres_base_capacity
 
 
 TEMPLATE = Path(__file__).parent / 'infra' / 'aws-postgres.json'
@@ -118,6 +119,7 @@ class AwsPostgresProvisioner:
                    and zones.issubset({az.get('Name') for az in option.get('AvailabilityZones', [])})
                    for option in orderable):
             raise AwsConfigurationError('이 리전·가용 영역에서 기본 PostgreSQL 버전의 암호화된 db.t4g.micro/gp3 20GiB 구성을 확인하지 못했습니다.')
+        pricing = estimate_postgres_base_capacity(self.adapter, req.region)
         return {'account': req.account, 'region': req.region, 'vpc_id': req.vpc_id,
                 'subnet_ids': list(req.subnet_ids), 'availability_zones': sorted({
                     item['AvailabilityZone'] for item in subnets}),
@@ -126,12 +128,16 @@ class AwsPostgresProvisioner:
                 'instance_class': 'db.t4g.micro', 'engine_version': version,
                 'storage_type': 'gp3', 'storage_gib': 20,
                 'extended_support': False,
+                'pricing': pricing,
                 'publicly_accessible': False, 'deletion_protection': True,
                 'retained_on_stack_delete': True}
 
     def create(self) -> dict:
         """Create one new stack only; never update or auto-delete a database."""
         plan = self.preflight()
+        self.adapter.event('cost', 'RDS 기본 용량의 730시간 기준 공개 가격: '
+                           + plan['pricing']['baseline_730h_usd']
+                           + ' USD. 백업 초과·전송·비밀·로그·ECS·세금은 제외합니다.')
         req = self.request
         template = TEMPLATE.read_text(encoding='utf-8')
         payload = {'StackName': req.stack_name, 'TemplateBody': template,
@@ -313,11 +319,11 @@ def main(argv=None) -> None:
     try:
         req = PostgresRequest(args.application, args.account, args.region, args.vpc_id,
                               tuple(args.subnet_id), args.service_security_group)
-        provisioner = AwsPostgresProvisioner(req)
+        provisioner = AwsPostgresProvisioner(req, event=lambda stage, message:
+                                            print(message, flush=True) if stage == 'cost' else None)
         if args.inspect:
             result = provisioner.inspect_current()
         elif args.apply:
-            print('RDS 생성 요청을 시작합니다. DB와 비밀은 앱 종료 시 자동 삭제하지 않습니다.', flush=True)
             result = provisioner.create()
         else:
             result = provisioner.preflight()

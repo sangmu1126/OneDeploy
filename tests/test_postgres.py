@@ -77,11 +77,14 @@ class PostgresTests(unittest.TestCase):
             if args[:2] == ['rds', 'describe-db-engine-versions']:
                 return json.dumps({'DBEngineVersions': [{'Engine': 'postgres', 'EngineVersion': '17.5'}]})
             raise AssertionError(args)
-        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
+        price = {'baseline_730h_usd': '20.87'}
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
+                patch('onedeploy.postgres.estimate_postgres_base_capacity', return_value=price):
             result = self.provisioner.preflight()
         self.assertEqual(result['availability_zones'], ['a', 'b'])
         self.assertEqual(result['engine_version'], '17.5')
         self.assertEqual(result['storage_type'], 'gp3')
+        self.assertEqual(result['pricing'], price)
         self.assertEqual(calls, [['sts', 'get-caller-identity'], ['ec2', 'describe-vpcs'],
                                  ['ec2', 'describe-security-groups'], ['ec2', 'describe-subnets'],
                                  ['rds', 'describe-db-engine-versions'],
@@ -95,12 +98,15 @@ class PostgresTests(unittest.TestCase):
             if args[:2] == ['rds', 'describe-orderable-db-instance-options']:
                 result['OrderableDBInstanceOptions'][0]['StorageType'] = 'gp2'
             return json.dumps(result)
-        with patch.object(self.provisioner.adapter, 'aws', side_effect=wrong_storage):
+        with patch.object(self.provisioner.adapter, 'aws', side_effect=wrong_storage), \
+                patch('onedeploy.postgres.estimate_postgres_base_capacity') as pricing:
             with self.assertRaisesRegex(AwsConfigurationError, 'gp3'):
                 self.provisioner.preflight()
+            pricing.assert_not_called()
 
     def test_create_uses_create_only_and_checks_output_after_wait(self):
         calls = []
+        events = []
         def aws(args, **_kwargs):
             calls.append(args[:2])
             if args[:2] == ['cloudformation', 'create-stack']:
@@ -118,11 +124,16 @@ class PostgresTests(unittest.TestCase):
             if args[:2] == ['cloudformation', 'wait']:
                 return ''
             raise AssertionError(args)
-        with patch.object(self.provisioner, 'preflight', return_value={'engine_version': '17.5'}), \
+        with patch.object(self.provisioner, 'preflight', return_value={
+                'engine_version': '17.5', 'pricing': {'baseline_730h_usd': '20.87'}}), \
+                patch.object(self.provisioner.adapter, 'event',
+                             side_effect=lambda stage, message: events.append((stage, message))), \
                 patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
                 patch.object(self.provisioner, 'inspect', return_value={'status': 'available'}) as inspect:
             self.assertEqual(self.provisioner.create(), {'status': 'available'})
         self.assertEqual(calls, [['cloudformation', 'create-stack'], ['cloudformation', 'wait']])
+        self.assertEqual(events[0][0], 'cost')
+        self.assertIn('20.87 USD', events[0][1])
         inspect.assert_called_once_with(STACK)
 
     def test_inspect_rejects_public_or_misowned_database(self):
