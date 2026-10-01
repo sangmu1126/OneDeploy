@@ -29,7 +29,10 @@ DRIVER = Path(__file__).with_name('browser_postgres_cdp.mjs')
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Verify the browser PostgreSQL deployment path')
-    parser.add_argument('--apply', action='store_true', help='Deploy temporary billable ECS resources')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--apply', action='store_true', help='Deploy temporary billable ECS resources')
+    mode.add_argument('--browser-read-only', action='store_true',
+                      help='Verify browser network and existing RDS lookup without deploying')
     parser.add_argument('--application', default='demo-app')
     parser.add_argument('--account', required=True)
     parser.add_argument('--region', required=True)
@@ -44,13 +47,14 @@ def main(argv=None):
     settings.validate()
     database = discover_existing_postgres(args.application, settings)
     print('Existing DB verified:', database['database_id'], database['status'], flush=True)
-    if not args.apply:
+    if not args.apply and not args.browser_read_only:
         print('읽기 전용 확인 완료. --apply 없이는 브라우저 배포나 ECS 생성을 시작하지 않습니다.', flush=True)
         return
     if not CHROME.is_file():
         raise RuntimeError('Chrome executable not found')
-    subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
-                   check=True, capture_output=True, text=True, timeout=20)
+    if args.apply:
+        subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
+                       check=True, capture_output=True, text=True, timeout=20)
     state = Path(tempfile.mkdtemp(prefix='onedeploy-postgres-browser-smoke-'))
     app = App(state, AISettings('fixture-only', 'scripted'), PostgresFixture,
               aws_settings=settings, monitor_interval=0)
@@ -89,8 +93,15 @@ def main(argv=None):
             time.sleep(.2)
         port = port_file.read_text().splitlines()[0]
         environment = {**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': key}
-        subprocess.run(['node', str(DRIVER), url, port, str(archive_path)],
+        subprocess.run(['node', str(DRIVER), url, port, str(archive_path),
+                        'apply' if args.apply else 'read-only'],
                        check=True, timeout=40 * 60, env=environment)
+        if args.browser_read_only:
+            if app.jobs:
+                raise AssertionError('Read-only browser check created a deployment job')
+            retired = True
+            print('PASS: real browser filled the default network and verified existing RDS without deployment', flush=True)
+            return
         jobs = list(app.jobs.values())
         if len(jobs) != 1:
             raise AssertionError('Expected one browser deployment job')

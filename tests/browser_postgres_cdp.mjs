@@ -1,9 +1,10 @@
 // Drive the served OneDeploy UI in real Chrome; no third-party browser package required.
 import assert from 'node:assert/strict';
 
-const [serverUrl, debuggingPort, archive] = process.argv.slice(2);
+const [serverUrl, debuggingPort, archive, mode = 'apply'] = process.argv.slice(2);
 const probeKey = process.env.ONEDEPLOY_BROWSER_PROBE_KEY;
-assert.ok(serverUrl && debuggingPort && archive && probeKey);
+assert.ok(serverUrl && debuggingPort && archive && ['apply', 'read-only'].includes(mode));
+if (mode === 'apply') assert.ok(probeKey);
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl, 'Chrome has no debuggable page');
@@ -50,10 +51,15 @@ try {
   await command('Runtime.enable');
   await command('Page.navigate', {url: serverUrl});
   await until(() => evaluate("document.readyState === 'complete' && document.getElementById('deploy') && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨')"), 30000);
+  await evaluate("(() => {const e = id => document.getElementById(id); e('target').value = 'aws-ecs-express'; e('target').onchange(); e('networkDiscover').click();})()");
+  const discovered = await until(() => evaluate("(() => {const e = id => document.getElementById(id); const text = e('networkDiscoverInfo').textContent; if (text && !text.includes('서브넷을 채웠습니다')) throw Error(text); return text.includes('서브넷을 채웠습니다') && e('networkVpc').value && e('postgresPlanVpc').value === e('networkVpc').value && e('postgresPlanSubnets').value.split(',').length >= 2;})()"), 60000);
+  assert.ok(discovered);
+  console.log('PASS: browser filled default VPC and subnets from AWS');
   await evaluate("(() => {const e = id => document.getElementById(id); e('application').value = 'demo-app'; e('target').value = 'aws-ecs-express'; e('target').onchange(); e('public').checked = true; e('postgresExisting').checked = true; e('postgresExisting').onchange(); e('postgresLookup').click();})()");
-  const lookup = await until(() => evaluate("(() => {const e = id => document.getElementById(id); const text = e('postgresLookupInfo').textContent; if (text && !text.includes('검증 완료')) throw Error(text); return text.includes('검증 완료') && e('postgresVpc').value && e('postgresSubnets').value;})()"), 60000);
+  const lookup = await until(() => evaluate("(() => {const e = id => document.getElementById(id); const text = e('postgresLookupInfo').textContent; if (text && !text.includes('검증 완료')) throw Error(text); return text.includes('검증 완료') && e('postgresVpc').value && e('postgresSubnets').value && e('postgresVpc').value === e('networkVpc').value;})()"), 60000);
   assert.ok(lookup);
   console.log('PASS: browser RDS lookup filled the verified network');
+  if (mode === 'apply') {
   const document = await command('DOM.getDocument');
   const input = await command('DOM.querySelector', {nodeId: document.root.nodeId, selector: '#file'});
   assert.ok(input.nodeId);
@@ -82,6 +88,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
   if (Date.now() >= deadline) throw Error('Browser deployment exceeded 35 minutes');
+  }
 } finally {
   socket.close();
 }

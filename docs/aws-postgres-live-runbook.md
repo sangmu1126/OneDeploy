@@ -58,9 +58,12 @@ smoke가 성공하면 임시 ECS 서비스와 ECR 이미지 태그를 정리한�
 
 `tests/smoke_aws_postgres_browser.py`의 기본 모드는 기존 RDS를 읽기 전용으로 확인한다. `--apply`에서만 Chrome의 배포 UI가 기존 DB 조회·ZIP 업로드·필수 값 입력·재개를 실행한다. AI 도구 호출은 고정 응답이다. 서울 리전의 `demo-app` RDS에서 이 경로를 실행해 ECS 배포, HTTP 데이터 쓰기·읽기·삭제, 임시 ECS 서비스·이미지 정리를 통과했다. RDS·비밀·앱 전용 보안 그룹은 보존했다.
 
+`--browser-read-only`는 실제 Chrome에서 **기본 VPC·서브넷 불러오기**와 **기존 RDS 조회**를 누르고 입력란의 VPC 일치를 확인한다. 2026-10-01 서울 리전에서 통과했으며 배포 작업·새 AWS 리소스를 만들지 않았다.
+
 ```sh
 PYTHONPATH=. python3 tests/smoke_aws_postgres_browser.py \
   --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
   --service-security-group <APP_OWNED_SERVICE_GROUP_ID>
+# 실제 Chrome에서 조회만 확인하려면 --browser-read-only 추가
 # 실제 ECS 서비스와 이미지 빌드를 실행할 때만 --apply 추가
 ```
