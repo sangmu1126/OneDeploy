@@ -86,6 +86,8 @@ API는 작업 생성 전에 DB 소유권을 읽기 전용으로 확인하며, DB
 
 `GET /api/applications/<앱 ID>/postgres/backups`는 같은 세션 인증과 RDS 소유권 검사를 거쳐 자동 백업 보존 기간, 최근 복원 가능 시점, 삭제 보호·스택 삭제 시 보존 상태와 수동 스냅샷 수·최신 10개를 반환한다. 스냅샷은 [RDS 스냅샷 조회 API](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DescribeDBSnapshots.html)의 `manual` 유형으로 조회하고 응답의 계정·리전·DB ID를 대조한다. UI의 **백업·보호 상태 확인**은 이 읽기 전용 API만 호출한다. 보존 기간·스냅샷 목록 확인은 실제 복원 시험을 대신하지 않는다. `demo-app` 실계정에서는 보존 7일·삭제 보호 켜짐·수동 스냅샷 0개를 확인했다. 수동 스냅샷은 [자동 백업 보존 기간과 별도로 유지](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CreateSnapshot.html)되므로 이후 생성·폐기 정책과 비용 검토가 필요하다.
 
+`python3 -m onedeploy.postgres_snapshot`은 앱 소유 RDS가 `available`인지와 선택한 스냅샷 ID의 중복 여부를 읽기 전용으로 확인한다. `--apply`가 있을 때만 [CreateDBSnapshot](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBSnapshot.html)을 호출하며, 요청에 앱 소유 태그를 포함한다. `--inspect`는 원본 DB가 사라진 뒤에도 고정 AWS 계정·정확한 스냅샷 ARN·원본 DB ID·암호화·태그를 대조할 수 있다. 생성 API는 `creating` 상태를 반환할 수 있어 이를 복구 완료로 간주하지 않는다. 2026-10-01 실계정에서는 계획만 확인했고 생성·복원은 아직 검증하지 않았다.
+
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.
 실행기는 PostgreSQL의 트랜잭션별 advisory lock과 `onedeploy_schema_migrations` 이력으로

@@ -4,6 +4,15 @@
 
 서버 UI에서 앱 ID `demo-app`과 AWS ECS Express를 선택한 뒤 **기존 OneDeploy PostgreSQL RDS 사용** → **백업·보호 상태 확인**을 누른다. 인증 API `GET /api/applications/demo-app/postgres/backups`는 기존 DB 소유권 검사를 먼저 수행한다. 실제 서울 리전의 읽기 전용 조회에서 자동 백업 7일, 삭제 보호 켜짐, CloudFormation 스택 삭제 시 DB 보존, 수동 스냅샷 0개를 확인했다. UI 호출 자체의 실제 Chrome 검증과 스냅샷 생성·복원은 아직 수행하지 않았다.
 
+수동 스냅샷 CLI의 실계정 계획은 아래 명령으로 통과했다. 기본 동작은 읽기 전용이다. `--apply`는 별도 생성 요청이며 백업 저장 비용이 발생할 수 있다. 생성한 경우에만 같은 입력에 `--inspect`를 붙여 상태·소유 태그를 확인한다. 현재 기록에서는 `--apply`를 실행하지 않았다.
+
+```sh
+python3 -m onedeploy.postgres_snapshot --application demo-app \
+  --snapshot-id onedeploy-demo-app-before-migration \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --service-security-group <SERVICE_GROUP_ID>
+```
+
 ## 2026-10-01 임시 앱 네트워크 스택 검증
 
 `PYTHONPATH=. python3 tests/smoke_aws_network.py --account <AWS_ACCOUNT_ID> --region ap-northeast-2`는 기본 VPC와 새 `netprobe-*` 앱 ID를 읽기 전용으로 사전 점검한다. `--apply`를 추가하면 앱 전용 보안 그룹 스택을 생성하고 서버의 앱별 그룹 선택을 검증한 뒤, 그룹 사용·참조 여부를 확인해 그 임시 스택을 정리한다. 생성 결과가 불확실하거나 다른 리소스에서 그룹을 사용하면 자동 정리를 멈추고 스택 이름을 출력한다.

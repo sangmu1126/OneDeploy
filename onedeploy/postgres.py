@@ -147,15 +147,17 @@ def inspect_postgres_backup_status(application_id: str, settings: AwsSettings) -
                 or not re.fullmatch(r'[a-z][a-z0-9-]{0,254}', snapshot_id)
                 or snapshot.get('DBSnapshotArn') != prefix + snapshot_id
                 or not isinstance(snapshot.get('Status'), str)
-                or not isinstance(snapshot.get('SnapshotCreateTime'), str)
+                or (snapshot.get('SnapshotCreateTime') is not None
+                    and not isinstance(snapshot.get('SnapshotCreateTime'), str))
                 or not isinstance(snapshot.get('Encrypted'), bool)):
             raise AwsConfigurationError('수동 스냅샷의 계정·DB·상태가 예상과 다릅니다.')
         results.append({'snapshot_id': snapshot_id, 'status': snapshot['Status'],
-                        'created_at': snapshot['SnapshotCreateTime'],
+                        'created_at': snapshot.get('SnapshotCreateTime'),
                         'encrypted': snapshot['Encrypted']})
-    results.sort(key=lambda item: item['created_at'], reverse=True)
+    results.sort(key=lambda item: item['created_at'] or '', reverse=True)
     return {'application_id': application_id, 'database_id': database_id,
             'region': settings.region, 'account': settings.expected_account,
+            'database_status': database['status'],
             'backup_retention_days': retention, 'latest_restorable_time': restorable,
             'deletion_protection': database['deletion_protection'],
             'retained_on_stack_delete': database['retained_on_stack_delete'],
