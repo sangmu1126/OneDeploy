@@ -18,6 +18,8 @@
 
 복원 인스턴스의 코드 경로는 다음 순서다. 아래 복원 DB 명령은 실제 리소스와 비용을 만들 수 있으며 이 경로의 실계정 검증은 아직 하지 않았다. DB 생성 후 `--inspect`로 조회하고, 데이터 확인 후 `--delete`로 복원 DB 삭제를 요청한다. 삭제 완료를 AWS에서 확인한 다음 보안 그룹을 정리한다. 원본 스냅샷은 보존한다.
 
+데이터 검사 작업의 네트워크는 DB가 `available`이고 아래 `--inspect`가 통과한 뒤 `onedeploy.postgres_restore_probe_network`에 같은 앱·대상·계정·리전·VPC와 `--db-group-id <RESTORE_GROUP_ID>`를 지정해 준비한다. 기본 실행은 읽기 전용이고 `--apply`로 연결을 연다. 작업 종료 후 `--close <PROBE_GROUP_ID>`로 닫고 DB `--inspect`를 다시 실행한다. 이 연결 절차만 검증됐으며, 실제 읽기 전용 SQL 작업은 아직 없다.
+
 ```sh
 python3 -m onedeploy.postgres_restore_instance \
   --application demo-app --snapshot-id onedeploy-demo-app-backup-20261002 \
@@ -29,6 +31,15 @@ python3 -m onedeploy.postgres_restore_instance \
 ```
 
 기존 앱 네트워크 스택이 없으면 원본 RDS의 소유권 점검에 기존 앱 서비스 보안 그룹 ID가 필요하다. 2026-10-02 해당 ID를 지정한 복원 계획 로직을 서울 리전에서 읽기 전용으로 통과했다. 위 인스턴스 CLI의 기본 사전 점검은 복원 전용 그룹도 실제로 존재하고 소유권·규칙 검증을 통과해야 완료된다. 복원 전용 그룹은 별도로 생성해야 한다.
+
+2026-10-02 `onedeploy-restore-demo-app-probe-cf3ac00a` 임시 대상으로 복원 DB 그룹과 검사 작업 그룹을 생성했다. 검사 그룹 `sg-08cfa968d0ea4785c`에서 DB 그룹의 TCP 5432와 HTTPS 443으로만 나가고, DB 그룹은 그 검사 그룹의 TCP 5432만 받도록 검증했다. 검사 그룹 연결을 닫고 두 그룹을 삭제했다. 실제 DB나 ECS 작업은 생성하지 않았다.
+
+```sh
+PYTHONPATH=. python3 tests/smoke_aws_restore_probe_network.py \
+  --application demo-app --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --vpc-id <VPC_ID>
+# 임시 그룹 두 개의 실제 연결·해제·정리를 실행할 때만 --apply 추가
+```
 
 ```sh
 PYTHONPATH=. python3 tests/smoke_aws_restore_network.py \

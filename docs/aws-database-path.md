@@ -94,6 +94,8 @@ UI의 **기존 RDS 수동 스냅샷**은 `POST /api/applications/<앱 ID>/snapsh
 
 `python3 -m onedeploy.postgres_restore`는 [RDS가 스냅샷을 새 DB 인스턴스로 복원한다는 동작](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html)에 맞춰 원본과 다른 대상 ID를 요구한다. 앱 소유 스냅샷의 상태·암호화·VPC·엔진·버전·용량을 원본 DB와 대조하고 대상 ID 중복과 현재 기본 용량 가격을 읽는다. 복원 대상의 `onedeploy.postgres_restore_network`는 별도 보안 그룹을 계획·생성·검증한다. [EC2가 새 그룹에 추가하는 기본 아웃바운드 규칙](https://docs.aws.amazon.com/vpc/latest/userguide/creating-security-groups.html)도 제거해 인바운드·아웃바운드가 모두 비었는지 확인한다. `--delete <GROUP_ID>`는 소유권·미사용·다른 그룹의 참조가 없는 경우에만 실행한다. 임시 그룹의 실제 생성·정리는 통과했다. `onedeploy.postgres_restore_instance`는 같은 대상의 격리 그룹과 복원 계획을 재검증한 뒤 DB를 생성하고, 계정·VPC·보안 그룹·암호화·태그를 조회하며, 소유 DB가 `available`일 때만 명시적으로 삭제한다. 이 DB 수명주기 CLI는 아직 단위 테스트만 통과했다.
 
+`onedeploy.postgres_restore_probe_network`는 일회성 ECS 검사 작업용 보안 그룹을 따로 만든다. 기본 아웃바운드를 제거하고 복원 DB 그룹의 TCP 5432 및 AWS API 연결용 HTTPS 443만 허용한다. 복원 DB에는 해당 작업 그룹에서 오는 TCP 5432만 잠시 허용한다. 정리 전에 작업 네트워크 인터페이스가 남아 있으면 중단하고, DB 인바운드를 먼저 닫은 다음 검사 그룹을 삭제한다. 서울 리전의 임시 그룹 쌍에서 이 연결·해제·정리를 통과했다. ECS SQL 검사 작업과 실제 복원 DB 연결은 아직 구현·검증하지 않았다.
+
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.
 실행기는 PostgreSQL의 트랜잭션별 advisory lock과 `onedeploy_schema_migrations` 이력으로
