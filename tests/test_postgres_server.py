@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsSettings
+from onedeploy.postgres import PostgresRequest
 from onedeploy.server import App, handler_for, postgres_request_from_job
 
 
@@ -97,9 +98,36 @@ class PostgresServerTests(unittest.TestCase):
                    return_value=plan) as preflight, \
                 patch('onedeploy.server.AwsPostgresProvisioner.create') as create:
             handler.do_POST()
-        self.assertEqual(handler.json_response.call_args.args, (200, plan))
+        status, result = handler.json_response.call_args.args
+        self.assertEqual(status, 200)
+        self.assertEqual(result['pricing'], plan['pricing'])
+        self.assertTrue(result['plan_id'])
         preflight.assert_called_once_with()
         create.assert_not_called()
+
+    def test_creation_requires_preview_then_journals_async_operation(self):
+        plan = {'account': ACCOUNT, 'pricing': {'baseline_730h_usd': '20.87'}}
+        request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
+            ('subnet-11111111', 'subnet-22222222'), GROUP)
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=plan), \
+                patch('onedeploy.postgres_operations.threading.Thread.start'):
+            planned = self.app.postgres_operations.plan(request)
+            payload = json.dumps({'plan_id': planned['plan_id']}).encode()
+            handler = handler_for(self.app).__new__(handler_for(self.app))
+            handler.path = '/api/applications/demo-app/postgres/create'
+            handler.headers = {'X-OneDeploy-Token': self.app.token,
+                               'Content-Length': str(len(payload))}
+            handler.rfile = io.BytesIO(payload)
+            handler.json_response = Mock()
+            handler.do_POST()
+        status, operation = handler.json_response.call_args.args
+        self.assertEqual(status, 202)
+        self.assertEqual(operation['status'], 'running')
+        self.assertTrue((self.root / 'database-operations' / 'demo-app.json').is_file())
+        handler.path = '/api/applications/demo-app/postgres/operation'
+        handler.do_GET()
+        self.assertEqual(handler.json_response.call_args.args[1]['status'], 'running')
 
     def test_creation_plan_rejects_invalid_network_before_aws(self):
         handler = handler_for(self.app).__new__(handler_for(self.app))

@@ -138,7 +138,7 @@ test('new RDS plan button shows a read-only capacity quote', async () => {
       const body = path === '/api/config'
         ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
         : path === '/api/jobs' ? []
-        : {account: '123456789012', region: 'ap-northeast-2', engine_version: '18.3',
+        : {plan_id: 'planned-token-123456789012', account: '123456789012', region: 'ap-northeast-2', engine_version: '18.3',
            instance_class: 'db.t4g.micro', storage_type: 'gp3', storage_gib: 20,
            pricing: {baseline_730h_usd: '20.87'}};
       return {ok: true, json: async () => body};
@@ -158,4 +158,49 @@ test('new RDS plan button shows a read-only capacity quote', async () => {
   assert.equal(JSON.parse(plan.options.body).subnet_ids.length, 2);
   assert.match(element('postgresPlanInfo').textContent, /20\.87 USD/);
   assert.match(element('postgresPlanInfo').textContent, /생성하지 않았습니다/);
+});
+
+test('reviewed RDS plan can start creation and fill the resulting DB connection', async () => {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: '', checked: false, files: [], hidden: false, disabled: false,
+      textContent: '', replaceChildren() {}, querySelectorAll() { return []; },
+    });
+    return elements.get(id);
+  };
+  const requests = [];
+  const context = {
+    document: {getElementById: element, hidden: false},
+    fetch: async (path, options) => {
+      requests.push({path, options});
+      const body = path === '/api/config'
+        ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
+        : path === '/api/jobs' ? []
+        : path.endsWith('/plan')
+          ? {plan_id: 'planned-token-123456789012', account: '123456789012',
+             region: 'ap-northeast-2', engine_version: '18.3', instance_class: 'db.t4g.micro',
+             storage_type: 'gp3', storage_gib: 20, pricing: {baseline_730h_usd: '20.87'}}
+          : {application_id: 'demo-app', database_id: 'onedeploy-demo-app',
+             status: 'succeeded', message: 'created', vpc_id: 'vpc-12345678',
+             subnet_ids: ['subnet-11111111', 'subnet-22222222']};
+      return {ok: true, json: async () => body};
+    },
+    setInterval() {}, setTimeout, FormData, Set, Error, Date,
+  };
+  runInNewContext(html.split('<script>', 2)[1].split('</script>', 1)[0], context);
+  await new Promise(resolve => setImmediate(resolve));
+  element('application').value = 'demo-app';
+  element('target').value = 'aws-ecs-express';
+  element('postgresPlanVpc').value = 'vpc-12345678';
+  element('postgresPlanSubnets').value = 'subnet-11111111,subnet-22222222';
+  await element('postgresPlan').onclick();
+  assert.equal(element('postgresCreate').hidden, false);
+  await element('postgresCreate').onclick();
+  const create = requests.find(request => request.path === '/api/applications/demo-app/postgres/create');
+  assert.ok(create);
+  assert.equal(JSON.parse(create.options.body).plan_id, 'planned-token-123456789012');
+  assert.equal(element('postgresExisting').checked, true);
+  assert.equal(element('postgresVpc').value, 'vpc-12345678');
+  assert.equal(element('postgresSubnets').value, 'subnet-11111111,subnet-22222222');
 });

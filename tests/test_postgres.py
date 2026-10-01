@@ -183,6 +183,15 @@ class PostgresTests(unittest.TestCase):
         self.assertIn('20.87 USD', events[0][1])
         inspect.assert_called_once_with(STACK)
 
+    def test_create_rejects_changed_approved_plan_before_aws_mutation(self):
+        with patch.object(self.provisioner, 'preflight', return_value={
+                'engine_version': '18.3', 'pricing': {'baseline_730h_usd': '22.00'}}), \
+                patch.object(self.provisioner.adapter, 'aws') as aws:
+            with self.assertRaisesRegex(AwsConfigurationError, '생성 계획이 변경'):
+                self.provisioner.create(expected_plan={
+                    'engine_version': '18.3', 'pricing': {'baseline_730h_usd': '20.87'}})
+        aws.assert_not_called()
+
     def test_inspect_rejects_public_or_misowned_database(self):
         stack = {'StackId': STACK, 'StackStatus': 'CREATE_COMPLETE',
                  'Tags': [{'Key': 'onedeploy-managed', 'Value': 'true'},

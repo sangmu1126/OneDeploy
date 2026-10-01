@@ -9,7 +9,7 @@
 - 기존 SQLite 파일의 자동 이전은 첫 지원 범위에서 제외한다. 빈 PostgreSQL 스키마를 사용하는 앱만 별도 유형으로 인정하고, 마이그레이션 명령·버전·실패 시 복구 정책이 명확한 경우에만 실행한다. 기존 파일 이전을 지원한다고 표시하지 않는다.
 - RDS는 배포 실패나 서비스 종료만을 이유로 즉시 삭제하지 않는다. 데이터가 남는 리소스의 소유권, 보존 기간, 스냅샷 및 명시적 삭제 동작을 서비스 수명주기와 분리한다. CloudFormation의 [RDS DB 인스턴스](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-rds-dbinstance.html)는 보존·삭제 정책과 비용을 별도로 검토해야 한다.
 
-UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applications/<앱 ID>/postgres/plan`에 VPC ID와 2~8개 서브넷 ID를 보낸다. 서버는 고정된 AWS 계정·앱 전용 보안 그룹으로 기존 `preflight()`만 수행하며 계정·가용 영역·RDS 주문 가능 구성·Price List의 인스턴스 및 20 GiB 저장소 가격을 반환한다. 이 API는 DB 스택 생성이나 기존 DB 존재 여부 확인을 수행하지 않는다. 2026-10-01 인증 HTTP 요청으로 서울 리전의 읽기 전용 계획을 확인했다. UI의 실제 신규 DB 생성 실행은 아직 없다.
+UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applications/<앱 ID>/postgres/plan`에 VPC ID와 2~8개 서브넷 ID를 보낸다. 서버는 고정된 AWS 계정·앱 전용 보안 그룹으로 기존 `preflight()`만 수행하며 계정·가용 영역·RDS 주문 가능 구성·Price List의 인스턴스 및 20 GiB 저장소 가격을 반환한다. 계획 API는 DB 스택 생성이나 기존 DB 존재 여부 확인을 수행하지 않는다. 2026-10-01 인증 HTTP 요청으로 서울 리전의 읽기 전용 계획을 확인했다. UI는 서버가 발급한 15분 만료 계획 ID와 표시된 계정·네트워크·가격을 사용자가 확인한 뒤 별도 생성 버튼을 노출한다. `POST /api/applications/<앱 ID>/postgres/create`는 계획을 다시 읽기 전용으로 검사해 동일할 때만 생성 요청 기록을 디스크에 먼저 저장하고 비동기 CloudFormation 생성을 시작한다. 동일 앱의 중복 생성 요청은 거부한다. 재시작으로 작업이 중단되면 자동 재시도하지 않고 `POST /api/applications/<앱 ID>/postgres/reconcile`에서 계정·스택 ARN·소유 태그와 완료된 DB 구성을 읽기 전용으로 재검증한다. 성공 시 UI가 기존 RDS 연결 입력을 채운다. 이 신규 생성 버튼 자체는 실제 AWS에서 실행하지 않았으며, 기존 RDS로 계획 조회·잘못된 계획 ID 차단·합성 중단 기록의 재확인만 실계정에서 검증했다.
 
 ## 완료 기준
 

@@ -175,9 +175,11 @@ class AwsPostgresProvisioner:
                 'publicly_accessible': False, 'deletion_protection': True,
                 'retained_on_stack_delete': True}
 
-    def create(self) -> dict:
+    def create(self, expected_plan: dict | None = None) -> dict:
         """Create one new stack only; never update or auto-delete a database."""
         plan = self.preflight()
+        if expected_plan is not None and plan != expected_plan:
+            raise AwsConfigurationError('RDS 생성 계획이 변경됐습니다. 가격과 네트워크를 다시 확인하세요.')
         self.adapter.event('cost', 'RDS 기본 용량의 730시간 기준 공개 가격: '
                            + plan['pricing']['baseline_730h_usd']
                            + ' USD. 백업 초과·전송·비밀·로그·ECS·세금은 제외합니다.')

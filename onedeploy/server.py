@@ -26,6 +26,7 @@ from onedeploy.infrastructure import (TARGET_RESOURCES, OpenAIInfrastructurePlan
                                       inspect_infrastructure, plan_infrastructure, validate_infrastructure)
 from onedeploy.migrations import collect_sql_migrations
 from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest, discover_existing_postgres
+from onedeploy.postgres_operations import PostgresOperations
 
 
 def postgres_request_from_job(job: dict) -> PostgresRequest | None:
@@ -107,6 +108,8 @@ class App:
         self.cloud_settings = cloud_settings if cloud_settings is not None else CloudRunSettings.from_environment()
         self.aws_settings = aws_settings if aws_settings is not None else AwsSettings.from_environment()
         self.recovery_warnings = []
+        self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings)
+        self.recovery_warnings.extend(self.postgres_operations.recovery_warnings)
         self.restore()
 
     def restore(self):
@@ -862,6 +865,13 @@ def handler_for(app: App):
                 except (ValueError, AwsConfigurationError) as exc:
                     self.json_response(400, {"error": str(exc)})
                 return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/operation", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, app.postgres_operations.get(application_id))
+                except ValueError as exc:
+                    self.json_response(404, {"error": str(exc)})
+                return
             if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/releases", self.path):
                 application_id = self.path.split('/')[3]
                 self.json_response(200, app.releases(application_id))
@@ -912,7 +922,25 @@ def handler_for(app: App):
                     request = PostgresRequest(application_id, settings.expected_account, settings.region,
                         payload['vpc_id'], tuple(payload['subnet_ids']), settings.service_security_group)
                     request.validate()
-                    self.json_response(200, AwsPostgresProvisioner(request).preflight())
+                    self.json_response(200, app.postgres_operations.plan(request))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/create", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('PostgreSQL 생성 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'plan_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])):
+                        raise ValueError('유효한 생성 계획 ID가 필요합니다.')
+                    self.json_response(202, app.postgres_operations.start(application_id, payload['plan_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/reconcile", self.path):
+                    application_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('PostgreSQL 생성 재확인 요청에는 본문이 없어야 합니다.')
+                    self.json_response(200, app.postgres_operations.reconcile(application_id))
                     return
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback-release/reconcile", self.path):
                     job_id = self.path.split('/')[3]
