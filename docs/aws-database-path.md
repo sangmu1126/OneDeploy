@@ -9,7 +9,7 @@
 - 기존 SQLite 파일의 자동 이전은 첫 지원 범위에서 제외한다. 빈 PostgreSQL 스키마를 사용하는 앱만 별도 유형으로 인정하고, 마이그레이션 명령·버전·실패 시 복구 정책이 명확한 경우에만 실행한다. 기존 파일 이전을 지원한다고 표시하지 않는다.
 - RDS는 배포 실패나 서비스 종료만을 이유로 즉시 삭제하지 않는다. 데이터가 남는 리소스의 소유권, 보존 기간, 스냅샷 및 명시적 삭제 동작을 서비스 수명주기와 분리한다. CloudFormation의 [RDS DB 인스턴스](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-rds-dbinstance.html)는 보존·삭제 정책과 비용을 별도로 검토해야 한다.
 
-UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applications/<앱 ID>/postgres/plan`에 VPC ID와 2~8개 서브넷 ID를 보낸다. 서버는 고정된 AWS 계정·앱 전용 보안 그룹으로 기존 `preflight()`만 수행하며 계정·가용 영역·RDS 주문 가능 구성·Price List의 인스턴스 및 20 GiB 저장소 가격을 반환한다. 계획 API는 DB 스택을 생성하지 않는다. [CloudFormation 스택 목록](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/list-stacks.html)에서 이 앱 ID의 스택 이름이 이미 나타나면 삭제 완료 기록을 포함해 보수적으로 신규 계획을 거부한다. 2026-10-01 인증 HTTP 요청으로 서울 리전의 읽기 전용 계획을 확인했다. UI는 서버가 발급한 15분 만료 계획 ID와 표시된 계정·네트워크·가격을 사용자가 확인한 뒤 별도 생성 버튼을 노출한다. `POST /api/applications/<앱 ID>/postgres/create`는 계획을 다시 읽기 전용으로 검사해 동일할 때만 생성 요청 기록을 디스크에 먼저 저장하고 비동기 CloudFormation 생성을 시작한다. 동일 앱의 중복 생성 요청은 거부한다. 재시작으로 작업이 중단되면 자동 재시도하지 않고 `POST /api/applications/<앱 ID>/postgres/reconcile`에서 계정·스택 ARN·소유 태그와 완료된 DB 구성을 읽기 전용으로 재검증한다. 성공 시 UI가 기존 RDS 연결 입력을 채운다. 이 신규 생성 버튼 자체는 실제 AWS에서 실행하지 않았으며, 기존 RDS로는 중복 생성 계획 차단·잘못된 계획 ID 차단·합성 중단 기록의 재확인을 실계정에서 읽기 전용으로 검증했다.
+UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applications/<앱 ID>/postgres/plan`에 VPC ID와 2~8개 서브넷 ID를 보낸다. 서버는 고정된 AWS 계정과 고정 또는 앱별 검증 서비스 보안 그룹으로 기존 `preflight()`만 수행하며 계정·가용 영역·RDS 주문 가능 구성·Price List의 인스턴스 및 20 GiB 저장소 가격을 반환한다. 계획 API는 DB 스택을 생성하지 않는다. [CloudFormation 스택 목록](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/list-stacks.html)에서 이 앱 ID의 스택 이름이 이미 나타나면 삭제 완료 기록을 포함해 보수적으로 신규 계획을 거부한다. 2026-10-01 인증 HTTP 요청으로 서울 리전의 읽기 전용 계획을 확인했다. UI는 서버가 발급한 15분 만료 계획 ID와 표시된 계정·네트워크·가격을 사용자가 확인한 뒤 별도 생성 버튼을 노출한다. `POST /api/applications/<앱 ID>/postgres/create`는 계획을 다시 읽기 전용으로 검사해 동일할 때만 생성 요청 기록을 디스크에 먼저 저장하고 비동기 CloudFormation 생성을 시작한다. 동일 앱의 중복 생성 요청은 거부한다. 재시작으로 작업이 중단되면 자동 재시도하지 않고 `POST /api/applications/<앱 ID>/postgres/reconcile`에서 계정·스택 ARN·소유 태그와 완료된 DB 구성을 읽기 전용으로 재검증한다. 성공 시 UI가 기존 RDS 연결 입력을 채운다. 이 신규 생성 버튼 자체는 실제 AWS에서 실행하지 않았으며, 기존 RDS로는 중복 생성 계획 차단·잘못된 계획 ID 차단·합성 중단 기록의 재확인을 실계정에서 읽기 전용으로 검증했다.
 
 ## 완료 기준
 
@@ -21,7 +21,7 @@ UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applicatio
 
 이 기준을 충족하고 실제 AWS 계정에서 재현하기 전까지는 DB 의존 앱 차단을 유지한다.
 
-앱 전용 ECS 서비스 그룹을 준비하는 독립 CLI `onedeploy.aws_network`도 있다. 기본 모드는 지정 계정·기본 VPC와 동일 앱 스택 중복을 읽기 전용으로 확인한다. `--apply`를 명시하면 `onedeploy-network-<앱 ID>` CloudFormation 스택으로 인바운드 없는 보안 그룹을 만들고, 소유 태그·계정·VPC·허용된 인바운드를 재검증한다. `--inspect`로 생성 후 상태를 다시 읽을 수 있다. 템플릿은 종료 보호를 켜며 자동 삭제하지 않는다. 현재 서버의 DB 생성 경로는 이 결과를 앱별로 자동 선택하지 않으므로 출력된 그룹 ID를 서버 설정에 지정해야 한다. 실제 AWS에서는 CLI 기본 사전 점검만 검증했고 새 그룹 생성은 실행하지 않았다.
+앱 전용 ECS 서비스 그룹을 준비하는 독립 CLI `onedeploy.aws_network`도 있다. 기본 모드는 지정 계정·기본 VPC와 동일 앱 스택 중복을 읽기 전용으로 확인한다. `--apply`를 명시하면 `onedeploy-network-<앱 ID>` CloudFormation 스택으로 인바운드 없는 보안 그룹을 만들고, 소유 태그·계정·VPC·허용된 인바운드를 재검증한다. `--inspect`로 생성 후 상태를 다시 읽을 수 있다. 템플릿은 종료 보호를 켜며 자동 삭제하지 않는다. 서버에 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`이 없으면 기존 DB 조회·신규 DB 계획·DB 앱 업로드에서 앱 ID와 VPC의 네트워크 스택을 읽기 전용으로 검증해 출력 그룹을 선택한다. 고정 그룹 ID가 있으면 기존 설정을 사용한다. 실제 AWS에서는 CLI 기본 사전 점검만 검증했고 새 그룹 생성 및 자동 선택을 통한 배포는 실행하지 않았다.
 
 ```sh
 python3 -m onedeploy.aws_network --application <APP_ID> --account <AWS_ACCOUNT_ID> \
@@ -74,11 +74,11 @@ MySQL·MongoDB·혼합/불명 엔진과 `DATABASE_URL` 접속 방식은 이 경�
 `X-Application-Id: <DB_APP_ID>`, `X-Postgres-Existing: true`,
 `X-Postgres-Vpc-Id: <DEFAULT_VPC_ID>`,
 `X-Postgres-Subnet-Ids: <SUBNET_A_ID>,<SUBNET_B_ID>`.
-서버에는 `ONEDEPLOY_AWS_ACCOUNT_ID`와 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`도 고정돼 있어야 한다.
+서버에는 `ONEDEPLOY_AWS_ACCOUNT_ID`가 고정돼 있어야 한다. 서비스 그룹은 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`에 고정하거나, 앱 ID·VPC가 일치하는 `onedeploy-network-<앱 ID>` 스택을 미리 만든 뒤 해당 환경 변수를 비워 두어 서버가 검증해 선택하게 한다.
 업로드된 앱은 PostgreSQL 단일 엔진으로 확인돼야 하고 `migrations/` SQL 묶음이 있어야 한다.
 API는 작업 생성 전에 DB 소유권을 읽기 전용으로 확인하며, DB 리소스를 새로 만들지는 않는다.
 헤더를 생략한 일반 업로드에서의 DB 앱 차단은 유지한다. UI는 사용자가 기존 DB와 VPC·서브넷을 명시한 경우에만 위 헤더를 보낸다.
-`GET /api/applications/<앱 ID>/postgres`는 세션 토큰과 서버의 AWS 계정·앱 전용 보안 그룹을 사용해 해당 앱의 RDS 인스턴스를 찾고 전체 스택·DB 소유권을 다시 확인한다. 응답에는 DB ID·계정·리전·VPC·서브넷·엔진 버전·보존 상태만 포함하고 비밀 ARN·엔드포인트는 포함하지 않는다. UI의 **이 앱의 기존 RDS 조회**가 이 값을 입력란에 채운다. 조회와 업로드 시점은 다를 수 있어 업로드 API가 다시 검사한다. 2026-10-01 실제 AWS 계정에서 인증 HTTP 조회를 읽기 전용으로 통과했다.
+`GET /api/applications/<앱 ID>/postgres`는 세션 토큰과 서버의 AWS 계정·고정 또는 앱별 검증 서비스 보안 그룹을 사용해 해당 앱의 RDS 인스턴스를 찾고 전체 스택·DB 소유권을 다시 확인한다. 응답에는 DB ID·계정·리전·VPC·서브넷·엔진 버전·보존 상태만 포함하고 비밀 ARN·엔드포인트는 포함하지 않는다. UI의 **이 앱의 기존 RDS 조회**가 이 값을 입력란에 채운다. 조회와 업로드 시점은 다를 수 있어 업로드 API가 다시 검사한다. 2026-10-01 실제 AWS 계정에서 인증 HTTP 조회를 읽기 전용으로 통과했다. 앱별 선택 경로는 모의 AWS 테스트만 통과했다.
 
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.

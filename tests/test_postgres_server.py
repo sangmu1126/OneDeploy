@@ -106,6 +106,53 @@ class PostgresServerTests(unittest.TestCase):
         preflight.assert_called_once_with()
         create.assert_not_called()
 
+    def test_plan_resolves_verified_application_network_without_global_group(self):
+        self.app.aws_settings = AwsSettings(REGION, expected_account=ACCOUNT)
+        self.app.postgres_operations.settings = self.app.aws_settings
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres/plan'
+        payload = json.dumps({'vpc_id': 'vpc-12345678',
+                              'subnet_ids': ['subnet-11111111', 'subnet-22222222']}).encode()
+        handler.headers = {'X-OneDeploy-Token': self.app.token,
+                           'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        handler.json_response = Mock()
+        with patch('onedeploy.postgres.AwsServiceNetworkProvisioner.inspect_current',
+                   return_value={'service_security_group': GROUP}) as network, \
+                patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                      return_value={'account': ACCOUNT}) as preflight, \
+                patch('onedeploy.postgres_operations.AwsPostgresProvisioner.assert_stack_available'):
+            handler.do_POST()
+        self.assertEqual(handler.json_response.call_args.args[0], 200)
+        self.assertEqual(preflight.call_args.args, ())
+        self.assertEqual(self.app.postgres_operations.plans['demo-app']['request'].service_security_group, GROUP)
+        self.assertEqual(network.call_count, 1)
+
+    def test_upload_uses_verified_application_network_in_persisted_aws_settings(self):
+        self.app.aws_settings = AwsSettings(REGION, expected_account=ACCOUNT)
+        with patch('onedeploy.postgres.AwsServiceNetworkProvisioner.inspect_current',
+                   return_value={'service_security_group': GROUP}), \
+                patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                      return_value={'database_id': 'onedeploy-demo-app'}):
+            status, payload = self.upload(archive())
+        self.assertEqual(status, 202)
+        job = self.app.jobs[payload['id']]
+        self.assertEqual(job['aws']['service_security_group'], GROUP)
+        self.assertEqual(postgres_request_from_job(job).service_security_group, GROUP)
+        restored = App(self.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.app.aws_settings, monitor_interval=0)
+        self.assertFalse(restored.recovery_warnings)
+        self.assertEqual(restored.jobs[payload['id']]['aws']['service_security_group'], GROUP)
+
+    def test_upload_rejects_missing_application_network_before_job(self):
+        self.app.aws_settings = AwsSettings(REGION, expected_account=ACCOUNT)
+        with patch('onedeploy.postgres.AwsServiceNetworkProvisioner.inspect_current',
+                   side_effect=RuntimeError('앱 네트워크 스택 없음')):
+            status, payload = self.upload(archive())
+        self.assertEqual(status, 400)
+        self.assertIn('앱 네트워크 스택 없음', payload['error'])
+        self.assertFalse(self.app.jobs)
+
     def test_creation_requires_preview_then_journals_async_operation(self):
         plan = {'account': ACCOUNT, 'pricing': {'baseline_730h_usd': '20.87'}}
         request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',

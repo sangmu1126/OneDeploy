@@ -35,7 +35,8 @@ class PostgresOperations:
                 if (path.stem != request.application_id
                         or request.account != settings.expected_account
                         or request.region != settings.region
-                        or request.service_security_group != settings.service_security_group
+                        or (settings.service_security_group and
+                            request.service_security_group != settings.service_security_group)
                         or operation['status'] not in {'running', 'succeeded', 'needs_attention'}):
                     raise ValueError('Unexpected database operation')
                 if operation['status'] == 'running':
@@ -62,7 +63,8 @@ class PostgresOperations:
     def plan(self, request: PostgresRequest) -> dict:
         request.validate()
         if (request.account != self.settings.expected_account or request.region != self.settings.region
-                or request.service_security_group != self.settings.service_security_group):
+                or (self.settings.service_security_group and
+                    request.service_security_group != self.settings.service_security_group)):
             raise AwsConfigurationError('RDS 생성 대상이 서버의 AWS 설정과 다릅니다.')
         with self.lock:
             if request.application_id in self.operations:

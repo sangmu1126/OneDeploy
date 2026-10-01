@@ -6,12 +6,13 @@ import json
 import re
 import tempfile
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from onedeploy.aws import (AwsConfigurationError, AwsExpressAdapter, AwsSettings,
                            service_group_ingress_is_restricted)
 from onedeploy.aws_pricing import estimate_postgres_base_capacity
+from onedeploy.aws_network import AwsServiceNetworkProvisioner, ServiceNetworkRequest
 
 
 TEMPLATE = Path(__file__).parent / 'infra' / 'aws-postgres.json'
@@ -65,14 +66,28 @@ class PostgresRequest:
             raise ValueError('ECS 태스크에 추가할 서비스 보안 그룹 ID가 필요합니다.')
 
 
+def postgres_settings_for_application(application_id: str, vpc_id: str,
+                                      settings: AwsSettings) -> AwsSettings:
+    """Resolve a verified app-owned service group when no fixed group is configured."""
+    settings.validate()
+    if not settings.expected_account:
+        raise AwsConfigurationError('PostgreSQL 경로에는 AWS 계정 ID를 서버에 고정해야 합니다.')
+    if settings.service_security_group:
+        return settings
+    request = ServiceNetworkRequest(application_id, settings.expected_account,
+                                    settings.region, vpc_id)
+    network = AwsServiceNetworkProvisioner(request).inspect_current()
+    return replace(settings, service_security_group=network['service_security_group'])
+
+
 def discover_existing_postgres(application_id: str, settings: AwsSettings) -> dict:
     """Find only this app's database, then run the full read-only ownership audit."""
     if not re.fullmatch(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*', application_id or '') \
             or not 3 <= len(application_id) <= 31:
         raise ValueError('DB 앱 ID가 올바르지 않습니다.')
     settings.validate()
-    if not settings.expected_account or not settings.service_security_group:
-        raise AwsConfigurationError('AWS 계정과 앱 전용 서비스 보안 그룹을 서버에 고정하세요.')
+    if not settings.expected_account:
+        raise AwsConfigurationError('PostgreSQL 경로에는 AWS 계정 ID를 서버에 고정해야 합니다.')
     adapter = AwsExpressAdapter(lambda *_: None, settings)
     identity = json.loads(adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
     if identity.get('Account') != settings.expected_account:
@@ -83,9 +98,11 @@ def discover_existing_postgres(application_id: str, settings: AwsSettings) -> di
     if len(instances) != 1 or instances[0].get('DBInstanceIdentifier') != database_id:
         raise AwsConfigurationError('지정한 앱의 PostgreSQL 인스턴스를 확인하지 못했습니다.')
     subnet_group = instances[0].get('DBSubnetGroup', {})
+    effective_settings = postgres_settings_for_application(
+        application_id, subnet_group.get('VpcId', ''), settings)
     request = PostgresRequest(application_id, settings.expected_account, settings.region,
         subnet_group.get('VpcId', ''), tuple(item.get('SubnetIdentifier', '')
-        for item in subnet_group.get('Subnets', [])), settings.service_security_group)
+        for item in subnet_group.get('Subnets', [])), effective_settings.service_security_group)
     request.validate()
     database = AwsPostgresProvisioner(request).inspect_current()
     return {'database_id': database['database_id'], 'account': settings.expected_account,

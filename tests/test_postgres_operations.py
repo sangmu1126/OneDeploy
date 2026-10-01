@@ -40,6 +40,18 @@ class PostgresOperationsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '이미'):
             restored.plan(self.request)
 
+    def test_app_network_group_operation_restores_without_global_group(self):
+        settings = AwsSettings('ap-northeast-2', expected_account='123456789012')
+        manager = PostgresOperations(self.root, settings)
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=self.quote), \
+                patch('onedeploy.postgres_operations.threading.Thread.start'):
+            plan = manager.plan(self.request)
+            manager.start('demo-app', plan['plan_id'])
+        restored = PostgresOperations(self.root, settings)
+        self.assertFalse(restored.recovery_warnings)
+        self.assertEqual(restored.get('demo-app')['status'], 'needs_attention')
+
     def test_changed_quote_rejects_before_creation_record(self):
         with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
                    side_effect=[self.quote, {'account': '123456789012',

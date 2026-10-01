@@ -25,7 +25,8 @@ from onedeploy.health import check_deployment
 from onedeploy.infrastructure import (TARGET_RESOURCES, OpenAIInfrastructurePlanner,
                                       inspect_infrastructure, plan_infrastructure, validate_infrastructure)
 from onedeploy.migrations import collect_sql_migrations
-from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest, discover_existing_postgres
+from onedeploy.postgres import (AwsPostgresProvisioner, PostgresRequest,
+                                discover_existing_postgres, postgres_settings_for_application)
 from onedeploy.postgres_operations import PostgresOperations
 
 
@@ -918,7 +919,8 @@ def handler_for(app: App):
                             or not isinstance(payload['subnet_ids'], list)
                             or any(not isinstance(value, str) for value in payload['subnet_ids'])):
                         raise ValueError('VPC ID와 서브넷 ID 목록이 필요합니다.')
-                    settings = app.aws_settings
+                    settings = postgres_settings_for_application(
+                        application_id, payload['vpc_id'], app.aws_settings)
                     request = PostgresRequest(application_id, settings.expected_account, settings.region,
                         payload['vpc_id'], tuple(payload['subnet_ids']), settings.service_security_group)
                     request.validate()
@@ -1042,16 +1044,20 @@ def handler_for(app: App):
                     if postgres_flag != 'true' and any(self.headers.get(name) for name in postgres_headers):
                         raise ValueError('PostgreSQL 연결 정보에는 기존 DB 명시적 선택이 필요합니다.')
                     postgres_request = None
+                    aws_settings_for_job = app.aws_settings
                     if postgres_flag == 'true':
                         settings = app.aws_settings
                         if (target != 'aws-ecs-express' or public_flag != 'true'
-                                or not settings.expected_account or not settings.service_security_group):
-                            raise ValueError('기존 PostgreSQL 경로에는 공개 AWS 대상과 계정·서비스 보안 그룹 고정이 필요합니다.')
+                                or not settings.expected_account):
+                            raise ValueError('기존 PostgreSQL 경로에는 공개 AWS 대상과 계정 고정이 필요합니다.')
+                        vpc_id = self.headers.get('X-Postgres-Vpc-Id', '')
+                        aws_settings_for_job = postgres_settings_for_application(
+                            application_id, vpc_id, settings)
                         subnet_ids = tuple(part.strip() for part in
                                            self.headers.get('X-Postgres-Subnet-Ids', '').split(','))
                         postgres_request = PostgresRequest(application_id, settings.expected_account,
-                            settings.region, self.headers.get('X-Postgres-Vpc-Id', ''), subnet_ids,
-                            settings.service_security_group)
+                            settings.region, vpc_id, subnet_ids,
+                            aws_settings_for_job.service_security_group)
                         postgres_request.validate()
                     directory = app.root / job_id
                     directory.mkdir()
@@ -1114,7 +1120,7 @@ def handler_for(app: App):
                             if target == "cloud-run":
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
                             elif target == "aws-ecs-express":
-                                app.jobs[job_id]["aws"] = asdict(app.aws_settings)
+                                app.jobs[job_id]["aws"] = asdict(aws_settings_for_job)
                                 if postgres_request is not None:
                                     app.jobs[job_id]['postgres'] = {
                                         **asdict(postgres_request),

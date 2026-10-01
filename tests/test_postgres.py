@@ -364,6 +364,27 @@ class PostgresTests(unittest.TestCase):
                 discover_existing_postgres('demo-app', settings)
         self.assertEqual(aws.call_count, 1)
 
+    def test_discovery_resolves_group_from_verified_application_network(self):
+        settings = AwsSettings(REGION, expected_account=ACCOUNT)
+        def aws(_adapter, args, **_kwargs):
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            return json.dumps({'DBInstances': [{'DBInstanceIdentifier': 'onedeploy-demo-app',
+                'DBSubnetGroup': {'VpcId': VPC, 'Subnets': [
+                    {'SubnetIdentifier': subnet} for subnet in SUBNETS]}}]})
+        verified = {'database_id': 'onedeploy-demo-app', 'engine_version': '18.3',
+                    'status': 'available', 'deletion_protection': True,
+                    'retained_on_stack_delete': True}
+        with patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws), \
+                patch('onedeploy.postgres.AwsServiceNetworkProvisioner.inspect_current',
+                      return_value={'service_security_group': SERVICE_GROUP}) as network, \
+                patch('onedeploy.postgres.AwsPostgresProvisioner.inspect_current',
+                      return_value=verified) as inspect:
+            result = discover_existing_postgres('demo-app', settings)
+        self.assertEqual(network.call_args.args, ())
+        self.assertEqual(inspect.call_args.args, ())
+        self.assertEqual(result['vpc_id'], VPC)
+
     def test_dry_run_never_creates_stack(self):
         arguments = ['--application', 'demo-app', '--account', ACCOUNT, '--region', REGION,
                      '--vpc-id', VPC, '--subnet-id', SUBNETS[0], '--subnet-id', SUBNETS[1],
