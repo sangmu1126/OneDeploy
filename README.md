@@ -9,6 +9,7 @@
 자동 선택에서는 AI가 소스 근거와 이유를 제시하고, 서버가 현재 사용 가능한 대상·공개 범위·지원 작업 유형을 검증합니다.
 일반 배포에서 실행 가능한 인프라는 **영속 데이터와 별도 워커가 없는 단일 HTTP 컨테이너**입니다. AWS ECS Express Mode에서는 기존 OneDeploy PostgreSQL RDS를 명시해 연결하는 제한된 경로도 있습니다. 그 외 SQLite·MySQL·MongoDB·로컬 파일 저장·백그라운드 워커 의존이 감지되면 데이터 손실이나 작업 누락을 막기 위해 배포를 시작하지 않습니다.
 기존 RDS를 연결하려면 **AWS ECS Express Mode**와 **인터넷에 공개하기**를 선택하고 **기존 OneDeploy PostgreSQL RDS 사용**을 체크하세요. **이 앱의 기존 RDS 조회**를 눌러 서버가 소유권을 확인한 VPC·서브넷 ID를 채우거나, 해당 ID를 직접 입력합니다. 서버에는 `ONEDEPLOY_AWS_ACCOUNT_ID`와 앱 전용 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`을 고정해야 합니다. 업로드 앱은 PostgreSQL 단일 엔진과 `migrations/` SQL 묶음을 사용해야 합니다. 서버가 DB 소유권을 확인한 뒤 배포하며, 이 흐름은 DB를 새로 만들지 않습니다. ECS와 기존 RDS 비용이 발생하고 앱 종료 후에도 DB는 남습니다.
+앱 전용 ECS 보안 그룹은 `python3 -m onedeploy.aws_network --application <APP_ID> --account <AWS_ACCOUNT_ID> --region <AWS_REGION> --vpc-id <DEFAULT_VPC_ID>`로 읽기 전용 사전 점검하고, 실제 생성할 때만 `--apply`를 추가합니다. 생성 후 출력된 그룹 ID를 현재 서버의 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`에 설정할 수 있습니다. 이 생성기는 아직 UI의 앱별 자동 선택과 연결되지 않았습니다.
 새 DB가 필요한 경우 AWS 대상의 **새 PostgreSQL RDS 생성 계획 미리보기**에서 기본 VPC·서로 다른 가용 영역의 서브넷을 입력해 계정·네트워크·주문 가능 구성·기본 용량 가격을 읽기 전용으로 확인할 수 있습니다. 계획 조회는 DB를 만들지 않으며, 같은 앱 ID의 CloudFormation 스택 기록이 있으면 신규 계획을 거부합니다. 이때는 기존 RDS 조회를 사용하세요. 표시된 구성과 비용을 확인한 뒤 **이 계획으로 RDS 생성**을 누르면 생성 작업을 기록하고 AWS CloudFormation을 비동기로 실행합니다. 현재 서버에는 앱 전용 서비스 보안 그룹을 먼저 지정해야 합니다. 서버 재시작 등으로 결과가 불확실하면 **AWS 생성 결과 재확인**으로 소유 스택을 읽기 전용으로 검사합니다. 기존 RDS의 재사용과 달리 신규 생성 UI의 실계정 생성 실행은 아직 검증하지 않았습니다.
 빌드 또는 실행이 실패하면 결과를 AI에 전달하고 최대 두 번 수정·재시도합니다.
 분석 결과를 검토·승인하는 단계는 없습니다. 필요한 환경변수 값만 진행 중에 요청합니다.

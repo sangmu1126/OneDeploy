@@ -21,6 +21,14 @@ UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applicatio
 
 이 기준을 충족하고 실제 AWS 계정에서 재현하기 전까지는 DB 의존 앱 차단을 유지한다.
 
+앱 전용 ECS 서비스 그룹을 준비하는 독립 CLI `onedeploy.aws_network`도 있다. 기본 모드는 지정 계정·기본 VPC와 동일 앱 스택 중복을 읽기 전용으로 확인한다. `--apply`를 명시하면 `onedeploy-network-<앱 ID>` CloudFormation 스택으로 인바운드 없는 보안 그룹을 만들고, 소유 태그·계정·VPC·허용된 인바운드를 재검증한다. `--inspect`로 생성 후 상태를 다시 읽을 수 있다. 템플릿은 종료 보호를 켜며 자동 삭제하지 않는다. 현재 서버의 DB 생성 경로는 이 결과를 앱별로 자동 선택하지 않으므로 출력된 그룹 ID를 서버 설정에 지정해야 한다. 실제 AWS에서는 CLI 기본 사전 점검만 검증했고 새 그룹 생성은 실행하지 않았다.
+
+```sh
+python3 -m onedeploy.aws_network --application <APP_ID> --account <AWS_ACCOUNT_ID> \
+  --region ap-northeast-2 --vpc-id <DEFAULT_VPC_ID>
+# 실제 그룹을 생성할 때만 --apply 추가; 기존 스택 재검증은 --inspect
+```
+
 현재 구현은 기본 VPC의 추가 ECS 서비스 보안 그룹 하나를 선택하고 실제 적용을
 검증한다. 새 그룹은 인바운드 규칙이 없어야 한다. ECS Express가 배포 후 로드 밸런서
 보안 그룹에서 앱 포트로 들어오는 규칙 하나를 추가할 수 있으므로, 이후 점검에서는
