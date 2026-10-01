@@ -96,6 +96,7 @@ class PostgresServerTests(unittest.TestCase):
         plan = {'account': ACCOUNT, 'pricing': {'baseline_730h_usd': '20.87'}}
         with patch('onedeploy.server.AwsPostgresProvisioner.preflight',
                    return_value=plan) as preflight, \
+                patch('onedeploy.server.AwsPostgresProvisioner.assert_stack_available'), \
                 patch('onedeploy.server.AwsPostgresProvisioner.create') as create:
             handler.do_POST()
         status, result = handler.json_response.call_args.args
@@ -111,6 +112,7 @@ class PostgresServerTests(unittest.TestCase):
             ('subnet-11111111', 'subnet-22222222'), GROUP)
         with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=plan), \
+                patch('onedeploy.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
                 patch('onedeploy.postgres_operations.threading.Thread.start'):
             planned = self.app.postgres_operations.plan(request)
             payload = json.dumps({'plan_id': planned['plan_id']}).encode()

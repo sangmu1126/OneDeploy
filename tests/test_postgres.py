@@ -192,6 +192,20 @@ class PostgresTests(unittest.TestCase):
                     'engine_version': '18.3', 'pricing': {'baseline_730h_usd': '20.87'}})
         aws.assert_not_called()
 
+    def test_existing_stack_name_blocks_new_database_plan(self):
+        with patch.object(self.provisioner.adapter, 'aws', return_value=json.dumps({
+                'StackSummaries': [{'StackName': self.request.stack_name,
+                                    'StackStatus': 'CREATE_COMPLETE'}]})):
+            with self.assertRaisesRegex(AwsConfigurationError, '이미'):
+                self.provisioner.assert_stack_available()
+        with patch.object(self.provisioner.adapter, 'aws', return_value=json.dumps({
+                'StackSummaries': [{'StackName': 'unrelated-stack'}]})):
+            self.provisioner.assert_stack_available()
+        with patch.object(self.provisioner.adapter, 'aws', return_value=json.dumps({
+                'StackSummaries': [], 'NextToken': 'truncated'})):
+            with self.assertRaisesRegex(AwsConfigurationError, '완전히'):
+                self.provisioner.assert_stack_available()
+
     def test_inspect_rejects_public_or_misowned_database(self):
         stack = {'StackId': STACK, 'StackStatus': 'CREATE_COMPLETE',
                  'Tags': [{'Key': 'onedeploy-managed', 'Value': 'true'},

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from onedeploy.aws import AwsSettings
+from onedeploy.aws import AwsConfigurationError, AwsSettings
 from onedeploy.postgres import PostgresRequest
 from onedeploy.postgres_operations import PostgresOperations
 
@@ -21,6 +21,9 @@ class PostgresOperationsTests(unittest.TestCase):
                                        'sg-33333333')
         self.manager = PostgresOperations(self.root, self.settings)
         self.quote = {'account': '123456789012', 'pricing': {'baseline_730h_usd': '20.87'}}
+        guard = patch('onedeploy.postgres_operations.AwsPostgresProvisioner.assert_stack_available')
+        guard.start()
+        self.addCleanup(guard.stop)
 
     def test_accepted_create_is_journaled_before_worker_and_not_repeated_after_restart(self):
         with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
@@ -47,6 +50,15 @@ class PostgresOperationsTests(unittest.TestCase):
                 self.manager.start('demo-app', plan['plan_id'])
         self.assertFalse((self.root / 'demo-app.json').exists())
         start.assert_not_called()
+
+    def test_existing_stack_blocks_plan_before_any_creation_record(self):
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=self.quote), \
+                patch('onedeploy.postgres_operations.AwsPostgresProvisioner.assert_stack_available',
+                      side_effect=AwsConfigurationError('스택 기록이 이미 있습니다.')):
+            with self.assertRaisesRegex(AwsConfigurationError, '이미'):
+                self.manager.plan(self.request)
+        self.assertFalse((self.root / 'demo-app.json').exists())
 
     def test_successful_worker_records_database_without_secret(self):
         with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',

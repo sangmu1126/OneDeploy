@@ -67,7 +67,9 @@ class PostgresOperations:
         with self.lock:
             if request.application_id in self.operations:
                 raise ValueError('이 앱에는 이미 PostgreSQL 생성 기록이 있습니다. 먼저 생성 상태를 확인하세요.')
-        result = AwsPostgresProvisioner(request).preflight()
+        provisioner = AwsPostgresProvisioner(request)
+        result = provisioner.preflight()
+        provisioner.assert_stack_available()
         token = secrets.token_urlsafe(24)
         with self.lock:
             if request.application_id in self.operations:
@@ -85,9 +87,11 @@ class PostgresOperations:
                 raise ValueError('이 앱의 PostgreSQL 생성 요청이 이미 기록돼 있습니다.')
             request, expected = plan['request'], plan['result']
         # Recheck account, network, and current price before writing an operation.
-        current = AwsPostgresProvisioner(request).preflight()
+        provisioner = AwsPostgresProvisioner(request)
+        current = provisioner.preflight()
         if current != expected:
             raise ValueError('생성 계획이 변경됐습니다. 가격을 다시 확인하세요.')
+        provisioner.assert_stack_available()
         operation = {'application_id': application_id, 'request': asdict(request),
                      'expected_plan': expected, 'status': 'running',
                      'created_at': datetime.now(timezone.utc).isoformat(),
