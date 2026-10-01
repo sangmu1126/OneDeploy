@@ -83,6 +83,37 @@ class PostgresServerTests(unittest.TestCase):
         discover.assert_not_called()
         self.assertEqual(handler.json_response.call_args.args[0], 403)
 
+    def test_creation_plan_runs_read_only_preflight(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres/plan'
+        payload = json.dumps({'vpc_id': 'vpc-12345678',
+                              'subnet_ids': ['subnet-11111111', 'subnet-22222222']}).encode()
+        handler.headers = {'X-OneDeploy-Token': self.app.token,
+                           'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        handler.json_response = Mock()
+        plan = {'account': ACCOUNT, 'pricing': {'baseline_730h_usd': '20.87'}}
+        with patch('onedeploy.server.AwsPostgresProvisioner.preflight',
+                   return_value=plan) as preflight, \
+                patch('onedeploy.server.AwsPostgresProvisioner.create') as create:
+            handler.do_POST()
+        self.assertEqual(handler.json_response.call_args.args, (200, plan))
+        preflight.assert_called_once_with()
+        create.assert_not_called()
+
+    def test_creation_plan_rejects_invalid_network_before_aws(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres/plan'
+        payload = json.dumps({'vpc_id': 'vpc-invalid', 'subnet_ids': []}).encode()
+        handler.headers = {'X-OneDeploy-Token': self.app.token,
+                           'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        handler.json_response = Mock()
+        with patch('onedeploy.server.AwsPostgresProvisioner.preflight') as preflight:
+            handler.do_POST()
+        self.assertEqual(handler.json_response.call_args.args[0], 400)
+        preflight.assert_not_called()
+
     def test_opt_in_upload_persists_and_restores_postgres_request(self):
         database = {'database_id': 'onedeploy-demo-app'}
         with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',

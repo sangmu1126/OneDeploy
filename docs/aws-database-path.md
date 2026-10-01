@@ -9,6 +9,8 @@
 - 기존 SQLite 파일의 자동 이전은 첫 지원 범위에서 제외한다. 빈 PostgreSQL 스키마를 사용하는 앱만 별도 유형으로 인정하고, 마이그레이션 명령·버전·실패 시 복구 정책이 명확한 경우에만 실행한다. 기존 파일 이전을 지원한다고 표시하지 않는다.
 - RDS는 배포 실패나 서비스 종료만을 이유로 즉시 삭제하지 않는다. 데이터가 남는 리소스의 소유권, 보존 기간, 스냅샷 및 명시적 삭제 동작을 서비스 수명주기와 분리한다. CloudFormation의 [RDS DB 인스턴스](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-rds-dbinstance.html)는 보존·삭제 정책과 비용을 별도로 검토해야 한다.
 
+UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applications/<앱 ID>/postgres/plan`에 VPC ID와 2~8개 서브넷 ID를 보낸다. 서버는 고정된 AWS 계정·앱 전용 보안 그룹으로 기존 `preflight()`만 수행하며 계정·가용 영역·RDS 주문 가능 구성·Price List의 인스턴스 및 20 GiB 저장소 가격을 반환한다. 이 API는 DB 스택 생성이나 기존 DB 존재 여부 확인을 수행하지 않는다. 2026-10-01 인증 HTTP 요청으로 서울 리전의 읽기 전용 계획을 확인했다. UI의 실제 신규 DB 생성 실행은 아직 없다.
+
 ## 완료 기준
 
 1. 대상 계정·리전, VPC·서브넷·보안 그룹, DB 엔진·용량·예상 비용 상한을 배포 전에 확인한다.

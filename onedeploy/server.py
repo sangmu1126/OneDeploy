@@ -897,6 +897,23 @@ def handler_for(app: App):
                 self.json_response(403, {"error": "Invalid session token"})
                 return
             try:
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 1024:
+                        raise ValueError('PostgreSQL 생성 계획 입력은 1 KiB 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'vpc_id', 'subnet_ids'}
+                            or not isinstance(payload['vpc_id'], str)
+                            or not isinstance(payload['subnet_ids'], list)
+                            or any(not isinstance(value, str) for value in payload['subnet_ids'])):
+                        raise ValueError('VPC ID와 서브넷 ID 목록이 필요합니다.')
+                    settings = app.aws_settings
+                    request = PostgresRequest(application_id, settings.expected_account, settings.region,
+                        payload['vpc_id'], tuple(payload['subnet_ids']), settings.service_security_group)
+                    request.validate()
+                    self.json_response(200, AwsPostgresProvisioner(request).preflight())
+                    return
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback-release/reconcile", self.path):
                     job_id = self.path.split('/')[3]
                     if int(self.headers.get('Content-Length', '0')) != 0:
