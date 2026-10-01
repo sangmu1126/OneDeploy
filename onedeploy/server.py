@@ -29,7 +29,8 @@ from onedeploy.infrastructure import (OpenAIInfrastructurePlanner,
 from onedeploy.migrations import collect_sql_migrations
 from onedeploy.network_operations import NetworkOperations
 from onedeploy.postgres import (AwsPostgresProvisioner, PostgresRequest,
-                                discover_existing_postgres, postgres_settings_for_application)
+                                discover_existing_postgres, inspect_postgres_backup_status,
+                                postgres_settings_for_application)
 from onedeploy.postgres_operations import PostgresOperations
 
 
@@ -876,6 +877,14 @@ def handler_for(app: App):
                     self.json_response(200, app.network_operations.get(application_id))
                 except ValueError as exc:
                     self.json_response(404, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/backups", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, inspect_postgres_backup_status(
+                        application_id, app.aws_settings))
+                except (ValueError, AwsConfigurationError) as exc:
+                    self.json_response(400, {"error": str(exc)})
                 return
             if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres", self.path):
                 application_id = self.path.split('/')[3]

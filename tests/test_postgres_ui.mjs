@@ -156,6 +156,10 @@ test('existing RDS lookup fills the network fields from the authenticated API', 
       const body = path === '/api/config'
         ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
         : path === '/api/jobs' ? []
+        : path.endsWith('/postgres/backups')
+        ? {database_id: 'onedeploy-demo-app', backup_retention_days: 7,
+           latest_restorable_time: '2026-10-01T00:00:00Z', deletion_protection: true,
+           manual_snapshot_count: 0, manual_snapshots: []}
         : {database_id: 'onedeploy-demo-app', account: '123456789012',
            region: 'ap-northeast-2', engine_version: '18.3',
            vpc_id: 'vpc-12345678', subnet_ids: ['subnet-11111111', 'subnet-22222222']};
@@ -174,6 +178,10 @@ test('existing RDS lookup fills the network fields from the authenticated API', 
   assert.equal(lookup.options.headers['X-OneDeploy-Token'], '__TOKEN__');
   assert.equal(element('postgresVpc').value, 'vpc-12345678');
   assert.equal(element('postgresSubnets').value, 'subnet-11111111,subnet-22222222');
+  await element('postgresBackups').onclick();
+  assert.ok(requests.some(request => request.path === '/api/applications/demo-app/postgres/backups'));
+  assert.match(element('postgresBackupInfo').textContent, /자동 백업 보존 7일/);
+  assert.match(element('postgresBackupInfo').textContent, /수동 스냅샷 0개/);
 });
 
 test('new RDS plan button shows a read-only capacity quote', async () => {

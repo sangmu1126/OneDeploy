@@ -84,6 +84,8 @@ API는 작업 생성 전에 DB 소유권을 읽기 전용으로 확인하며, DB
 헤더를 생략한 일반 업로드에서의 DB 앱 차단은 유지한다. UI는 사용자가 기존 DB와 VPC·서브넷을 명시한 경우에만 위 헤더를 보낸다.
 `GET /api/applications/<앱 ID>/postgres`는 세션 토큰과 서버의 AWS 계정·고정 또는 앱별 검증 서비스 보안 그룹을 사용해 해당 앱의 RDS 인스턴스를 찾고 전체 스택·DB 소유권을 다시 확인한다. 응답에는 DB ID·계정·리전·VPC·서브넷·엔진 버전·보존 상태만 포함하고 비밀 ARN·엔드포인트는 포함하지 않는다. UI의 **이 앱의 기존 RDS 조회**가 이 값을 입력란에 채운다. 조회와 업로드 시점은 다를 수 있어 업로드 API가 다시 검사한다. 2026-10-01 실제 AWS 계정에서 인증 HTTP 조회를 읽기 전용으로 통과했다. 앱별 선택 경로는 모의 AWS 테스트만 통과했다.
 
+`GET /api/applications/<앱 ID>/postgres/backups`는 같은 세션 인증과 RDS 소유권 검사를 거쳐 자동 백업 보존 기간, 최근 복원 가능 시점, 삭제 보호·스택 삭제 시 보존 상태와 수동 스냅샷 수·최신 10개를 반환한다. 스냅샷은 [RDS 스냅샷 조회 API](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DescribeDBSnapshots.html)의 `manual` 유형으로 조회하고 응답의 계정·리전·DB ID를 대조한다. UI의 **백업·보호 상태 확인**은 이 읽기 전용 API만 호출한다. 보존 기간·스냅샷 목록 확인은 실제 복원 시험을 대신하지 않는다. `demo-app` 실계정에서는 보존 7일·삭제 보호 켜짐·수동 스냅샷 0개를 확인했다. 수동 스냅샷은 [자동 백업 보존 기간과 별도로 유지](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CreateSnapshot.html)되므로 이후 생성·폐기 정책과 비용 검토가 필요하다.
+
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.
 실행기는 PostgreSQL의 트랜잭션별 advisory lock과 `onedeploy_schema_migrations` 이력으로

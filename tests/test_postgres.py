@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from onedeploy.aws import AwsConfigurationError, AwsSettings
 from onedeploy.postgres import (AwsPostgresProvisioner, PostgresRequest, TEMPLATE,
-                                discover_existing_postgres, main)
+                                discover_existing_postgres, inspect_postgres_backup_status, main)
 
 
 ACCOUNT = '123456789012'
@@ -52,6 +52,52 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(template['Outputs']['DatabaseExecutionRoleArn']['Value'],
                          {'Fn::GetAtt': ['DatabaseExecutionRole', 'Arn']})
         self.assertEqual(template['Resources']['MigrationLogGroup']['Properties']['RetentionInDays'], 14)
+
+    def test_backup_status_audits_db_and_limits_snapshot_output(self):
+        settings = AwsSettings(REGION, expected_account=ACCOUNT,
+                               service_security_group=SERVICE_GROUP)
+        database = {'database_id': 'onedeploy-demo-app', 'deletion_protection': True,
+                    'retained_on_stack_delete': True}
+        snapshots = [{'DBSnapshotIdentifier': f'demo-snapshot-{n}',
+                      'DBInstanceIdentifier': 'onedeploy-demo-app',
+                      'DBSnapshotArn': f'arn:aws:rds:{REGION}:{ACCOUNT}:snapshot:demo-snapshot-{n}',
+                      'SnapshotType': 'manual', 'Status': 'available',
+                      'SnapshotCreateTime': f'2026-10-{n:02d}T00:00:00Z',
+                      'Encrypted': True} for n in range(1, 13)]
+        calls = []
+        def aws(_adapter, args, **_kwargs):
+            calls.append(args[:2])
+            if args[:2] == ['rds', 'describe-db-instances']:
+                return json.dumps({'DBInstances': [{'DBInstanceIdentifier': 'onedeploy-demo-app',
+                    'DBInstanceArn': DB_ARN, 'BackupRetentionPeriod': 7,
+                    'LatestRestorableTime': '2026-10-12T00:00:00Z'}]})
+            return json.dumps({'DBSnapshots': snapshots})
+        with patch('onedeploy.postgres.discover_existing_postgres', return_value=database), \
+                patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws):
+            result = inspect_postgres_backup_status('demo-app', settings)
+        self.assertEqual(result['backup_retention_days'], 7)
+        self.assertEqual(result['manual_snapshot_count'], 12)
+        self.assertEqual(len(result['manual_snapshots']), 10)
+        self.assertEqual(result['manual_snapshots'][0]['snapshot_id'], 'demo-snapshot-12')
+        self.assertEqual(calls, [['rds', 'describe-db-instances'], ['rds', 'describe-db-snapshots']])
+
+    def test_backup_status_rejects_foreign_snapshot(self):
+        settings = AwsSettings(REGION, expected_account=ACCOUNT,
+                               service_security_group=SERVICE_GROUP)
+        database = {'database_id': 'onedeploy-demo-app', 'deletion_protection': True,
+                    'retained_on_stack_delete': True}
+        with patch('onedeploy.postgres.discover_existing_postgres', return_value=database), \
+                patch('onedeploy.postgres.AwsExpressAdapter.aws', side_effect=[
+                    json.dumps({'DBInstances': [{'DBInstanceIdentifier': 'onedeploy-demo-app',
+                        'DBInstanceArn': DB_ARN, 'BackupRetentionPeriod': 7}]}),
+                    json.dumps({'DBSnapshots': [{'DBSnapshotIdentifier': 'foreign',
+                        'DBInstanceIdentifier': 'onedeploy-demo-app',
+                        'DBSnapshotArn': f'arn:aws:rds:{REGION}:999999999999:snapshot:foreign',
+                        'SnapshotType': 'manual', 'Status': 'available',
+                        'SnapshotCreateTime': '2026-10-01T00:00:00Z',
+                        'Encrypted': True}]})]):
+            with self.assertRaisesRegex(AwsConfigurationError, '스냅샷'):
+                inspect_postgres_backup_status('demo-app', settings)
 
     def test_preflight_checks_account_vpc_group_and_two_azs(self):
         calls = []

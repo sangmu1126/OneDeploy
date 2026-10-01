@@ -84,6 +84,24 @@ class PostgresServerTests(unittest.TestCase):
         discover.assert_not_called()
         self.assertEqual(handler.json_response.call_args.args[0], 403)
 
+    def test_backup_status_requires_session_and_returns_verified_summary(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres/backups'
+        handler.headers = {}
+        handler.json_response = Mock()
+        with patch('onedeploy.server.inspect_postgres_backup_status') as inspect:
+            handler.do_GET()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+        inspect.assert_not_called()
+        handler.headers = {'X-OneDeploy-Token': self.app.token}
+        summary = {'database_id': 'onedeploy-demo-app', 'backup_retention_days': 7,
+                   'manual_snapshot_count': 0, 'manual_snapshots': []}
+        with patch('onedeploy.server.inspect_postgres_backup_status',
+                   return_value=summary) as inspect:
+            handler.do_GET()
+        self.assertEqual(handler.json_response.call_args.args, (200, summary))
+        inspect.assert_called_once_with('demo-app', self.settings)
+
     def test_creation_plan_runs_read_only_preflight(self):
         handler = handler_for(self.app).__new__(handler_for(self.app))
         handler.path = '/api/applications/demo-app/postgres/plan'

@@ -112,6 +112,56 @@ def discover_existing_postgres(application_id: str, settings: AwsSettings) -> di
             'retained_on_stack_delete': database['retained_on_stack_delete']}
 
 
+def inspect_postgres_backup_status(application_id: str, settings: AwsSettings) -> dict:
+    """Report backup settings and same-account manual snapshots after the DB ownership audit."""
+    database = discover_existing_postgres(application_id, settings)
+    database_id = database['database_id']
+    adapter = AwsExpressAdapter(lambda *_: None, settings)
+    instances = json.loads(adapter.aws(['rds', 'describe-db-instances',
+        '--db-instance-identifier', database_id], private=True, quiet=True)).get('DBInstances', [])
+    instance = instances[0] if len(instances) == 1 else {}
+    expected_arn = f'arn:aws:rds:{settings.region}:{settings.expected_account}:db:{database_id}'
+    retention = instance.get('BackupRetentionPeriod')
+    restorable = instance.get('LatestRestorableTime')
+    if (instance.get('DBInstanceIdentifier') != database_id
+            or instance.get('DBInstanceArn') != expected_arn
+            or not isinstance(retention, int) or isinstance(retention, bool)
+            or not 0 <= retention <= 35
+            or (restorable is not None and not isinstance(restorable, str))):
+        raise AwsConfigurationError('PostgreSQL 백업 설정을 확인하지 못했습니다.')
+    described = json.loads(adapter.aws(['rds', 'describe-db-snapshots',
+        '--db-instance-identifier', database_id, '--snapshot-type', 'manual'],
+        private=True, quiet=True))
+    snapshots = described.get('DBSnapshots')
+    if described.get('Marker') or not isinstance(snapshots, list):
+        raise AwsConfigurationError('수동 스냅샷 목록을 완전히 확인하지 못했습니다.')
+    prefix = f'arn:aws:rds:{settings.region}:{settings.expected_account}:snapshot:'
+    results = []
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            raise AwsConfigurationError('수동 스냅샷 조회 결과가 올바르지 않습니다.')
+        snapshot_id = snapshot.get('DBSnapshotIdentifier')
+        if (snapshot.get('DBInstanceIdentifier') != database_id
+                or snapshot.get('SnapshotType') != 'manual'
+                or not isinstance(snapshot_id, str)
+                or not re.fullmatch(r'[a-z][a-z0-9-]{0,254}', snapshot_id)
+                or snapshot.get('DBSnapshotArn') != prefix + snapshot_id
+                or not isinstance(snapshot.get('Status'), str)
+                or not isinstance(snapshot.get('SnapshotCreateTime'), str)
+                or not isinstance(snapshot.get('Encrypted'), bool)):
+            raise AwsConfigurationError('수동 스냅샷의 계정·DB·상태가 예상과 다릅니다.')
+        results.append({'snapshot_id': snapshot_id, 'status': snapshot['Status'],
+                        'created_at': snapshot['SnapshotCreateTime'],
+                        'encrypted': snapshot['Encrypted']})
+    results.sort(key=lambda item: item['created_at'], reverse=True)
+    return {'application_id': application_id, 'database_id': database_id,
+            'region': settings.region, 'account': settings.expected_account,
+            'backup_retention_days': retention, 'latest_restorable_time': restorable,
+            'deletion_protection': database['deletion_protection'],
+            'retained_on_stack_delete': database['retained_on_stack_delete'],
+            'manual_snapshot_count': len(results), 'manual_snapshots': results[:10]}
+
+
 class AwsPostgresProvisioner:
     def __init__(self, request: PostgresRequest, event=lambda *_: None):
         request.validate()
