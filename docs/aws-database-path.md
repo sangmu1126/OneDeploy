@@ -25,6 +25,8 @@ UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applicatio
 
 UI의 **앱 전용 AWS 네트워크 준비**는 `POST /api/applications/<앱 ID>/network/plan`으로 읽기 전용 계정·기본 VPC·중복 스택 검사를 실행한다. 15분 안에 `POST .../network/create`로 계획 ID를 보내야 생성한다. 서버는 작업 기록을 먼저 저장하고 비동기 CloudFormation 생성을 시작한다. `GET .../network/operation`으로 상태를 조회하며 서버 재시작으로 불확실해진 작업은 자동 재실행하지 않는다. `POST .../network/reconcile`은 스택·그룹을 읽기 전용으로 재검증한다. 고정 그룹 환경에서는 앱별 네트워크 계획을 거부한다. 이 UI 경로는 모의 AWS 테스트만 통과했다.
 
+`GET /api/aws/default-network`는 세션 토큰과 고정 AWS 계정 ID를 요구한다. STS로 계정을 확인하고 EC2에서 기본 VPC와 서로 다른 가용 영역의 사용 가능한 기본 서브넷만 반환한다. UI의 **기본 VPC·서브넷 불러오기**가 네트워크 및 새 RDS 계획 필드를 채운다. 실제 서울 리전 계정에서 읽기 전용으로 확인했으며, 이후 네트워크·DB 생성 계획의 소유권·구성 검증을 대체하지 않는다.
+
 ```sh
 python3 -m onedeploy.aws_network --application <APP_ID> --account <AWS_ACCOUNT_ID> \
   --region ap-northeast-2 --vpc-id <DEFAULT_VPC_ID>

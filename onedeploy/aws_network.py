@@ -15,6 +15,50 @@ from onedeploy.aws import (AwsConfigurationError, AwsExpressAdapter, AwsSettings
 TEMPLATE = Path(__file__).parent / 'infra' / 'aws-service-network.json'
 
 
+def discover_default_network(settings: AwsSettings) -> dict:
+    """Read the pinned account's default VPC and one available default subnet per AZ."""
+    settings.validate()
+    if not settings.expected_account:
+        raise AwsConfigurationError('기본 네트워크 조회에는 AWS 계정 ID 고정이 필요합니다.')
+    adapter = AwsExpressAdapter(lambda *_: None, settings)
+    identity = json.loads(adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
+    if identity.get('Account') != settings.expected_account:
+        raise AwsConfigurationError('현재 AWS 계정이 지정한 계정과 다릅니다.')
+    described = json.loads(adapter.aws(['ec2', 'describe-vpcs', '--filters',
+        'Name=isDefault,Values=true'], private=True, quiet=True))
+    vpcs = described.get('Vpcs', [])
+    vpc = vpcs[0] if isinstance(vpcs, list) and len(vpcs) == 1 and isinstance(vpcs[0], dict) else {}
+    vpc_id = vpc.get('VpcId', '')
+    if (described.get('NextToken') or not vpc.get('IsDefault')
+            or not isinstance(vpc_id, str)
+            or not re.fullmatch(r'vpc-[a-f0-9]{8,17}', vpc_id)):
+        raise AwsConfigurationError('기본 VPC를 하나로 확인하지 못했습니다.')
+    described = json.loads(adapter.aws(['ec2', 'describe-subnets', '--filters',
+        'Name=vpc-id,Values=' + vpc_id], private=True, quiet=True))
+    if described.get('NextToken') or not isinstance(described.get('Subnets'), list):
+        raise AwsConfigurationError('기본 VPC의 서브넷 목록을 완전히 확인하지 못했습니다.')
+    by_az: dict[str, str] = {}
+    for subnet in described['Subnets']:
+        if not isinstance(subnet, dict):
+            raise AwsConfigurationError('서브넷 조회 결과가 올바르지 않습니다.')
+        if (subnet.get('VpcId') != vpc_id or subnet.get('State') != 'available'
+                or not subnet.get('DefaultForAz')):
+            continue
+        zone, subnet_id = subnet.get('AvailabilityZone'), subnet.get('SubnetId')
+        if (not isinstance(zone, str) or not zone
+                or not isinstance(subnet_id, str)
+                or not re.fullmatch(r'subnet-[a-f0-9]{8,17}', subnet_id)):
+            raise AwsConfigurationError('기본 서브넷의 가용 영역이나 ID가 올바르지 않습니다.')
+        if zone in by_az:
+            raise AwsConfigurationError('같은 가용 영역에 기본 서브넷이 여러 개 있습니다.')
+        by_az[zone] = subnet_id
+    if len(by_az) < 2:
+        raise AwsConfigurationError('서로 다른 가용 영역의 사용 가능한 기본 서브넷이 두 개 이상 필요합니다.')
+    return {'account': settings.expected_account, 'region': settings.region,
+            'vpc_id': vpc_id, 'subnet_ids': [by_az[zone] for zone in sorted(by_az)[:8]],
+            'availability_zones': sorted(by_az)[:8]}
+
+
 @dataclass(frozen=True)
 class ServiceNetworkRequest:
     application_id: str

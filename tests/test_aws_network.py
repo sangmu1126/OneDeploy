@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from onedeploy.aws import AwsConfigurationError
+from onedeploy.aws import AwsConfigurationError, AwsSettings
 from onedeploy.aws_network import (AwsServiceNetworkProvisioner,
-                                   ServiceNetworkRequest, TEMPLATE, main)
+                                   ServiceNetworkRequest, TEMPLATE, discover_default_network, main)
 
 ACCOUNT = '123456789012'
 REGION = 'ap-northeast-2'
@@ -93,6 +93,49 @@ class AwsNetworkTests(unittest.TestCase):
             main(args)
         preflight.assert_called_once_with()
         create.assert_not_called()
+
+    def test_default_network_discovery_returns_one_available_default_subnet_per_zone(self):
+        calls = []
+        def aws(_adapter, args, **_kwargs):
+            calls.append(args[:2])
+            if args[0] == 'sts':
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ec2', 'describe-vpcs']:
+                return json.dumps({'Vpcs': [{'VpcId': VPC, 'IsDefault': True}]})
+            return json.dumps({'Subnets': [
+                {'SubnetId': 'subnet-11111111', 'VpcId': VPC, 'State': 'available',
+                 'DefaultForAz': True, 'AvailabilityZone': 'ap-northeast-2a'},
+                {'SubnetId': 'subnet-22222222', 'VpcId': VPC, 'State': 'available',
+                 'DefaultForAz': True, 'AvailabilityZone': 'ap-northeast-2c'},
+                {'SubnetId': 'subnet-33333333', 'VpcId': VPC, 'State': 'available',
+                 'DefaultForAz': False, 'AvailabilityZone': 'ap-northeast-2d'}]})
+        settings = AwsSettings(REGION, expected_account=ACCOUNT)
+        with patch('onedeploy.aws_network.AwsExpressAdapter.aws', autospec=True,
+                   side_effect=aws):
+            result = discover_default_network(settings)
+        self.assertEqual(result['vpc_id'], VPC)
+        self.assertEqual(result['subnet_ids'], ['subnet-11111111', 'subnet-22222222'])
+        self.assertEqual(calls, [['sts', 'get-caller-identity'],
+                                 ['ec2', 'describe-vpcs'], ['ec2', 'describe-subnets']])
+
+    def test_default_network_discovery_checks_account_before_ec2(self):
+        settings = AwsSettings(REGION, expected_account=ACCOUNT)
+        with patch('onedeploy.aws_network.AwsExpressAdapter.aws',
+                   return_value=json.dumps({'Account': '999999999999'})) as aws:
+            with self.assertRaisesRegex(AwsConfigurationError, '계정'):
+                discover_default_network(settings)
+        self.assertEqual(aws.call_count, 1)
+
+    def test_default_network_discovery_requires_two_available_zones(self):
+        settings = AwsSettings(REGION, expected_account=ACCOUNT)
+        with patch('onedeploy.aws_network.AwsExpressAdapter.aws', side_effect=[
+                json.dumps({'Account': ACCOUNT}),
+                json.dumps({'Vpcs': [{'VpcId': VPC, 'IsDefault': True}]}),
+                json.dumps({'Subnets': [{'SubnetId': 'subnet-11111111', 'VpcId': VPC,
+                    'State': 'available', 'DefaultForAz': True,
+                    'AvailabilityZone': 'ap-northeast-2a'}]})]):
+            with self.assertRaisesRegex(AwsConfigurationError, '두 개 이상'):
+                discover_default_network(settings)
 
 
 if __name__ == '__main__':

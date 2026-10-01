@@ -55,6 +55,10 @@ test('app network creation needs a reviewed plan and records the selected VPC', 
       requests.push({path, options});
       const body = path === '/api/config'
         ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
+        : path === '/api/aws/default-network'
+        ? {account: '123456789012', region: 'ap-northeast-2', vpc_id: 'vpc-12345678',
+           subnet_ids: ['subnet-11111111', 'subnet-22222222'],
+           availability_zones: ['ap-northeast-2a', 'ap-northeast-2c']}
         : path.endsWith('/network/plan')
         ? {plan_id: 'a'.repeat(32), account: '123456789012', region: 'ap-northeast-2',
            stack_name: 'onedeploy-network-demo-app'}
@@ -71,7 +75,12 @@ test('app network creation needs a reviewed plan and records the selected VPC', 
   element('application').value = 'demo-app';
   element('target').value = 'aws-ecs-express';
   element('target').onchange();
-  element('networkVpc').value = 'vpc-12345678';
+  await element('networkDiscover').onclick();
+  assert.equal(element('networkVpc').value, 'vpc-12345678');
+  assert.equal(element('postgresPlanVpc').value, 'vpc-12345678');
+  assert.equal(element('postgresPlanSubnets').value,
+    'subnet-11111111,subnet-22222222');
+  assert.equal(requests.filter(item => item.path.endsWith('/network/create')).length, 0);
   await element('networkPlan').onclick();
   assert.equal(element('networkCreate').hidden, false);
   assert.equal(requests.filter(item => item.path.endsWith('/network/create')).length, 0);

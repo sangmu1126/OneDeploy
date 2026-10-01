@@ -53,6 +53,23 @@ class NetworkServerTests(unittest.TestCase):
         self.assertTrue((self.root / 'network-operations' / 'demo-app.json').exists())
         self.assertEqual(self.request('operation')[0], 200)
 
+    def test_default_network_get_requires_session_and_only_reads(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/aws/default-network'
+        handler.headers = {}
+        handler.json_response = Mock()
+        with patch('onedeploy.server.discover_default_network') as discover:
+            handler.do_GET()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+        discover.assert_not_called()
+        handler.headers = {'X-OneDeploy-Token': self.app.token}
+        expected = {'account': '123456789012', 'region': 'ap-northeast-2',
+                    'vpc_id': 'vpc-12345678', 'subnet_ids': ['subnet-11111111', 'subnet-22222222']}
+        with patch('onedeploy.server.discover_default_network', return_value=expected) as discover:
+            handler.do_GET()
+        self.assertEqual(handler.json_response.call_args.args, (200, expected))
+        discover.assert_called_once_with(self.settings)
+
 
 if __name__ == '__main__':
     unittest.main()
