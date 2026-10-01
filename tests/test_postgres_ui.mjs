@@ -39,6 +39,52 @@ test('database opt-in rejects unsupported target, private service and malformed 
   ]) assert.throws(() => headers(options));
 });
 
+test('app network creation needs a reviewed plan and records the selected VPC', async () => {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: '', checked: false, files: [], hidden: false, disabled: false,
+      textContent: '', replaceChildren() {}, querySelectorAll() { return []; },
+    });
+    return elements.get(id);
+  };
+  const requests = [];
+  const context = {
+    document: {getElementById: element, hidden: false},
+    fetch: async (path, options) => {
+      requests.push({path, options});
+      const body = path === '/api/config'
+        ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
+        : path.endsWith('/network/plan')
+        ? {plan_id: 'a'.repeat(32), account: '123456789012', region: 'ap-northeast-2',
+           stack_name: 'onedeploy-network-demo-app'}
+        : path === '/api/jobs' ? []
+        : {application_id: 'demo-app', vpc_id: 'vpc-12345678', status: 'succeeded',
+           message: '완료', service_security_group: 'sg-33333333'};
+      return {ok: true, json: async () => body};
+    },
+    setInterval() {}, setTimeout, FormData, Set, Error, Date,
+  };
+  const script = html.split('<script>', 2)[1].split('</script>', 1)[0];
+  runInNewContext(script, context);
+  await new Promise(resolve => setImmediate(resolve));
+  element('application').value = 'demo-app';
+  element('target').value = 'aws-ecs-express';
+  element('target').onchange();
+  element('networkVpc').value = 'vpc-12345678';
+  await element('networkPlan').onclick();
+  assert.equal(element('networkCreate').hidden, false);
+  assert.equal(requests.filter(item => item.path.endsWith('/network/create')).length, 0);
+  element('networkVpc').value = 'vpc-87654321';
+  await element('networkCreate').onclick();
+  assert.equal(requests.filter(item => item.path.endsWith('/network/create')).length, 0);
+  element('networkVpc').value = 'vpc-12345678';
+  await element('networkCreate').onclick();
+  const create = requests.find(item => item.path.endsWith('/network/create'));
+  assert.equal(JSON.parse(create.options.body).plan_id, 'a'.repeat(32));
+  assert.equal(element('postgresPlanVpc').value, 'vpc-12345678');
+});
+
 test('deploy button includes existing RDS headers in the upload request', async () => {
   const elements = new Map();
   const element = id => {

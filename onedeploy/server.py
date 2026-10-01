@@ -19,12 +19,14 @@ from pathlib import Path
 from onedeploy.analysis import AISettings, analyze_project, redact
 from onedeploy.agent import DeploymentAgent, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
 from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from onedeploy.aws_network import ServiceNetworkRequest
 from onedeploy.cloud import CloudRunAdapter, CloudRunSettings
 from onedeploy.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from onedeploy.health import check_deployment
 from onedeploy.infrastructure import (TARGET_RESOURCES, OpenAIInfrastructurePlanner,
                                       inspect_infrastructure, plan_infrastructure, validate_infrastructure)
 from onedeploy.migrations import collect_sql_migrations
+from onedeploy.network_operations import NetworkOperations
 from onedeploy.postgres import (AwsPostgresProvisioner, PostgresRequest,
                                 discover_existing_postgres, postgres_settings_for_application)
 from onedeploy.postgres_operations import PostgresOperations
@@ -111,6 +113,8 @@ class App:
         self.recovery_warnings = []
         self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings)
         self.recovery_warnings.extend(self.postgres_operations.recovery_warnings)
+        self.network_operations = NetworkOperations(self.root / 'network-operations', self.aws_settings)
+        self.recovery_warnings.extend(self.network_operations.recovery_warnings)
         self.restore()
 
     def restore(self):
@@ -859,6 +863,13 @@ def handler_for(app: App):
             if self.path == "/api/jobs":
                 self.json_response(200, app.summaries())
                 return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/operation", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, app.network_operations.get(application_id))
+                except ValueError as exc:
+                    self.json_response(404, {"error": str(exc)})
+                return
             if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres", self.path):
                 application_id = self.path.split('/')[3]
                 try:
@@ -908,6 +919,37 @@ def handler_for(app: App):
                 self.json_response(403, {"error": "Invalid session token"})
                 return
             try:
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('서비스 네트워크 계획 입력은 256바이트 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'vpc_id'}
+                            or not isinstance(payload['vpc_id'], str)):
+                        raise ValueError('VPC ID가 필요합니다.')
+                    request = ServiceNetworkRequest(application_id, app.aws_settings.expected_account,
+                                                    app.aws_settings.region, payload['vpc_id'])
+                    self.json_response(200, app.network_operations.plan(request))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/create", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('서비스 네트워크 생성 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'plan_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])):
+                        raise ValueError('유효한 네트워크 계획 ID가 필요합니다.')
+                    self.json_response(202, app.network_operations.start(application_id, payload['plan_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/reconcile", self.path):
+                    application_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('서비스 네트워크 재확인 요청에는 본문이 없어야 합니다.')
+                    self.json_response(200, app.network_operations.reconcile(application_id))
+                    return
                 if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/plan", self.path):
                     application_id = self.path.split('/')[3]
                     size = int(self.headers.get('Content-Length', '0'))
