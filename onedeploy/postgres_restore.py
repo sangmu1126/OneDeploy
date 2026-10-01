@@ -82,7 +82,7 @@ def plan_restore_drill(application_id: str, snapshot_id: str, target_id: str,
             'restore_security_group_name': target_id + '-db',
             'restore_request_enabled': False,
             'pricing': pricing,
-            'next_step': '복원 전용 보안 그룹을 생성하고 DB 복원·정리 경로를 연결해야 합니다.'}
+            'next_step': '복원 전용 보안 그룹을 생성한 뒤 postgres_restore_instance CLI로 복원·조회·정리를 실행하세요.'}
 
 
 def main(argv=None) -> None:
