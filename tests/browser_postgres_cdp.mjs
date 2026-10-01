@@ -59,6 +59,16 @@ try {
   const lookup = await until(() => evaluate("(() => {const e = id => document.getElementById(id); const text = e('postgresLookupInfo').textContent; if (text && !text.includes('검증 완료')) throw Error(text); return text.includes('검증 완료') && e('postgresVpc').value && e('postgresSubnets').value && e('postgresVpc').value === e('networkVpc').value;})()"), 60000);
   assert.ok(lookup);
   console.log('PASS: browser RDS lookup filled the verified network');
+  if (mode === 'read-only') {
+    await evaluate("document.getElementById('postgresBackups').click(); true");
+    const backup = await until(() => evaluate("(() => {const text = document.getElementById('postgresBackupInfo').textContent; if (text && !text.includes('조회만 수행했습니다')) throw Error(text); return text.includes('자동 백업 보존') && text.includes('수동 스냅샷');})()"), 60000);
+    assert.ok(backup);
+    console.log('PASS: browser displayed the RDS backup and protection status');
+    await evaluate("(() => {const e = id => document.getElementById(id); e('snapshotName').value = 'browser-read-only'; e('snapshotPlan').click(); return true;})()");
+    const planned = await until(() => evaluate("(() => {const e = id => document.getElementById(id); const text = e('snapshotPlanInfo').textContent; if (text && !text.includes('이 조회는 스냅샷을 생성하지 않았습니다')) throw Error(text); return text.includes('onedeploy-demo-app-browser-read-only') && text.includes('저장 비용') && !e('snapshotCreate').hidden;})()"), 60000);
+    assert.ok(planned);
+    console.log('PASS: browser showed a read-only snapshot plan and separate create action');
+  }
   if (mode === 'apply') {
   const document = await command('DOM.getDocument');
   const input = await command('DOM.querySelector', {nodeId: document.root.nodeId, selector: '#file'});

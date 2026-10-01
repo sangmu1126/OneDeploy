@@ -8,6 +8,8 @@
 
 2026-10-02 UI의 **기존 RDS 수동 스냅샷** 계획에 대응하는 인증 HTTP `POST /api/applications/demo-app/snapshots/plan`도 실제 서울 리전에서 `onedeploy-demo-app-before-migration` 대상으로 통과했다. 응답은 HTTP 200, 계정 `265233844540`, 기존 수동 스냅샷 0개였다. 생성 요청은 보내지 않았고 Chrome UI 생성 경로도 아직 실계정에서 확인하지 않았다.
 
+같은 날 `--browser-read-only`로 실제 Chrome에서 기본 네트워크 자동 입력 → 기존 RDS 조회 → **백업·보호 상태 확인** → `browser-read-only` 이름의 수동 스냅샷 계획 확인을 통과했다. 화면에 `onedeploy-demo-app-browser-read-only`, 저장 비용 안내, 별도 생성 버튼이 나타났고 서버의 배포·스냅샷 생성 작업 기록은 비어 있었다. 생성 버튼은 누르지 않았다.
+
 ```sh
 python3 -m onedeploy.postgres_snapshot --application demo-app \
   --snapshot-id onedeploy-demo-app-before-migration \

@@ -99,8 +99,10 @@ def main(argv=None):
         if args.browser_read_only:
             if app.jobs:
                 raise AssertionError('Read-only browser check created a deployment job')
+            if app.snapshot_operations.operations:
+                raise AssertionError('Read-only browser check recorded a snapshot create operation')
             retired = True
-            print('PASS: real browser filled the default network and verified existing RDS without deployment', flush=True)
+            print('PASS: real browser verified RDS, backup status, and snapshot plan without creation', flush=True)
             return
         jobs = list(app.jobs.values())
         if len(jobs) != 1:
