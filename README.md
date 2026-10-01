@@ -214,7 +214,7 @@ PYTHONPATH=.:tests python3 tests/smoke_aws_live_ai.py --account <AWS_ACCOUNT_ID>
 - 현재 상태 재검사: 성공 이력에서 버튼을 눌러 소유 리소스·실행 상태·HTTP 200을 다시 확인
 - 배포 종료: Local Docker, Cloud Run, AWS ECS Express는 성공 작업의 소유 리소스를 확인한 뒤 종료 가능
 - 제한: 배포 시도 최대 3회, AI 도구 호출 최대 24회, 개별 도구 시간 제한 및 루프의 경과 시간 검사
-- 미구현: UI의 영속 DB 자동 생성·여러 DB 선택·데이터 이전, GitHub URL 입력, 실행 중 취소, 다중 사용자 격리. 기존 OneDeploy RDS를 명시한 AWS API 업로드와 내부 어댑터의 RDS·마이그레이션·데이터 경로는 실계정 smoke를 통과. UI의 기존 RDS 명시 경로는 입력 검증 테스트를 통과했으며 브라우저에서의 실제 AWS 끝단 검증은 아직 없음. 실제 모델의 자동 대상 판단은 API 키 미설정으로 미검증
+- 미구현: UI의 영속 DB 자동 생성·여러 DB 선택·데이터 이전, GitHub URL 입력, 실행 중 취소, 다중 사용자 격리. 기존 OneDeploy RDS를 명시한 AWS API 업로드와 내부 어댑터의 RDS·마이그레이션·데이터 경로는 실계정 smoke를 통과. UI의 기존 RDS 명시 경로는 실제 Chrome→AWS ECS→RDS HTTP 데이터 smoke를 통과했고 임시 ECS를 종료함. AI 도구 호출은 고정 테스트 응답이며, API 키 미설정으로 실제 모델의 코드 변경·자동 대상 판단은 미검증
 
 AWS에서는 동일한 앱 ID로 다시 배포할 때 소유 중인 기존 ECS Express 서비스를 업데이트하므로 URL을 유지합니다.
 AWS의 카나리 전환을 사용하며 실패한 **진행 중** 배포에는 롤백을 요청할 수 있습니다. 완료된 릴리스는

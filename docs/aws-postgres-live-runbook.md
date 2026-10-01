@@ -53,3 +53,14 @@ smoke가 성공하면 임시 ECS 서비스와 ECR 이미지 태그를 정리한�
   환경값 요청·재개, ECS 배포, HTTP 데이터 쓰기/읽기, `/health`, 종료 API까지
   실계정에서 통과했다. AI 도구 호출은 고정 테스트 응답이었다. 임시 ECS 서비스·
   앱 이미지 태그는 정리했으며 RDS와 비밀은 유지한다.
+
+## 2026-10-01 실제 Chrome UI 경로
+
+`tests/smoke_aws_postgres_browser.py`의 기본 모드는 기존 RDS를 읽기 전용으로 확인한다. `--apply`에서만 Chrome의 배포 UI가 기존 DB 조회·ZIP 업로드·필수 값 입력·재개를 실행한다. AI 도구 호출은 고정 응답이다. 서울 리전의 `demo-app` RDS에서 이 경로를 실행해 ECS 배포, HTTP 데이터 쓰기·읽기·삭제, 임시 ECS 서비스·이미지 정리를 통과했다. RDS·비밀·앱 전용 보안 그룹은 보존했다.
+
+```sh
+PYTHONPATH=. python3 tests/smoke_aws_postgres_browser.py \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --service-security-group <APP_OWNED_SERVICE_GROUP_ID>
+# 실제 ECS 서비스와 이미지 빌드를 실행할 때만 --apply 추가
+```

@@ -1,6 +1,6 @@
 # AWS 영속 데이터 배포 경로 설계
 
-현재 OneDeploy UI는 일반 배포에서 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 차단한다. AWS ECS Express 대상의 기존 OneDeploy PostgreSQL을 명시하는 예외 경로가 있다. 아래는 AWS에서 **PostgreSQL 한 경로**를 지원하기 위한 설계와 구현 경계다. 별도 DB 생성 명령과 기존 DB를 쓰는 명시적 API 업로드가 있다. 내부 AWS 어댑터와 서버 API의 실제 DB 데이터 경로는 검증했고 UI에 앱 ID 기반 기존 DB 조회·명시적 사용 경로를 추가했다. 조회 API의 실계정 읽기 전용 검증도 통과했다. UI의 DB 자동 생성·여러 DB 선택과 브라우저 실계정 배포 끝단 검증은 아직 없다.
+현재 OneDeploy UI는 일반 배포에서 PostgreSQL·MySQL·MongoDB 등 데이터베이스 의존 앱을 차단한다. AWS ECS Express 대상의 기존 OneDeploy PostgreSQL을 명시하는 예외 경로가 있다. 아래는 AWS에서 **PostgreSQL 한 경로**를 지원하기 위한 설계와 구현 경계다. 별도 DB 생성 명령과 기존 DB를 쓰는 명시적 API 업로드가 있다. 내부 AWS 어댑터와 서버 API의 실제 DB 데이터 경로는 검증했고 UI에 앱 ID 기반 기존 DB 조회·명시적 사용 경로를 추가했다. 조회 API의 실계정 읽기 전용 검증도 통과했다. UI의 DB 자동 생성·여러 DB 선택은 아직 없다. 실제 Chrome에서 기존 DB 조회·업로드·필수 값 재개·AWS 배포·HTTP 데이터 쓰기/읽기·종료까지 고정 AI 응답으로 검증했다.
 
 ## 먼저 결정할 경계
 
@@ -50,7 +50,7 @@ Secrets Manager의 `username`·`password` JSON 키를 ECS 환경에 참조로 �
 DB 재조회 시 IAM 역할의 소유 태그·ECS 태스크 신뢰 정책·관리형/인라인 정책을 읽기 전용으로
 대조하며, 다른 권한이 붙거나 비밀 ARN 범위가 넓어지면 연결을 거부한다.
 업로드 UI에서 AWS ECS Express를 선택하면 기존 OneDeploy PostgreSQL을 명시할 수 있다.
-실패 복구·데이터 수명주기 및 브라우저 실제 AWS 끝단 검증은 아직 남아 있다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
+실패 복구·데이터 수명주기는 아직 남아 있다. 브라우저 실제 AWS 경로는 고정 AI 응답으로 검증했다. 스택 삭제나 교체에도 DB를 보존하고 삭제 보호를
 켜고 스택 종료 보호도 적용하므로, 앱 배포 실패·서비스 종료가 데이터를 지우지 않는다. 이 설정은 계속 비용이 발생할 수 있으며,
 DB 폐기는 별도 스냅샷·보호 해제·소유권 검증 절차가 필요하다.
 
