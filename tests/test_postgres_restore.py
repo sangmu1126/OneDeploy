@@ -55,6 +55,7 @@ class RestorePlanTests(unittest.TestCase):
         self.assertTrue(result['isolated_security_group_required'])
         self.assertFalse(result['source_security_group_reused'])
         self.assertFalse(result['restore_request_enabled'])
+        self.assertEqual(result['restore_security_group_name'], TARGET + '-db')
         self.assertEqual(calls, [['rds', 'describe-db-snapshots'],
                                  ['rds', 'describe-db-instances'],
                                  ['rds', 'describe-db-instances']])

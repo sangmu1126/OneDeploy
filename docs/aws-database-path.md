@@ -92,7 +92,7 @@ UI의 **기존 RDS 수동 스냅샷**은 `POST /api/applications/<앱 ID>/snapsh
 
 2026-10-02 같은 Chrome 경로로 `onedeploy-demo-app-backup-20261002`를 실제 생성했다. 작업 기록의 성공 상태와 AWS 스냅샷의 `available`·암호화·소유 태그를 확인했다. 원본 RDS는 `available`로 남아 있다. 이 스냅샷은 계속 보존되며 실제 청구액은 확인하지 않았다. 복원 검증은 별도 작업이다.
 
-`python3 -m onedeploy.postgres_restore`는 [RDS가 스냅샷을 새 DB 인스턴스로 복원한다는 동작](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html)에 맞춰 원본과 다른 대상 ID를 요구한다. 앱 소유 스냅샷의 상태·암호화·VPC·엔진·버전·용량을 원본 DB와 대조하고 대상 ID 중복과 현재 기본 용량 가격을 읽는다. 현재는 복원 전용 인바운드 없는 보안 그룹과 생성 후 정리 절차가 준비되지 않아 읽기 전용 계획만 제공한다. 원본 DB 보안 그룹을 복원 대상에 재사용하지 않는다.
+`python3 -m onedeploy.postgres_restore`는 [RDS가 스냅샷을 새 DB 인스턴스로 복원한다는 동작](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html)에 맞춰 원본과 다른 대상 ID를 요구한다. 앱 소유 스냅샷의 상태·암호화·VPC·엔진·버전·용량을 원본 DB와 대조하고 대상 ID 중복과 현재 기본 용량 가격을 읽는다. 복원 대상의 `onedeploy.postgres_restore_network`는 별도 보안 그룹을 계획·생성·검증한다. [EC2가 새 그룹에 추가하는 기본 아웃바운드 규칙](https://docs.aws.amazon.com/vpc/latest/userguide/creating-security-groups.html)도 제거해 인바운드·아웃바운드가 모두 비었는지 확인한다. `--delete <GROUP_ID>`는 소유권·미사용·다른 그룹의 참조가 없는 경우에만 실행한다. 임시 그룹의 실제 생성·정리는 통과했다. DB 복원 인스턴스 생성과 정리 연결은 아직 없어 복원 계획은 읽기 전용이다.
 
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.

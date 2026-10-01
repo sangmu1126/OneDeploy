@@ -12,7 +12,16 @@
 
 2026-10-02 `--snapshot-apply --snapshot-name backup-20261002`를 같은 계정·리전·앱으로 실행했다. Chrome에서 계획 확인 후 별도 생성 버튼을 눌렀고, 서버 작업 기록과 AWS 재확인이 `succeeded`/`available`로 끝났다. `onedeploy-demo-app-backup-20261002`는 암호화와 소유 태그를 확인해 **보존**했다. 후속 읽기 전용 조회에서 원본 DB `available`, 수동 스냅샷 1개를 확인했다. 이 스냅샷의 실제 청구액은 아직 확인하지 않았고, 복원 시험도 하지 않았다.
 
-같은 스냅샷으로 아래 복원 드릴 계획을 읽기 전용으로 실행했다. 원본과 스냅샷의 VPC·엔진·20 GiB gp3 구성이 일치하고 `onedeploy-restore-demo-app-drill-20261002` ID가 비어 있음을 확인했다. 반환된 730시간 기준 기본 용량 견적은 20.87 USD로 실제 청구액이 아니다. 복원 전용 보안 그룹과 정리 경로가 없으므로 복원 요청은 실행하지 않았다.
+같은 스냅샷으로 아래 복원 드릴 계획을 읽기 전용으로 실행했다. 원본과 스냅샷의 VPC·엔진·20 GiB gp3 구성이 일치하고 `onedeploy-restore-demo-app-drill-20261002` ID가 비어 있음을 확인했다. 반환된 730시간 기준 기본 용량 견적은 20.87 USD로 실제 청구액이 아니다. 당시 복원 전용 보안 그룹과 정리 경로가 없으므로 복원 요청은 실행하지 않았다.
+
+2026-10-02 같은 VPC에서 임시 대상 `onedeploy-restore-demo-app-netprobe-69d47d34`의 복원 전용 그룹 `sg-077ceef5e7b19bcf6`을 생성했다. 앱·대상 태그와 빈 인바운드·아웃바운드 규칙을 확인한 뒤 네트워크 인터페이스·보안 그룹 참조가 없을 때 그룹을 삭제하고 이름 조회로 삭제를 검증했다. 원본 RDS와 스냅샷은 그대로 보존했다. 실제 복원 DB는 만들지 않았다.
+
+```sh
+PYTHONPATH=. python3 tests/smoke_aws_restore_network.py \
+  --application demo-app --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --vpc-id <VPC_ID>
+# 새 임시 그룹 생성·검증·정리를 실행할 때만 --apply 추가
+```
 
 ```sh
 python3 -m onedeploy.postgres_restore --application demo-app \

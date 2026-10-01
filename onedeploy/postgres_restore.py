@@ -79,9 +79,10 @@ def plan_restore_drill(application_id: str, snapshot_id: str, target_id: str,
             'storage_type': 'gp3', 'storage_gib': 20,
             'source_security_group_reused': False,
             'isolated_security_group_required': True,
+            'restore_security_group_name': target_id + '-db',
             'restore_request_enabled': False,
             'pricing': pricing,
-            'next_step': '인바운드가 없는 복원 전용 보안 그룹과 명시적 정리 절차를 준비해야 합니다.'}
+            'next_step': '복원 전용 보안 그룹을 생성하고 DB 복원·정리 경로를 연결해야 합니다.'}
 
 
 def main(argv=None) -> None:
