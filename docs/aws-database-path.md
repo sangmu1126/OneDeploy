@@ -21,7 +21,7 @@ UI의 **새 PostgreSQL RDS 생성 계획 미리보기**는 `POST /api/applicatio
 
 이 기준을 충족하고 실제 AWS 계정에서 재현하기 전까지는 DB 의존 앱 차단을 유지한다.
 
-앱 전용 ECS 서비스 그룹을 준비하는 독립 CLI `onedeploy.aws_network`도 있다. 기본 모드는 지정 계정·기본 VPC와 동일 앱 스택 중복을 읽기 전용으로 확인한다. `--apply`를 명시하면 `onedeploy-network-<앱 ID>` CloudFormation 스택으로 인바운드 없는 보안 그룹을 만들고, 소유 태그·계정·VPC·허용된 인바운드를 재검증한다. `--inspect`로 생성 후 상태를 다시 읽을 수 있다. 템플릿은 종료 보호를 켜며 자동 삭제하지 않는다. 서버에 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`이 없으면 기존 DB 조회·신규 DB 계획·DB 앱 업로드에서 앱 ID와 VPC의 네트워크 스택을 읽기 전용으로 검증해 출력 그룹을 선택한다. 고정 그룹 ID가 있으면 기존 설정을 사용한다. 실제 AWS에서는 CLI 기본 사전 점검만 검증했고 새 그룹 생성 및 자동 선택을 통한 배포는 실행하지 않았다.
+앱 전용 ECS 서비스 그룹을 준비하는 독립 CLI `onedeploy.aws_network`도 있다. 기본 모드는 지정 계정·기본 VPC와 동일 앱 스택 중복을 읽기 전용으로 확인한다. `--apply`를 명시하면 `onedeploy-network-<앱 ID>` CloudFormation 스택으로 인바운드 없는 보안 그룹을 만들고, 소유 태그·계정·VPC·허용된 인바운드를 재검증한다. `--inspect`로 생성 후 상태를 다시 읽을 수 있다. 템플릿은 종료 보호를 켜며 자동 삭제하지 않는다. 서버에 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`이 없으면 기존 DB 조회·신규 DB 계획·DB 앱 업로드에서 앱 ID와 VPC의 네트워크 스택을 읽기 전용으로 검증해 출력 그룹을 선택한다. 고정 그룹 ID가 있으면 기존 설정을 사용한다. 실제 AWS에서는 임시 앱 네트워크 스택 생성·앱별 그룹 선택·정리를 통과했다. UI HTTP 생성과 새 RDS 배포는 아직 실행하지 않았다.
 
 UI의 **앱 전용 AWS 네트워크 준비**는 `POST /api/applications/<앱 ID>/network/plan`으로 읽기 전용 계정·기본 VPC·중복 스택 검사를 실행한다. 15분 안에 `POST .../network/create`로 계획 ID를 보내야 생성한다. 서버는 작업 기록을 먼저 저장하고 비동기 CloudFormation 생성을 시작한다. `GET .../network/operation`으로 상태를 조회하며 서버 재시작으로 불확실해진 작업은 자동 재실행하지 않는다. `POST .../network/reconcile`은 스택·그룹을 읽기 전용으로 재검증한다. 고정 그룹 환경에서는 앱별 네트워크 계획을 거부한다. 이 UI 경로는 모의 AWS 테스트만 통과했다.
 
