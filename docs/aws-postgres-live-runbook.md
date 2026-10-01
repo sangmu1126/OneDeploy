@@ -22,6 +22,16 @@
 
 SQL 검사 이미지 문맥은 `stage_restore_verifier_context`로 준비한다. 기존 마이그레이션 manifest만 포함해 복원 DB 원장의 이름·SHA-256과 선택적 검사 행을 `BEGIN READ ONLY`에서 대조한다. Python·Node 단위 테스트는 통과했지만 ECS 작업 등록·실행, 복원 DB 비밀번호 제공, CloudWatch 결과 수집은 아직 연결하지 않았다. 따라서 이 단계만으로 복원 데이터 검증이 완료됐다고 기록하지 않는다.
 
+2026-10-02 `onedeploy.postgres_restore_credentials`를 서울 리전의 원본 RDS·보존 스냅샷·관리형 비밀 메타데이터에 읽기 전용으로 실행했다. 현재 `AWSCURRENT` 버전의 생성 시각은 2026-09-30 15:47:53 UTC이고 스냅샷 생성 시각은 2026-10-01 15:10:08 UTC였다. 계획은 해당 버전 ID를 ECS 비밀 참조에 고정했으며 비밀번호 값은 조회하지 않았다. 실제 복원 DB 연결 성공은 아직 확인하지 않았다.
+
+```sh
+python3 -m onedeploy.postgres_restore_credentials \
+  --application demo-app --snapshot-id onedeploy-demo-app-backup-20261002 \
+  --target-id onedeploy-restore-demo-app-drill-20261002 \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --service-security-group <EXISTING_APP_SERVICE_GROUP_ID>
+```
+
 ```sh
 python3 -m onedeploy.postgres_restore_instance \
   --application demo-app --snapshot-id onedeploy-demo-app-backup-20261002 \

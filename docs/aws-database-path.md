@@ -98,6 +98,8 @@ UI의 **기존 RDS 수동 스냅샷**은 `POST /api/applications/<앱 ID>/snapsh
 
 `postgres_restore_verifier`는 기존 검증된 마이그레이션 번들의 파일명·SHA-256만 별도 이미지에 포함한다. Node 검사는 `BEGIN READ ONLY`에서 복원 DB의 `onedeploy_schema_migrations` 행을 정확히 비교한다. 선택적 32자리 검사 ID가 있으면 `onedeploy_probe_migrated`의 해당 행도 조회한다. 결과에는 검사 개수와 성공 여부만 남기고 행 내용·비밀번호는 출력하지 않는다. 소스 스냅샷 이후 비밀번호가 변경됐을 수 있으므로, ECS 실행을 붙일 때 복원 DB 인증 경로를 별도로 검증해야 한다. 현재는 이미지 문맥과 SQL 로직만 테스트했다.
 
+`postgres_restore_credentials`는 원본 RDS의 소유권·관리형 비밀 ARN과 소유 스냅샷 시각을 확인하고, 비밀 값 없이 Secrets Manager 버전 메타데이터만 읽는다. `AWSCURRENT`가 정확히 하나이고 버전 생성 시각이 스냅샷보다 앞설 때만 [ECS의 버전 ID 고정 비밀 참조](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html)를 반환한다. 서울 리전의 보존 스냅샷에서 읽기 전용으로 통과했다. 이 시각 비교는 비밀번호 일치의 증명이 아니므로 실제 인증·SQL 성공이 복원 검증의 필수 조건이다.
+
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.
 실행기는 PostgreSQL의 트랜잭션별 advisory lock과 `onedeploy_schema_migrations` 이력으로
