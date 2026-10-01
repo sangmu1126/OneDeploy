@@ -96,9 +96,11 @@ UI의 **기존 RDS 수동 스냅샷**은 `POST /api/applications/<앱 ID>/snapsh
 
 `onedeploy.postgres_restore_probe_network`는 일회성 ECS 검사 작업용 보안 그룹을 따로 만든다. 기본 아웃바운드를 제거하고 복원 DB 그룹의 TCP 5432 및 AWS API 연결용 HTTPS 443만 허용한다. 복원 DB에는 해당 작업 그룹에서 오는 TCP 5432만 잠시 허용한다. 정리 전에 작업 네트워크 인터페이스가 남아 있으면 중단하고, DB 인바운드를 먼저 닫은 다음 검사 그룹을 삭제한다. 서울 리전의 임시 그룹 쌍에서 이 연결·해제·정리를 통과했다. ECS SQL 검사 작업과 실제 복원 DB 연결은 아직 구현·검증하지 않았다.
 
-`postgres_restore_verifier`는 기존 검증된 마이그레이션 번들의 파일명·SHA-256만 별도 이미지에 포함한다. Node 검사는 `BEGIN READ ONLY`에서 복원 DB의 `onedeploy_schema_migrations` 행을 정확히 비교한다. 선택적 32자리 검사 ID가 있으면 `onedeploy_probe_migrated`의 해당 행도 조회한다. 결과에는 검사 개수와 성공 여부만 남기고 행 내용·비밀번호는 출력하지 않는다. 소스 스냅샷 이후 비밀번호가 변경됐을 수 있으므로, ECS 실행을 붙일 때 복원 DB 인증 경로를 별도로 검증해야 한다. 현재는 이미지 문맥과 SQL 로직만 테스트했다.
+`postgres_restore_verifier`는 기존 검증된 마이그레이션 번들의 파일명·SHA-256만 별도 이미지에 포함한다. Node 검사는 `BEGIN READ ONLY`에서 복원 DB의 `onedeploy_schema_migrations` 행을 정확히 비교한다. 선택적 32자리 검사 ID가 있으면 `onedeploy_probe_migrated`의 해당 행도 조회한다. 결과에는 검사 개수와 성공 여부만 남기고 행 내용·비밀번호는 출력하지 않는다. 소스 스냅샷 이후 비밀번호가 변경됐을 수 있으므로, 실제 ECS 작업에서 복원 DB 인증 성공을 확인해야 한다. 이미지 문맥과 SQL 로직은 단위 테스트를 통과했다.
 
 `postgres_restore_credentials`는 원본 RDS의 소유권·관리형 비밀 ARN과 소유 스냅샷 시각을 확인하고, 비밀 값 없이 Secrets Manager 버전 메타데이터만 읽는다. `AWSCURRENT`가 정확히 하나이고 버전 생성 시각이 스냅샷보다 앞설 때만 [ECS의 버전 ID 고정 비밀 참조](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html)를 반환한다. 서울 리전의 보존 스냅샷에서 읽기 전용으로 통과했다. 이 시각 비교는 비밀번호 일치의 증명이 아니므로 실제 인증·SQL 성공이 복원 검증의 필수 조건이다.
+
+`postgres_restore_task`의 사전 계획은 검사 연결이 열린 보안 그룹 쌍, 소유 태그를 가진 `available` 복원 DB와 엔드포인트, 원본 RDS 스택의 제한된 ECS 실행 역할, 고정 비밀 버전, 이미지·비밀 다운로드가 가능한 공개 서브넷, 14일 보존 로그 그룹을 대조한다. 실행기는 검증 manifest만 담은 이미지를 빌드해 ECR digest를 확인하고, 그 digest와 비밀 버전을 고정한 단일 Fargate 작업을 실행한다. 종료 코드 0과 CloudWatch의 SQL 성공 메시지를 모두 확인해야 통과한다. 성공 시에만 작업 정의와 이미지 태그를 정리한다. 이 경로는 아직 단위 테스트만 통과했으며 실제 복원 DB·ECS 결과는 없다. 중단 후 재실행 방지를 위한 영속 작업 기록도 아직 없다.
 
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.

@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 
 from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 from onedeploy.postgres_restore import plan_restore_drill
 from onedeploy.postgres_restore_network import RestoreNetworkRequest, RestoreSecurityGroup
+from onedeploy.postgres_restore_probe_network import RestoreProbeNetwork
 
 
 class RestoreInstance:
@@ -69,14 +71,32 @@ class RestoreInstance:
 
     def inspect(self) -> dict:
         self._network()
+        return self._inspect_instance()
+
+    def _inspect_instance(self) -> dict:
         result = json.loads(self.adapter.aws(['rds', 'describe-db-instances',
             '--db-instance-identifier', self.target_id], private=True, quiet=True))
         databases = result.get('DBInstances')
         if result.get('Marker') or not isinstance(databases, list) or len(databases) != 1:
             raise AwsConfigurationError('복원 DB를 하나로 확인하지 못했습니다.')
         inspected = self._verified(databases[0])
+        if inspected['status'] == 'available':
+            endpoint = databases[0].get('Endpoint', {})
+            address = endpoint.get('Address') if isinstance(endpoint, dict) else None
+            if (not isinstance(address, str)
+                    or not re.fullmatch(r'[a-z0-9-]+\.[a-z0-9-]+\.'
+                                        + re.escape(self.settings.region)
+                                        + r'\.rds\.amazonaws\.com', address)
+                    or endpoint.get('Port') != 5432):
+                raise AwsConfigurationError('복원 DB의 비공개 엔드포인트를 확인하지 못했습니다.')
+            inspected['endpoint'] = address
+            inspected['port'] = 5432
         self._tags()
         return inspected
+
+    def inspect_for_probe(self, probe_group_id: str) -> dict:
+        RestoreProbeNetwork(self.network.request, self.group_id).inspect(probe_group_id)
+        return self._inspect_instance()
 
     def preflight(self) -> dict:
         plan = plan_restore_drill(self.application_id, self.snapshot_id,

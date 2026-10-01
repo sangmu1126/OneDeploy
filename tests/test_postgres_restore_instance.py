@@ -26,6 +26,8 @@ class RestoreInstanceTests(unittest.TestCase):
                    'PubliclyAccessible': False, 'MultiAZ': False,
                    'DeletionProtection': False,
                    'DBSubnetGroup': {'VpcId': VPC},
+                   'Endpoint': {'Address': 'restore.abcdef.' + REGION + '.rds.amazonaws.com',
+                                'Port': 5432},
                    'VpcSecurityGroups': [{'VpcSecurityGroupId': GROUP}]}
         self.tags = {'TagList': [{'Key': 'onedeploy-managed', 'Value': 'true'},
                                  {'Key': 'onedeploy-app', 'Value': APP},
@@ -88,6 +90,32 @@ class RestoreInstanceTests(unittest.TestCase):
                 patch.object(self.restore.adapter, 'aws',
                              return_value=json.dumps({'DBInstances': [bad]})):
             with self.assertRaisesRegex(AwsConfigurationError, '구성'):
+                self.restore.inspect()
+
+    def test_probe_inspection_accepts_only_verified_temporary_link(self):
+        with patch('onedeploy.postgres_restore_instance.RestoreProbeNetwork.inspect',
+                   return_value={'status': 'open'}) as link, \
+                patch.object(self.restore, '_inspect_instance',
+                             return_value={'status': 'available'}):
+            self.assertEqual(self.restore.inspect_for_probe('sg-87654321')['status'],
+                             'available')
+        link.assert_called_once_with('sg-87654321')
+
+    def test_available_restore_requires_expected_private_endpoint(self):
+        available = {**self.db, 'DBInstanceStatus': 'available'}
+        with patch.object(self.restore.network, 'inspect',
+                          return_value={'group_id': GROUP}), \
+                patch.object(self.restore.adapter, 'aws', side_effect=[
+                    json.dumps({'DBInstances': [available]}), json.dumps(self.tags)]):
+            inspected = self.restore.inspect()
+        self.assertEqual(inspected['port'], 5432)
+        self.assertEqual(inspected['endpoint'], available['Endpoint']['Address'])
+        bad = {**available, 'Endpoint': {'Address': 'public.example.com', 'Port': 5432}}
+        with patch.object(self.restore.network, 'inspect',
+                          return_value={'group_id': GROUP}), \
+                patch.object(self.restore.adapter, 'aws',
+                             return_value=json.dumps({'DBInstances': [bad]})):
+            with self.assertRaisesRegex(AwsConfigurationError, '엔드포인트'):
                 self.restore.inspect()
 
     def test_delete_requires_owned_available_instance(self):

@@ -20,7 +20,9 @@
 
 데이터 검사 작업의 네트워크는 DB가 `available`이고 아래 `--inspect`가 통과한 뒤 `onedeploy.postgres_restore_probe_network`에 같은 앱·대상·계정·리전·VPC와 `--db-group-id <RESTORE_GROUP_ID>`를 지정해 준비한다. 기본 실행은 읽기 전용이고 `--apply`로 연결을 연다. 작업 종료 후 `--close <PROBE_GROUP_ID>`로 닫고 DB `--inspect`를 다시 실행한다. 이 연결 절차만 검증됐으며, 실제 읽기 전용 SQL 작업은 아직 없다.
 
-SQL 검사 이미지 문맥은 `stage_restore_verifier_context`로 준비한다. 기존 마이그레이션 manifest만 포함해 복원 DB 원장의 이름·SHA-256과 선택적 검사 행을 `BEGIN READ ONLY`에서 대조한다. Python·Node 단위 테스트는 통과했지만 ECS 작업 등록·실행, 복원 DB 비밀번호 제공, CloudWatch 결과 수집은 아직 연결하지 않았다. 따라서 이 단계만으로 복원 데이터 검증이 완료됐다고 기록하지 않는다.
+SQL 검사 이미지 문맥은 `stage_restore_verifier_context`로 준비한다. 기존 마이그레이션 manifest만 포함해 복원 DB 원장의 이름·SHA-256과 선택적 검사 행을 `BEGIN READ ONLY`에서 대조한다. Python·Node 단위 테스트는 통과했다. 이 단계만으로 복원 데이터 검증이 완료됐다고 기록하지 않는다.
+
+이후 `onedeploy.postgres_restore_task`의 읽기 전용 사전 계획과 `RestoreVerifierRunner` 실행 코드가 추가됐다. 이미지 digest·고정 비밀 버전·검사 그룹을 task definition에 넣고, 소유 ECS 작업 종료 코드와 CloudWatch SQL 성공 로그를 함께 확인한다. 현재는 단위 테스트만 통과했으며 실제 복원 DB와 ECS 작업은 만들지 않았다. 중단 후 재확인 기록이 연결되기 전에는 이 실행기를 실계정에서 적용하지 않는다.
 
 2026-10-02 `onedeploy.postgres_restore_credentials`를 서울 리전의 원본 RDS·보존 스냅샷·관리형 비밀 메타데이터에 읽기 전용으로 실행했다. 현재 `AWSCURRENT` 버전의 생성 시각은 2026-09-30 15:47:53 UTC이고 스냅샷 생성 시각은 2026-10-01 15:10:08 UTC였다. 계획은 해당 버전 ID를 ECS 비밀 참조에 고정했으며 비밀번호 값은 조회하지 않았다. 실제 복원 DB 연결 성공은 아직 확인하지 않았다.
 
