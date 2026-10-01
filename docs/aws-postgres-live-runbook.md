@@ -6,6 +6,8 @@
 
 수동 스냅샷 CLI의 실계정 계획은 아래 명령으로 통과했다. 기본 동작은 읽기 전용이다. `--apply`는 별도 생성 요청이며 백업 저장 비용이 발생할 수 있다. 생성한 경우에만 같은 입력에 `--inspect`를 붙여 상태·소유 태그를 확인한다. 현재 기록에서는 `--apply`를 실행하지 않았다.
 
+2026-10-02 UI의 **기존 RDS 수동 스냅샷** 계획에 대응하는 인증 HTTP `POST /api/applications/demo-app/snapshots/plan`도 실제 서울 리전에서 `onedeploy-demo-app-before-migration` 대상으로 통과했다. 응답은 HTTP 200, 계정 `265233844540`, 기존 수동 스냅샷 0개였다. 생성 요청은 보내지 않았고 Chrome UI 생성 경로도 아직 실계정에서 확인하지 않았다.
+
 ```sh
 python3 -m onedeploy.postgres_snapshot --application demo-app \
   --snapshot-id onedeploy-demo-app-before-migration \

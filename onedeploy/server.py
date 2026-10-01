@@ -32,6 +32,7 @@ from onedeploy.postgres import (AwsPostgresProvisioner, PostgresRequest,
                                 discover_existing_postgres, inspect_postgres_backup_status,
                                 postgres_settings_for_application)
 from onedeploy.postgres_operations import PostgresOperations
+from onedeploy.snapshot_operations import SnapshotOperations
 
 
 def postgres_request_from_job(job: dict) -> PostgresRequest | None:
@@ -115,6 +116,8 @@ class App:
         self.recovery_warnings = []
         self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings)
         self.recovery_warnings.extend(self.postgres_operations.recovery_warnings)
+        self.snapshot_operations = SnapshotOperations(self.root / 'snapshot-operations', self.aws_settings)
+        self.recovery_warnings.extend(self.snapshot_operations.recovery_warnings)
         self.network_operations = NetworkOperations(self.root / 'network-operations', self.aws_settings)
         self.recovery_warnings.extend(self.network_operations.recovery_warnings)
         self.restore()
@@ -886,6 +889,13 @@ def handler_for(app: App):
                 except (ValueError, AwsConfigurationError) as exc:
                     self.json_response(400, {"error": str(exc)})
                 return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/[a-z][a-z0-9-]{2,254}/operation", self.path):
+                application_id, snapshot_id = self.path.split('/')[3], self.path.split('/')[5]
+                try:
+                    self.json_response(200, app.snapshot_operations.get(application_id, snapshot_id))
+                except ValueError as exc:
+                    self.json_response(404, {"error": str(exc)})
+                return
             if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres", self.path):
                 application_id = self.path.split('/')[3]
                 try:
@@ -1001,6 +1011,36 @@ def handler_for(app: App):
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('PostgreSQL 생성 재확인 요청에는 본문이 없어야 합니다.')
                     self.json_response(200, app.postgres_operations.reconcile(application_id))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 512:
+                        raise ValueError('스냅샷 계획 입력은 512바이트 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'snapshot_id'}
+                            or not isinstance(payload['snapshot_id'], str)):
+                        raise ValueError('수동 스냅샷 ID가 필요합니다.')
+                    self.json_response(200, app.snapshot_operations.plan(
+                        application_id, payload['snapshot_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/create", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('스냅샷 생성 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'plan_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])):
+                        raise ValueError('유효한 스냅샷 계획 ID가 필요합니다.')
+                    self.json_response(202, app.snapshot_operations.start(application_id, payload['plan_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/[a-z][a-z0-9-]{2,254}/reconcile", self.path):
+                    application_id, snapshot_id = self.path.split('/')[3], self.path.split('/')[5]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('스냅샷 재확인 요청에는 본문이 없어야 합니다.')
+                    self.json_response(200, app.snapshot_operations.reconcile(application_id, snapshot_id))
                     return
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback-release/reconcile", self.path):
                     job_id = self.path.split('/')[3]

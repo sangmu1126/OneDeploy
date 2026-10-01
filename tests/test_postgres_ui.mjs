@@ -160,6 +160,19 @@ test('existing RDS lookup fills the network fields from the authenticated API', 
         ? {database_id: 'onedeploy-demo-app', backup_retention_days: 7,
            latest_restorable_time: '2026-10-01T00:00:00Z', deletion_protection: true,
            manual_snapshot_count: 0, manual_snapshots: []}
+        : path.endsWith('/snapshots/plan')
+        ? {plan_id: 'a'.repeat(32), account: '123456789012', region: 'ap-northeast-2',
+           database_id: 'onedeploy-demo-app', snapshot_id: 'onedeploy-demo-app-before-migration',
+           manual_snapshot_count: 0, storage_cost_warning: '저장 비용이 발생할 수 있습니다.'}
+        : path.endsWith('/snapshots/create')
+        ? {application_id: 'demo-app', snapshot_id: 'onedeploy-demo-app-before-migration',
+           status: 'running', message: '생성 요청 중'}
+        : path.endsWith('/snapshots/onedeploy-demo-app-before-migration/operation')
+        ? {application_id: 'demo-app', snapshot_id: 'onedeploy-demo-app-before-migration',
+           status: 'pending', message: '생성 중'}
+        : path.endsWith('/snapshots/onedeploy-demo-app-before-migration/reconcile')
+        ? {application_id: 'demo-app', snapshot_id: 'onedeploy-demo-app-before-migration',
+           status: 'succeeded', message: '사용 가능'}
         : {database_id: 'onedeploy-demo-app', account: '123456789012',
            region: 'ap-northeast-2', engine_version: '18.3',
            vpc_id: 'vpc-12345678', subnet_ids: ['subnet-11111111', 'subnet-22222222']};
@@ -182,6 +195,17 @@ test('existing RDS lookup fills the network fields from the authenticated API', 
   assert.ok(requests.some(request => request.path === '/api/applications/demo-app/postgres/backups'));
   assert.match(element('postgresBackupInfo').textContent, /자동 백업 보존 7일/);
   assert.match(element('postgresBackupInfo').textContent, /수동 스냅샷 0개/);
+  element('snapshotName').value = 'before-migration';
+  await element('snapshotPlan').onclick();
+  assert.ok(requests.some(request => request.path === '/api/applications/demo-app/snapshots/plan'));
+  assert.equal(element('snapshotCreate').hidden, false);
+  await element('snapshotCreate').onclick();
+  const create = requests.find(request => request.path === '/api/applications/demo-app/snapshots/create');
+  assert.equal(JSON.parse(create.options.body).plan_id, 'a'.repeat(32));
+  await element('snapshotOperation').onclick();
+  assert.equal(element('snapshotReconcile').hidden, false);
+  await element('snapshotReconcile').onclick();
+  assert.match(element('snapshotOperationInfo').textContent, /succeeded/);
 });
 
 test('new RDS plan button shows a read-only capacity quote', async () => {

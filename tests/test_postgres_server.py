@@ -102,6 +102,55 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(handler.json_response.call_args.args, (200, summary))
         inspect.assert_called_once_with('demo-app', self.settings)
 
+    def test_manual_snapshot_plan_create_and_reconcile_routes(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.json_response = Mock()
+        handler.path = '/api/applications/demo-app/snapshots/plan'
+        payload = json.dumps({'snapshot_id': 'onedeploy-demo-app-before-migration'}).encode()
+        handler.headers = {'X-OneDeploy-Token': self.app.token,
+                           'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        with patch.object(self.app.snapshot_operations, 'plan',
+                          return_value={'plan_id': 'a' * 32}) as plan:
+            handler.do_POST()
+        plan.assert_called_once_with('demo-app', 'onedeploy-demo-app-before-migration')
+        self.assertEqual(handler.json_response.call_args.args[0], 200)
+
+        handler.path = '/api/applications/demo-app/snapshots/create'
+        payload = json.dumps({'plan_id': 'a' * 32}).encode()
+        handler.headers['Content-Length'] = str(len(payload))
+        handler.rfile = io.BytesIO(payload)
+        with patch.object(self.app.snapshot_operations, 'start',
+                          return_value={'status': 'running'}) as start:
+            handler.do_POST()
+        start.assert_called_once_with('demo-app', 'a' * 32)
+        self.assertEqual(handler.json_response.call_args.args[0], 202)
+
+        handler.path = '/api/applications/demo-app/snapshots/onedeploy-demo-app-before-migration/reconcile'
+        handler.headers['Content-Length'] = '0'
+        with patch.object(self.app.snapshot_operations, 'reconcile',
+                          return_value={'status': 'succeeded'}) as reconcile:
+            handler.do_POST()
+        reconcile.assert_called_once_with('demo-app', 'onedeploy-demo-app-before-migration')
+        self.assertEqual(handler.json_response.call_args.args[0], 200)
+
+        handler.path = '/api/applications/demo-app/snapshots/onedeploy-demo-app-before-migration/operation'
+        with patch.object(self.app.snapshot_operations, 'get',
+                          return_value={'status': 'succeeded'}) as get:
+            handler.do_GET()
+        get.assert_called_once_with('demo-app', 'onedeploy-demo-app-before-migration')
+        self.assertEqual(handler.json_response.call_args.args[0], 200)
+
+    def test_manual_snapshot_create_requires_session(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/snapshots/create'
+        handler.headers = {'Content-Length': '0'}
+        handler.json_response = Mock()
+        with patch.object(self.app.snapshot_operations, 'start') as start:
+            handler.do_POST()
+        start.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+
     def test_creation_plan_runs_read_only_preflight(self):
         handler = handler_for(self.app).__new__(handler_for(self.app))
         handler.path = '/api/applications/demo-app/postgres/plan'
