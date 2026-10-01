@@ -202,6 +202,13 @@ class PostgresServerTests(unittest.TestCase):
         job = self.app.jobs[job_id]
         self.assertEqual(job['postgres']['application_id'], 'demo-app')
         self.assertEqual(job['postgres']['subnet_ids'], ['subnet-11111111', 'subnet-22222222'])
+        infrastructure = job['infrastructure_plan']
+        self.assertEqual(infrastructure['workload'], 'postgresql-http')
+        self.assertEqual(infrastructure['database'],
+                         {'binding': 'existing', 'database_id': 'onedeploy-demo-app'})
+        self.assertIn('existing RDS PostgreSQL', infrastructure['resources'])
+        self.assertIn('one-off SQL migration task', infrastructure['resources'])
+        self.assertIn('package.json', infrastructure['detected_files'])
         self.assertNotIn('password', json.dumps(job).lower())
         with patch('onedeploy.server.DeploymentTools') as tools, \
                 patch('onedeploy.server.DeploymentAgent') as agent:

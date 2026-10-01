@@ -23,8 +23,9 @@ from onedeploy.aws_network import ServiceNetworkRequest, discover_default_networ
 from onedeploy.cloud import CloudRunAdapter, CloudRunSettings
 from onedeploy.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from onedeploy.health import check_deployment
-from onedeploy.infrastructure import (TARGET_RESOURCES, OpenAIInfrastructurePlanner,
-                                      inspect_infrastructure, plan_infrastructure, validate_infrastructure)
+from onedeploy.infrastructure import (OpenAIInfrastructurePlanner,
+                                      explicit_infrastructure_plan, inspect_infrastructure,
+                                      plan_infrastructure, validate_infrastructure)
 from onedeploy.migrations import collect_sql_migrations
 from onedeploy.network_operations import NetworkOperations
 from onedeploy.postgres import (AwsPostgresProvisioner, PostgresRequest,
@@ -1138,9 +1139,10 @@ def handler_for(app: App):
                                 public_flag == 'true', app.infrastructure_planner_factory(app.ai_settings))
                             target = infrastructure_plan['target']
                         else:
-                            infrastructure_plan = {'target': target, 'workload': 'unconfirmed',
-                                'rationale': '사용자가 배포 대상을 지정했습니다. 알려진 영속 저장소 의존성은 사전 검사합니다.',
-                                'evidence': [], 'resources': TARGET_RESOURCES[target], 'planner': 'user'}
+                            infrastructure_plan = explicit_infrastructure_plan(
+                                target, infrastructure_profile,
+                                existing_postgres_id=database['database_id']
+                                if postgres_request is not None else None)
                         with app.lock:
                             app.ensure_application_available(application_id, target)
                             latest = None

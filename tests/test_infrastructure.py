@@ -9,12 +9,30 @@ from unittest.mock import Mock, patch
 from onedeploy.agent import DeploymentTools
 from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsSettings
-from onedeploy.infrastructure import (inspect_infrastructure, validate_infrastructure,
+from onedeploy.infrastructure import (InfrastructureProfile, explicit_infrastructure_plan,
+                                      inspect_infrastructure, validate_infrastructure,
                                       validate_infrastructure_proposal, OpenAIInfrastructurePlanner)
 from onedeploy.server import App, handler_for
 
 
 class InfrastructureTests(unittest.TestCase):
+    def test_explicit_postgres_plan_requires_detected_engine_and_existing_binding(self):
+        profile = InfrastructureProfile('database', ('package.json',), 1,
+                                        ('database',), ('postgresql',))
+        plan = explicit_infrastructure_plan('aws-ecs-express', profile,
+                                            existing_postgres_id='onedeploy-demo-app')
+        self.assertEqual(plan['workload'], 'postgresql-http')
+        self.assertEqual(plan['database']['binding'], 'existing')
+        self.assertIn('existing RDS PostgreSQL', plan['resources'])
+        with self.assertRaisesRegex(ValueError, '다릅니다'):
+            explicit_infrastructure_plan('cloud-run', profile,
+                                         existing_postgres_id='onedeploy-demo-app')
+        with self.assertRaisesRegex(ValueError, '다릅니다'):
+            explicit_infrastructure_plan('aws-ecs-express',
+                InfrastructureProfile('database', ('package.json',), 1,
+                                      ('database',), ('mysql',)),
+                existing_postgres_id='onedeploy-demo-app')
+
     def test_planner_uses_bounded_structured_api_request(self):
         proposal = {'target': 'local-docker', 'workload': 'stateless-http',
                     'rationale': '로컬 검증', 'evidence': [{'file': 'package.json', 'quote': 'start'}]}
