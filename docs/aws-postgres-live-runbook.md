@@ -20,6 +20,8 @@
 
 데이터 검사 작업의 네트워크는 DB가 `available`이고 아래 `--inspect`가 통과한 뒤 `onedeploy.postgres_restore_probe_network`에 같은 앱·대상·계정·리전·VPC와 `--db-group-id <RESTORE_GROUP_ID>`를 지정해 준비한다. 기본 실행은 읽기 전용이고 `--apply`로 연결을 연다. 작업 종료 후 `--close <PROBE_GROUP_ID>`로 닫고 DB `--inspect`를 다시 실행한다. 이 연결 절차만 검증됐으며, 실제 읽기 전용 SQL 작업은 아직 없다.
 
+SQL 검사 이미지 문맥은 `stage_restore_verifier_context`로 준비한다. 기존 마이그레이션 manifest만 포함해 복원 DB 원장의 이름·SHA-256과 선택적 검사 행을 `BEGIN READ ONLY`에서 대조한다. Python·Node 단위 테스트는 통과했지만 ECS 작업 등록·실행, 복원 DB 비밀번호 제공, CloudWatch 결과 수집은 아직 연결하지 않았다. 따라서 이 단계만으로 복원 데이터 검증이 완료됐다고 기록하지 않는다.
+
 ```sh
 python3 -m onedeploy.postgres_restore_instance \
   --application demo-app --snapshot-id onedeploy-demo-app-backup-20261002 \
