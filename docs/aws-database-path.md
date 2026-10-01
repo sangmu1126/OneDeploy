@@ -88,7 +88,9 @@ API는 작업 생성 전에 DB 소유권을 읽기 전용으로 확인하며, DB
 
 `python3 -m onedeploy.postgres_snapshot`은 앱 소유 RDS가 `available`인지와 선택한 스냅샷 ID의 중복 여부를 읽기 전용으로 확인한다. `--apply`가 있을 때만 [CreateDBSnapshot](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBSnapshot.html)을 호출하며, 요청에 앱 소유 태그를 포함한다. `--inspect`는 원본 DB가 사라진 뒤에도 고정 AWS 계정·정확한 스냅샷 ARN·원본 DB ID·암호화·태그를 대조할 수 있다. 생성 API는 `creating` 상태를 반환할 수 있어 이를 복구 완료로 간주하지 않는다. 2026-10-01 실계정에서는 계획만 확인했고 생성·복원은 아직 검증하지 않았다.
 
-UI의 **기존 RDS 수동 스냅샷**은 `POST /api/applications/<앱 ID>/snapshots/plan`에서 이름·DB·계정·기존 수동 스냅샷 수와 저장 비용 안내를 먼저 보여준다. 15분 안에 `POST .../snapshots/create`로 계획 ID를 보내면 서버가 같은 계획을 다시 검증하고 생성 작업을 디스크에 먼저 기록한 뒤 비동기로 생성한다. `GET .../snapshots/<스냅샷 ID>/operation`은 로컬 작업 상태를 반환하고 `POST .../reconcile`은 AWS 스냅샷과 소유 태그를 읽기 전용으로 확인한다. 재시작 중인 작업은 자동으로 다시 생성하지 않는다. 2026-10-02 인증 HTTP 계획과 실제 Chrome UI의 읽기 전용 조회는 `demo-app` 실계정에서 통과했다. 생성 버튼과 복원은 아직 실계정에서 실행하지 않았다.
+UI의 **기존 RDS 수동 스냅샷**은 `POST /api/applications/<앱 ID>/snapshots/plan`에서 이름·DB·계정·기존 수동 스냅샷 수와 저장 비용 안내를 먼저 보여준다. 15분 안에 `POST .../snapshots/create`로 계획 ID를 보내면 서버가 같은 계획을 다시 검증하고 생성 작업을 디스크에 먼저 기록한 뒤 비동기로 생성한다. `GET .../snapshots/<스냅샷 ID>/operation`은 로컬 작업 상태를 반환하고 `POST .../reconcile`은 AWS 스냅샷과 소유 태그를 읽기 전용으로 확인한다. 재시작 중인 작업은 자동으로 다시 생성하지 않는다. 2026-10-02 인증 HTTP 계획과 실제 Chrome UI의 읽기 전용 조회는 `demo-app` 실계정에서 통과했다.
+
+2026-10-02 같은 Chrome 경로로 `onedeploy-demo-app-backup-20261002`를 실제 생성했다. 작업 기록의 성공 상태와 AWS 스냅샷의 `available`·암호화·소유 태그를 확인했다. 원본 RDS는 `available`로 남아 있다. 이 스냅샷은 계속 보존되며 실제 청구액은 확인하지 않았다. 복원 검증은 별도 작업이다.
 
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.

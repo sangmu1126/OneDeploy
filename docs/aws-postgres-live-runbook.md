@@ -6,9 +6,18 @@
 
 수동 스냅샷 CLI의 실계정 계획은 아래 명령으로 통과했다. 기본 동작은 읽기 전용이다. `--apply`는 별도 생성 요청이며 백업 저장 비용이 발생할 수 있다. 생성한 경우에만 같은 입력에 `--inspect`를 붙여 상태·소유 태그를 확인한다. 현재 기록에서는 `--apply`를 실행하지 않았다.
 
-2026-10-02 UI의 **기존 RDS 수동 스냅샷** 계획에 대응하는 인증 HTTP `POST /api/applications/demo-app/snapshots/plan`도 실제 서울 리전에서 `onedeploy-demo-app-before-migration` 대상으로 통과했다. 응답은 HTTP 200, 계정 `265233844540`, 기존 수동 스냅샷 0개였다. 생성 요청은 보내지 않았고 Chrome UI 생성 경로도 아직 실계정에서 확인하지 않았다.
+2026-10-02 UI의 **기존 RDS 수동 스냅샷** 계획에 대응하는 인증 HTTP `POST /api/applications/demo-app/snapshots/plan`도 실제 서울 리전에서 `onedeploy-demo-app-before-migration` 대상으로 통과했다. 응답은 HTTP 200, 계정 `265233844540`, 기존 수동 스냅샷 0개였다. 이 HTTP 호출은 읽기 전용이었다.
 
 같은 날 `--browser-read-only`로 실제 Chrome에서 기본 네트워크 자동 입력 → 기존 RDS 조회 → **백업·보호 상태 확인** → `browser-read-only` 이름의 수동 스냅샷 계획 확인을 통과했다. 화면에 `onedeploy-demo-app-browser-read-only`, 저장 비용 안내, 별도 생성 버튼이 나타났고 서버의 배포·스냅샷 생성 작업 기록은 비어 있었다. 생성 버튼은 누르지 않았다.
+
+2026-10-02 `--snapshot-apply --snapshot-name backup-20261002`를 같은 계정·리전·앱으로 실행했다. Chrome에서 계획 확인 후 별도 생성 버튼을 눌렀고, 서버 작업 기록과 AWS 재확인이 `succeeded`/`available`로 끝났다. `onedeploy-demo-app-backup-20261002`는 암호화와 소유 태그를 확인해 **보존**했다. 후속 읽기 전용 조회에서 원본 DB `available`, 수동 스냅샷 1개를 확인했다. 이 스냅샷의 실제 청구액은 아직 확인하지 않았고, 복원 시험도 하지 않았다.
+
+```sh
+PYTHONPATH=. python3 tests/smoke_aws_postgres_browser.py \
+  --application demo-app --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --service-security-group <SERVICE_GROUP_ID> \
+  --snapshot-apply --snapshot-name <새 스냅샷 이름>
+```
 
 ```sh
 python3 -m onedeploy.postgres_snapshot --application demo-app \

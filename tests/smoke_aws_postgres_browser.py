@@ -13,12 +13,14 @@ import threading
 import time
 import urllib.request
 import uuid
+from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsSettings
 from onedeploy.postgres import discover_existing_postgres
+from onedeploy.postgres_snapshot import inspect_snapshot, plan_snapshot
 from onedeploy.server import App, handler_for
 from tests.smoke_aws_postgres_api import PostgresFixture, archive
 from tests.smoke_aws_postgres import probe
@@ -33,10 +35,13 @@ def main(argv=None):
     mode.add_argument('--apply', action='store_true', help='Deploy temporary billable ECS resources')
     mode.add_argument('--browser-read-only', action='store_true',
                       help='Verify browser network and existing RDS lookup without deploying')
+    mode.add_argument('--snapshot-apply', action='store_true',
+                      help='Create and retain a billable manual RDS snapshot through real Chrome')
     parser.add_argument('--application', default='demo-app')
     parser.add_argument('--account', required=True)
     parser.add_argument('--region', required=True)
     parser.add_argument('--service-security-group', required=True)
+    parser.add_argument('--snapshot-name', default='backup-' + datetime.now(timezone.utc).strftime('%Y%m%d'))
     args = parser.parse_args(argv)
     if args.application != 'demo-app':
         parser.error('The browser driver currently uses the demo-app fixture only')
@@ -47,7 +52,11 @@ def main(argv=None):
     settings.validate()
     database = discover_existing_postgres(args.application, settings)
     print('Existing DB verified:', database['database_id'], database['status'], flush=True)
-    if not args.apply and not args.browser_read_only:
+    snapshot_id = 'onedeploy-' + args.application + '-' + args.snapshot_name
+    if args.snapshot_apply:
+        preview = plan_snapshot(args.application, snapshot_id, settings)
+        print('Snapshot plan verified:', preview['snapshot_id'], flush=True)
+    if not args.apply and not args.browser_read_only and not args.snapshot_apply:
         print('읽기 전용 확인 완료. --apply 없이는 브라우저 배포나 ECS 생성을 시작하지 않습니다.', flush=True)
         return
     if not CHROME.is_file():
@@ -94,7 +103,8 @@ def main(argv=None):
         port = port_file.read_text().splitlines()[0]
         environment = {**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': key}
         subprocess.run(['node', str(DRIVER), url, port, str(archive_path),
-                        'apply' if args.apply else 'read-only'],
+                        'apply' if args.apply else 'snapshot-apply' if args.snapshot_apply else 'read-only',
+                        args.snapshot_name if args.snapshot_apply else 'browser-read-only'],
                        check=True, timeout=40 * 60, env=environment)
         if args.browser_read_only:
             if app.jobs:
@@ -103,6 +113,15 @@ def main(argv=None):
                 raise AssertionError('Read-only browser check recorded a snapshot create operation')
             retired = True
             print('PASS: real browser verified RDS, backup status, and snapshot plan without creation', flush=True)
+            return
+        if args.snapshot_apply:
+            operation = app.snapshot_operations.get(args.application, snapshot_id)
+            inspected = inspect_snapshot(args.application, snapshot_id, settings)
+            if operation['status'] != 'succeeded' or inspected['status'] != 'available':
+                raise AssertionError('브라우저 작업 기록과 AWS 수동 스냅샷 완료 상태가 다릅니다.')
+            retired = True
+            print('PASS: browser-created encrypted snapshot available:', inspected['snapshot_arn'], flush=True)
+            print('Snapshot retained; backup storage may incur charges.', flush=True)
             return
         jobs = list(app.jobs.values())
         if len(jobs) != 1:

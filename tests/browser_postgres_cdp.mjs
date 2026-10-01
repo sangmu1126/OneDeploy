@@ -1,9 +1,9 @@
 // Drive the served OneDeploy UI in real Chrome; no third-party browser package required.
 import assert from 'node:assert/strict';
 
-const [serverUrl, debuggingPort, archive, mode = 'apply'] = process.argv.slice(2);
+const [serverUrl, debuggingPort, archive, mode = 'apply', snapshotName = 'browser-read-only'] = process.argv.slice(2);
 const probeKey = process.env.ONEDEPLOY_BROWSER_PROBE_KEY;
-assert.ok(serverUrl && debuggingPort && archive && ['apply', 'read-only'].includes(mode));
+assert.ok(serverUrl && debuggingPort && archive && ['apply', 'read-only', 'snapshot-apply'].includes(mode));
 if (mode === 'apply') assert.ok(probeKey);
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
@@ -59,15 +59,30 @@ try {
   const lookup = await until(() => evaluate("(() => {const e = id => document.getElementById(id); const text = e('postgresLookupInfo').textContent; if (text && !text.includes('검증 완료')) throw Error(text); return text.includes('검증 완료') && e('postgresVpc').value && e('postgresSubnets').value && e('postgresVpc').value === e('networkVpc').value;})()"), 60000);
   assert.ok(lookup);
   console.log('PASS: browser RDS lookup filled the verified network');
-  if (mode === 'read-only') {
+  if (mode === 'read-only' || mode === 'snapshot-apply') {
     await evaluate("document.getElementById('postgresBackups').click(); true");
     const backup = await until(() => evaluate("(() => {const text = document.getElementById('postgresBackupInfo').textContent; if (text && !text.includes('조회만 수행했습니다')) throw Error(text); return text.includes('자동 백업 보존') && text.includes('수동 스냅샷');})()"), 60000);
     assert.ok(backup);
     console.log('PASS: browser displayed the RDS backup and protection status');
-    await evaluate("(() => {const e = id => document.getElementById(id); e('snapshotName').value = 'browser-read-only'; e('snapshotPlan').click(); return true;})()");
-    const planned = await until(() => evaluate("(() => {const e = id => document.getElementById(id); const text = e('snapshotPlanInfo').textContent; if (text && !text.includes('이 조회는 스냅샷을 생성하지 않았습니다')) throw Error(text); return text.includes('onedeploy-demo-app-browser-read-only') && text.includes('저장 비용') && !e('snapshotCreate').hidden;})()"), 60000);
+    await evaluate(`(() => {const e = id => document.getElementById(id); e('snapshotName').value = ${JSON.stringify(snapshotName)}; e('snapshotPlan').click(); return true;})()`);
+    const planned = await until(() => evaluate(`(() => {const e = id => document.getElementById(id); const text = e('snapshotPlanInfo').textContent; if (text && !text.includes('이 조회는 스냅샷을 생성하지 않았습니다')) throw Error(text); return text.includes(${JSON.stringify('onedeploy-demo-app-' + snapshotName)}) && text.includes('저장 비용') && !e('snapshotCreate').hidden;})()`), 60000);
     assert.ok(planned);
     console.log('PASS: browser showed a read-only snapshot plan and separate create action');
+    if (mode === 'snapshot-apply') {
+      await evaluate("document.getElementById('snapshotCreate').click(); true");
+      await until(() => evaluate("document.getElementById('snapshotOperationInfo').textContent.includes(' · running · ')"), 60000);
+      console.log('PASS: browser submitted the planned snapshot creation');
+      const completed = await until(async () => {
+        const state = await evaluate("(() => {const e = id => document.getElementById(id); return {text: e('snapshotOperationInfo').textContent, reconcile: !e('snapshotReconcile').hidden};})()");
+        if (state.text.includes(' · succeeded · ')) return true;
+        if (state.text.includes(' · needs_attention · ')) throw Error(state.text);
+        if (state.reconcile) await evaluate("document.getElementById('snapshotReconcile').click(); true");
+        else await evaluate("document.getElementById('snapshotOperation').click(); true");
+        return false;
+      }, 15 * 60 * 1000, 5000);
+      assert.ok(completed);
+      console.log('PASS: browser reconciled an available owned snapshot');
+    }
   }
   if (mode === 'apply') {
   const document = await command('DOM.getDocument');
