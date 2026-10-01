@@ -50,6 +50,21 @@ class NetworkOperationsTests(unittest.TestCase):
         self.assertFalse((self.root / 'demo-app.json').exists())
         start.assert_not_called()
 
+    def test_successful_worker_persists_stack_identity(self):
+        stack_id = ('arn:aws:cloudformation:ap-northeast-2:123456789012:'
+                    'stack/onedeploy-network-demo-app/id')
+        with patch('onedeploy.network_operations.AwsServiceNetworkProvisioner.preflight',
+                   return_value=self.preview), \
+                patch('onedeploy.network_operations.threading.Thread.start'):
+            plan = self.manager.plan(self.request)
+            self.manager.start('demo-app', plan['plan_id'])
+        with patch('onedeploy.network_operations.AwsServiceNetworkProvisioner.create',
+                   return_value={'stack_id': stack_id, 'service_security_group': 'sg-33333333'}):
+            self.manager._run('demo-app')
+        self.assertEqual(self.manager.get('demo-app')['stack_id'], stack_id)
+        restored = NetworkOperations(self.root, self.settings)
+        self.assertEqual(restored.get('demo-app')['stack_id'], stack_id)
+
     def test_fixed_group_mode_does_not_offer_app_network(self):
         manager = NetworkOperations(self.root, AwsSettings('ap-northeast-2',
             expected_account='123456789012', service_security_group='sg-33333333'))
@@ -66,11 +81,13 @@ class NetworkOperationsTests(unittest.TestCase):
             self.manager.start('demo-app', plan['plan_id'])
         self.manager.operations['demo-app']['status'] = 'needs_attention'
         with patch('onedeploy.network_operations.AwsServiceNetworkProvisioner.inspect_current',
-                   return_value={'service_security_group': 'sg-33333333'}) as inspect, \
+                   return_value={'service_security_group': 'sg-33333333',
+                                 'stack_id': 'arn:aws:cloudformation:ap-northeast-2:123456789012:stack/onedeploy-network-demo-app/id'}) as inspect, \
                 patch('onedeploy.network_operations.AwsServiceNetworkProvisioner.create') as create:
             result = self.manager.reconcile('demo-app')
         self.assertEqual(result['status'], 'succeeded')
         self.assertEqual(result['service_security_group'], 'sg-33333333')
+        self.assertTrue(result['stack_id'].endswith('/id'))
         inspect.assert_called_once_with()
         create.assert_not_called()
 

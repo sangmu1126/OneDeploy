@@ -111,6 +111,7 @@ class NetworkOperations:
         try:
             network = AwsServiceNetworkProvisioner(request).create()
             group_id = network['service_security_group']
+            stack_id = network['stack_id']
         except Exception as exc:
             with self.lock:
                 operation['status'] = 'needs_attention'
@@ -121,6 +122,7 @@ class NetworkOperations:
             operation['status'] = 'succeeded'
             operation['message'] = '앱 전용 네트워크를 확인했습니다. RDS 생성 계획을 진행할 수 있습니다.'
             operation['service_security_group'] = group_id
+            operation['stack_id'] = stack_id
             self._save(operation)
 
     def get(self, application_id: str) -> dict:
@@ -133,7 +135,8 @@ class NetworkOperations:
                     'region': request['region'], 'vpc_id': request['vpc_id'],
                     'status': operation['status'], 'message': operation['message'],
                     'created_at': operation['created_at'],
-                    'service_security_group': operation.get('service_security_group')}
+                    'service_security_group': operation.get('service_security_group'),
+                    'stack_id': operation.get('stack_id')}
 
     def reconcile(self, application_id: str) -> dict:
         with self.lock:
@@ -146,6 +149,7 @@ class NetworkOperations:
         try:
             network = AwsServiceNetworkProvisioner(request).inspect_current()
             group_id = network['service_security_group']
+            stack_id = network['stack_id']
         except (AwsConfigurationError, ValueError, KeyError) as exc:
             with self.lock:
                 operation['status'] = 'needs_attention'
@@ -156,5 +160,6 @@ class NetworkOperations:
                 operation['status'] = 'succeeded'
                 operation['message'] = '앱 전용 네트워크를 다시 확인했습니다.'
                 operation['service_security_group'] = group_id
+                operation['stack_id'] = stack_id
                 self._save(operation)
         return self.get(application_id)

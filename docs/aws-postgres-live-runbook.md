@@ -4,7 +4,9 @@
 
 `PYTHONPATH=. python3 tests/smoke_aws_network.py --account <AWS_ACCOUNT_ID> --region ap-northeast-2`는 기본 VPC와 새 `netprobe-*` 앱 ID를 읽기 전용으로 사전 점검한다. `--apply`를 추가하면 앱 전용 보안 그룹 스택을 생성하고 서버의 앱별 그룹 선택을 검증한 뒤, 그룹 사용·참조 여부를 확인해 그 임시 스택을 정리한다. 생성 결과가 불확실하거나 다른 리소스에서 그룹을 사용하면 자동 정리를 멈추고 스택 이름을 출력한다.
 
-서울 리전에서 `netprobe-3300267c`의 `--apply` 검증을 통과했다. 스택 삭제 완료 후 앱 태그의 보안 그룹이 남지 않았음을 읽기 전용으로 재조회했다. RDS·ECS는 생성하지 않았다. 이 smoke는 CLI 생성기와 서버의 앱별 선택 함수를 검증하며 UI HTTP 생성 요청은 별도 검증이 필요하다.
+서울 리전에서 `netprobe-3300267c`의 `--apply` 검증을 통과했다. 스택 삭제 완료 후 앱 태그의 보안 그룹이 남지 않았음을 읽기 전용으로 재조회했다. RDS·ECS는 생성하지 않았다. 이 smoke는 CLI 생성기와 서버의 앱별 선택 함수를 검증한다.
+
+별도 `PYTHONPATH=. python3 tests/smoke_aws_network_browser.py --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --apply`는 실제 Chrome에서 기본 VPC 자동 입력, 읽기 전용 네트워크 계획, 생성 버튼·상태 표시를 검증한다. 서울 리전의 임시 `netprobe-9b93b64b` 앱에서 통과했고 서버 작업 기록의 스택 ARN·그룹 ID를 AWS와 대조했다. 임시 스택 삭제 완료 후 같은 앱 태그의 보안 그룹이 없음을 재조회했다. 이 브라우저 smoke에도 새 RDS·ECS 생성은 포함되지 않는다.
 
 이 절차는 서울 리전의 기존 기본 VPC에서 `demo-app`을 검증 대상으로 삼은 기록이다.
 실행 전에 STS 계정·리전·대상 ID를 다시 확인한다. 2026-10-01 읽기 전용 조회에서는
