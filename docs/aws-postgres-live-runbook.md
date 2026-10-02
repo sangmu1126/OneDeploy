@@ -18,6 +18,20 @@
 
 복원 인스턴스의 코드 경로는 다음 순서다. 아래 복원 DB 명령은 실제 리소스와 비용을 만들 수 있으며 이 경로의 실계정 검증은 아직 하지 않았다. DB 생성 후 `--inspect`로 조회하고, 데이터 확인 후 `--delete`로 복원 DB 삭제를 요청한다. 삭제 완료를 AWS에서 확인한 다음 보안 그룹을 정리한다. 원본 스냅샷은 보존한다.
 
+복원 시작은 `onedeploy.postgres_restore_drill_operations`를 사용한다. 기본 실행은 스냅샷·대상·격리 그룹의 읽기 전용 계획이고 `--apply`만 그룹과 과금 가능한 RDS 인스턴스를 만든다. 이 CLI는 `.onedeploy/restore-drill`에 로컬 기록을 먼저 저장한다. 응답이 불확실하면 같은 대상에 `--apply`를 반복하지 않고 `--reconcile`로 그룹·DB를 읽기 전용 재확인한다. 이 실행 경로는 단위 테스트만 통과했고 실계정 복원은 아직 하지 않았다.
+
+2026-10-02 서울 리전에서 이 새 CLI의 기본 읽기 전용 계획을 실행했다. 보존 스냅샷과 원본 DB의 계정·VPC·구성이 일치하고 대상 ID와 대상 그룹 이름이 비어 있음을 확인했다. 계획 조회는 그룹·DB를 만들지 않았으며 `--apply`는 실행하지 않았다.
+
+```sh
+python3 -m onedeploy.postgres_restore_drill_operations \
+  --state-dir .onedeploy/restore-drill \
+  --application demo-app --snapshot-id onedeploy-demo-app-backup-20261002 \
+  --target-id onedeploy-restore-demo-app-drill-20261002 \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --vpc-id <VPC_ID> \
+  --service-security-group <APP_SERVICE_GROUP_ID>
+# 생성할 때만 --apply; 생성 결과 재확인은 --reconcile
+```
+
 데이터 검사 작업의 네트워크는 DB가 `available`이고 아래 `--inspect`가 통과한 뒤 `onedeploy.postgres_restore_probe_network`에 같은 앱·대상·계정·리전·VPC와 `--db-group-id <RESTORE_GROUP_ID>`를 지정해 준비한다. 기본 실행은 읽기 전용이고 `--apply`로 연결을 연다. 작업 종료 후 `--close <PROBE_GROUP_ID>`로 닫고 DB `--inspect`를 다시 실행한다. 이 연결 절차만 검증됐으며, 실제 읽기 전용 SQL 작업은 아직 없다.
 
 SQL 검사 이미지 문맥은 `stage_restore_verifier_context`로 준비한다. 기존 마이그레이션 manifest만 포함해 복원 DB 원장의 이름·SHA-256과 선택적 검사 행을 `BEGIN READ ONLY`에서 대조한다. Python·Node 단위 테스트는 통과했다. 이 단계만으로 복원 데이터 검증이 완료됐다고 기록하지 않는다.

@@ -94,7 +94,9 @@ UI의 **기존 RDS 수동 스냅샷**은 `POST /api/applications/<앱 ID>/snapsh
 
 `python3 -m onedeploy.postgres_restore`는 [RDS가 스냅샷을 새 DB 인스턴스로 복원한다는 동작](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html)에 맞춰 원본과 다른 대상 ID를 요구한다. 앱 소유 스냅샷의 상태·암호화·VPC·엔진·버전·용량을 원본 DB와 대조하고 대상 ID 중복과 현재 기본 용량 가격을 읽는다. 복원 대상의 `onedeploy.postgres_restore_network`는 별도 보안 그룹을 계획·생성·검증한다. [EC2가 새 그룹에 추가하는 기본 아웃바운드 규칙](https://docs.aws.amazon.com/vpc/latest/userguide/creating-security-groups.html)도 제거해 인바운드·아웃바운드가 모두 비었는지 확인한다. `--delete <GROUP_ID>`는 소유권·미사용·다른 그룹의 참조가 없는 경우에만 실행한다. 임시 그룹의 실제 생성·정리는 통과했다. `onedeploy.postgres_restore_instance`는 같은 대상의 격리 그룹과 복원 계획을 재검증한 뒤 DB를 생성하고, 계정·VPC·보안 그룹·암호화·태그를 조회하며, 소유 DB가 `available`일 때만 명시적으로 삭제한다. 이 DB 수명주기 CLI는 아직 단위 테스트만 통과했다.
 
-`onedeploy.postgres_restore_probe_network`는 일회성 ECS 검사 작업용 보안 그룹을 따로 만든다. 기본 아웃바운드를 제거하고 복원 DB 그룹의 TCP 5432 및 AWS API 연결용 HTTPS 443만 허용한다. 복원 DB에는 해당 작업 그룹에서 오는 TCP 5432만 잠시 허용한다. 정리 전에 작업 네트워크 인터페이스가 남아 있으면 중단하고, DB 인바운드를 먼저 닫은 다음 검사 그룹을 삭제한다. 서울 리전의 임시 그룹 쌍에서 이 연결·해제·정리를 통과했다. ECS SQL 검사 작업과 실제 복원 DB 연결은 아직 구현·검증하지 않았다.
+`onedeploy.postgres_restore_probe_network`는 일회성 ECS 검사 작업용 보안 그룹을 따로 만든다. 기본 아웃바운드를 제거하고 복원 DB 그룹의 TCP 5432 및 AWS API 연결용 HTTPS 443만 허용한다. 복원 DB에는 해당 작업 그룹에서 오는 TCP 5432만 잠시 허용한다. 정리 전에 작업 네트워크 인터페이스가 남아 있으면 중단하고, DB 인바운드를 먼저 닫은 다음 검사 그룹을 삭제한다. 서울 리전의 임시 그룹 쌍에서 이 연결·해제·정리를 통과했다. ECS SQL 검사 작업 코드는 단위 테스트를 통과했으나 실제 복원 DB 연결은 아직 검증하지 않았다.
+
+`postgres_restore_drill_operations`는 복원 계획과 보안 그룹 계획을 읽기 전용으로 통과한 뒤 대상별 로컬 기록을 먼저 동기화한다. 격리 그룹 생성과 DB 복원 요청의 전후 단계를 기록하며 같은 대상의 재시작을 막는다. `--reconcile`은 이름·태그로 소유 그룹을 찾고 DB ARN·소유 태그·격리 구성을 읽기 전용으로 확인한다. 응답이 끊겨도 생성 API를 다시 호출하지 않는다. 아직 실제 복원 DB를 만들지 않았다.
 
 `postgres_restore_verifier`는 기존 검증된 마이그레이션 번들의 파일명·SHA-256만 별도 이미지에 포함한다. Node 검사는 `BEGIN READ ONLY`에서 복원 DB의 `onedeploy_schema_migrations` 행을 정확히 비교한다. 선택적 32자리 검사 ID가 있으면 `onedeploy_probe_migrated`의 해당 행도 조회한다. 결과에는 검사 개수와 성공 여부만 남기고 행 내용·비밀번호는 출력하지 않는다. 소스 스냅샷 이후 비밀번호가 변경됐을 수 있으므로, 실제 ECS 작업에서 복원 DB 인증 성공을 확인해야 한다. 이미지 문맥과 SQL 로직은 단위 테스트를 통과했다.
 
