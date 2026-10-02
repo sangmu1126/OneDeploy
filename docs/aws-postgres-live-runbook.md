@@ -1,5 +1,18 @@
 # AWS PostgreSQL 실계정 검증 절차
 
+## 2026-10-03 생성 실패·CloudFormation 롤백 드릴
+
+`tests.smoke_aws_postgres_rollback_drill --apply`는 임시 `dbdrill-5f443d7b` 앱의 전용 네트워크를 만든 뒤, 제품 `PostgresOperations.plan()`·`start()` 경로로 생성 요청을 기록했다. 드릴은 **시험 프로세스에서만** RDS가 없는 CloudFormation 템플릿을 주입했다. 템플릿에는 신호를 보내지 않는 WaitCondition과 그 핸들만 있으며, 실제 AWS `ValidateTemplate`을 통과했다. 신호 대기 시간 초과로 스택이 `ROLLBACK_COMPLETE`가 됐다. [AWS WaitCondition 동작](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-waitcondition.html)
+
+제품 생성 작업은 자동 재시도 없이 `needs_attention`으로 전환됐고, 읽기 전용 `reconcile()`은 앱 소유 스택의 `ROLLBACK_COMPLETE`를 메시지에 표시하며 DB 성공으로 오인하지 않았다. 드릴은 계정·태그·종료 보호·스택 리소스가 시험용 두 개뿐임·앱 DB와 수동 스냅샷 부재를 확인한 후에만 실패 스택의 종료 보호를 해제하고 삭제했다. 전용 네트워크도 정리했다. 후속 AWS 조회에서 임시 활성 스택·DB·수동 스냅샷은 없고, 기존 `onedeploy-demo-app`은 `available`·삭제 보호 켜짐, 기존 백업 스냅샷은 `available`이다. 실제 청구액은 확인하지 않았다.
+
+```sh
+python3 -m tests.smoke_aws_postgres_rollback_drill \
+  --apply --account <AWS_ACCOUNT_ID> --region ap-northeast-2
+```
+
+`--apply`가 없으면 읽기 전용 네트워크 사전 점검만 한다. 이 드릴은 AWS가 **접수한 생성 요청의 롤백 결과를 판별하고 시험 자원을 정리하는 경로**를 검증한다. 일반 제품 UI에서 실패 스택을 직접 정리하거나 같은 앱 ID로 안전하게 새 생성 시도를 시작하는 흐름은 아직 구현하지 않았다. 제품 작업 기록은 실패 후에도 남아 중복 생성을 차단한다.
+
 ## 2026-10-03 제품 UI에서 임시 RDS 폐기
 
 `tests.smoke_aws_postgres_create_browser --apply --retire-through-ui`로 임시 `dbdrill-e8de6dc2` 앱의 전용 네트워크와 RDS를 실제 Chrome에서 생성했다. 브라우저의 생성 완료 상태, 서버 기록, AWS 리소스 식별자를 대조한 뒤 **PostgreSQL RDS 폐기** 계획을 열었다. 잘못된 DB ID는 UI에서 거부됐고, 정확한 `onedeploy-dbdrill-e8de6dc2` 입력으로 폐기 작업을 접수했다. 제품 작업 기록은 최종 암호화 수동 스냅샷 검증 → DB 삭제 → RDS 스택 `DELETE_COMPLETE`까지 `succeeded`/`stack_deleted`로 끝났다. 새 Chrome 연결에서 폐기 완료와 생성 작업의 `retired` 표시, 기존 DB 사용 체크 해제를 확인했다.

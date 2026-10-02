@@ -130,6 +130,31 @@ class PostgresOperationsTests(unittest.TestCase):
         self.assertEqual(result['status'], 'needs_attention')
         inspect.assert_not_called()
 
+    def test_reconcile_reports_owned_rollback_without_treating_it_as_database(self):
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=self.quote), \
+                patch('onedeploy.postgres_operations.threading.Thread.start'):
+            planned = self.manager.plan(self.request)
+            self.manager.start('demo-app', planned['plan_id'])
+        self.manager.operations['demo-app']['status'] = 'needs_attention'
+        stack_id = ('arn:aws:cloudformation:ap-northeast-2:123456789012:'
+                    'stack/onedeploy-db-demo-app/stack-id')
+        def aws(_adapter, args, **_kwargs):
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': '123456789012'})
+            return json.dumps({'Stacks': [{'StackId': stack_id,
+                'StackStatus': 'ROLLBACK_COMPLETE', 'Tags': [
+                    {'Key': 'onedeploy-managed', 'Value': 'true'},
+                    {'Key': 'onedeploy-app', 'Value': 'demo-app'}]}]})
+        with patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True,
+                   side_effect=aws), \
+                patch('onedeploy.postgres_operations.AwsPostgresProvisioner.inspect_current') as inspect:
+            result = self.manager.reconcile('demo-app')
+        self.assertEqual(result['status'], 'needs_attention')
+        self.assertIn('ROLLBACK_COMPLETE', result['message'])
+        self.assertIsNone(result['database_id'])
+        inspect.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
