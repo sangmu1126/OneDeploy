@@ -1,5 +1,17 @@
 # AWS PostgreSQL 실계정 검증 절차
 
+## 2026-10-02 생성 중 작업 프로세스 종료·재시작 복구
+
+`tests.smoke_aws_postgres_restart_drill --apply`는 임시 `dbdrill-4f956cb2` 앱의 네트워크를 만들고 별도 프로세스에서 DB 생성 계획·요청을 기록했다. AWS CloudFormation이 앱 소유 `CREATE_IN_PROGRESS` 스택을 접수한 것을 확인한 직후 생성 작업 프로세스와 그 하위 명령을 종료했다. 새 `PostgresOperations` 인스턴스는 디스크의 `running` 기록을 `needs_attention`으로 바꾸고 생성 요청을 자동 반복하지 않았다. AWS 스택이 완료된 뒤 새 인스턴스의 `reconcile()`이 계정·스택 소유 태그·실제 RDS 구성을 읽기 전용으로 대조해 기록을 `succeeded`로 복구했다.
+
+이후 전용 임시 DB 정리기로 DB와 RDS 스택을 삭제하고 앱 네트워크 스택을 종료했다. 최종 조회에서 DB·두 스택은 이름으로 찾을 수 없고 앱 태그 보안 그룹·수동 스냅샷·관리형 비밀·마이그레이션 로그 그룹은 `[]`였다. 원본 `onedeploy-demo-app`은 `available`·삭제 보호 켜짐이다. Git 제외 로컬 기록은 `.onedeploy/postgres-restart-drills/dbdrill-4f956cb2/`에 남겼다. 이 드릴은 성공적으로 접수된 생성 요청의 **프로세스 중단 후 복구**를 검증하며, AWS 생성 실패나 롤백 경로 자체는 검증하지 않는다. 실제 청구액은 확인하지 않았다.
+
+```sh
+python3 -m tests.smoke_aws_postgres_restart_drill \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2
+# 기본은 읽기 전용 네트워크 사전 점검. 임시 RDS 생성·프로세스 중단·정리에는 --apply 추가.
+```
+
 ## 2026-10-02 신규 RDS부터 앱 배포까지 브라우저 통합 검증
 
 `tests.smoke_aws_postgres_create_browser --apply --deploy-app`로 임시 `dbdrill-bde4c148` 앱의 네트워크·PostgreSQL RDS를 실제 Chrome에서 계획·생성했다. RDS `CREATE_COMPLETE`와 서버 생성 기록을 대조한 뒤 같은 앱 ID의 기존 DB 조회로 연결 입력을 채웠다. 브라우저는 SQL 마이그레이션을 포함한 샘플 ZIP을 업로드하고 `PROBE_KEY` 입력 대기에서 값을 제공해 배포를 재개했다. 테스트용 고정 AI 도구 응답을 사용했으며 실제 모델 판단은 포함하지 않았다.
