@@ -1,5 +1,18 @@
 # AWS PostgreSQL 실계정 검증 절차
 
+## 2026-10-02 신규 RDS부터 앱 배포까지 브라우저 통합 검증
+
+`tests.smoke_aws_postgres_create_browser --apply --deploy-app`로 임시 `dbdrill-bde4c148` 앱의 네트워크·PostgreSQL RDS를 실제 Chrome에서 계획·생성했다. RDS `CREATE_COMPLETE`와 서버 생성 기록을 대조한 뒤 같은 앱 ID의 기존 DB 조회로 연결 입력을 채웠다. 브라우저는 SQL 마이그레이션을 포함한 샘플 ZIP을 업로드하고 `PROBE_KEY` 입력 대기에서 값을 제공해 배포를 재개했다. 테스트용 고정 AI 도구 응답을 사용했으며 실제 모델 판단은 포함하지 않았다.
+
+배포 작업 `b93653fa3bd94258`은 첫 시도에 성공했다. 작업 결과의 DB ID가 방금 생성한 RDS와 일치하고, 마이그레이션 작업 정리가 완료됐으며, 상태 API가 정상임을 확인했다. 공개 HTTPS 엔드포인트에서 고유 행의 쓰기·읽기·삭제를 확인했고 Chrome 작업 내역도 `배포 완료`를 표시했다. 종료 API로 ECS 서비스를 `INACTIVE`로 만들고 해당 ECR 이미지 태그 삭제를 확인한 뒤에만 DB 정리를 시작했다.
+
+임시 DB 삭제, RDS/네트워크 스택 삭제가 완료됐다. 후속 AWS 조회에서 임시 DB·스택·이미지 태그는 찾을 수 없고, 앱 태그 보안 그룹·수동 스냅샷·관리형 비밀·마이그레이션 로그 그룹 목록은 `[]`였다. 기존 `onedeploy-demo-app`은 `available`·삭제 보호 켜짐이다. 로컬 생성·배포·정리 기록은 Git에서 제외한 `.onedeploy/browser-db-drills/dbdrill-bde4c148/`에 남겼다. 실제 청구액은 확인하지 않았다.
+
+```sh
+python3 -m tests.smoke_aws_postgres_create_browser \
+  --apply --deploy-app --account <AWS_ACCOUNT_ID> --region ap-northeast-2
+```
+
 ## 2026-10-02 신규 RDS 브라우저 생성·임시 리소스 정리
 
 `tests.smoke_aws_postgres_create_browser --apply`로 임시 `dbdrill-9e74eba8` 앱의 네트워크와 새 PostgreSQL RDS를 실제 Chrome에서 계획·생성했다. 브라우저는 기본 VPC/서브넷 자동 입력, 두 개의 읽기 전용 계획과 별도 생성 버튼, RDS 생성 요청의 `running` 상태를 확인했다. 서버의 디스크 작업 기록과 AWS 스택 `CREATE_COMPLETE`를 대조했다. 최초 드라이버가 생성 완료까지 같은 Chrome 디버그 연결로 계속 폴링하다 30초 응답 제한에 걸렸지만, 같은 실행 중인 Chrome에 다시 연결해 UI의 `succeeded`와 기존 DB 연결 VPC/서브넷 자동 입력을 확인했다. 이후 드라이버는 생성 요청과 완료 재조회를 별도 실행 단계로 분리했다.

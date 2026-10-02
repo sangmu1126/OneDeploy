@@ -1,9 +1,9 @@
 // Exercise the real network -> PostgreSQL creation controls in headless Chrome.
 import assert from 'node:assert/strict';
 
-const [serverUrl, debuggingPort, application, stage = 'create'] = process.argv.slice(2);
+const [serverUrl, debuggingPort, application, stage = 'create', archive] = process.argv.slice(2);
 assert.match(application, /^dbdrill-[a-f0-9]{8}$/);
-assert.ok(['create', 'verify'].includes(stage));
+assert.ok(['create', 'verify', 'deploy', 'verify-deploy'].includes(stage));
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl);
@@ -60,11 +60,31 @@ try {
   await command('Runtime.enable');
   await command('Page.navigate', {url: serverUrl});
   await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨')"), 30000);
-  if (stage === 'verify') {
+  if (stage === 'verify' || stage === 'deploy') {
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('postgresOperation').click();return true;})()`);
     const completed = await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresOperationInfo').textContent;if(text.includes(' · needs_attention · '))throw Error(text);return text.includes(' · succeeded · ')&&e('postgresExisting').checked&&e('postgresVpc').value&&e('postgresSubnets').value.split(',').length>=2;})()"), 60000);
     assert.ok(completed);
     console.log('PASS: browser loaded completed RDS operation and filled existing-DB inputs');
+    if (stage === 'deploy') {
+      assert.ok(archive && process.env.ONEDEPLOY_BROWSER_PROBE_KEY);
+      await evaluate("(() => {const e=id=>document.getElementById(id);e('public').checked=true;e('postgresLookup').click();return true;})()");
+      await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresLookupInfo').textContent;if(text&&!text.includes('검증 완료'))throw Error(text);return text.includes('검증 완료')&&e('postgresVpc').value&&e('postgresSubnets').value;})()"), 60000);
+      const document = await command('DOM.getDocument');
+      const input = await command('DOM.querySelector', {nodeId: document.root.nodeId, selector: '#file'});
+      assert.ok(input.nodeId);
+      await command('DOM.setFileInputFiles', {nodeId: input.nodeId, files: [archive]});
+      await evaluate("document.getElementById('deploy').click();true");
+      const jobId = await until(() => evaluate("document.getElementById('jobId').textContent.match(/작업 ([a-f0-9]{16})/)?.[1] || ''"), 120000);
+      console.log('PASS: browser uploaded PostgreSQL app as job', jobId);
+      const names = await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return !e('inputSection').hidden&&!e('resume').disabled?[...e('envInputs').querySelectorAll('input')].map(x=>x.dataset.name):null;})()"), 180000);
+      assert.deepEqual(names, ['PROBE_KEY']);
+      await evaluate(`(() => {const input=document.querySelector('#envInputs input');input.value=${JSON.stringify(process.env.ONEDEPLOY_BROWSER_PROBE_KEY)};document.getElementById('resume').click();return true;})()`);
+      console.log('PASS: browser resumed deployment with the requested environment value');
+    }
+  } else if (stage === 'verify-deploy') {
+    const status = await until(() => evaluate(`(() => {const button=[...document.querySelectorAll('#history button')].find(b=>b.textContent.includes(${JSON.stringify(application)}));if(!button)return null;button.click();return document.getElementById('status').textContent;})()`), 60000);
+    assert.equal(status, '배포 완료');
+    console.log('PASS: browser history shows the completed AWS deployment');
   } else {
   await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('networkDiscover').click();return true;})()`);
   await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('networkDiscoverInfo').textContent;if(text&&!text.includes('서브넷을 채웠습니다'))throw Error(text);return text.includes('서브넷을 채웠습니다')&&e('networkVpc').value&&e('postgresPlanVpc').value===e('networkVpc').value&&e('postgresPlanSubnets').value.split(',').length>=2;})()"), 60000);

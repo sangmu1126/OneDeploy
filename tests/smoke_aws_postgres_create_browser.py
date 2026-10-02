@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import secrets
 import shutil
 import subprocess
 import threading
 import time
+import urllib.request
+import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -18,6 +22,8 @@ from onedeploy.aws_network import (AwsServiceNetworkProvisioner,
 from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
 from onedeploy.server import App, handler_for
 from tests.smoke_aws_network import retire_probe
+from tests.smoke_aws_postgres import probe
+from tests.smoke_aws_postgres_api import PostgresFixture, archive
 from tests.smoke_aws_postgres_cleanup import apply as cleanup_database
 
 CHROME = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
@@ -27,6 +33,8 @@ DRIVER = Path(__file__).with_name('browser_postgres_create_cdp.mjs')
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description='Verify browser-created PostgreSQL and retire its resources')
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--deploy-app', action='store_true',
+                        help='Also upload and deploy a PostgreSQL app through Chrome')
     parser.add_argument('--application', default='dbdrill-' + secrets.token_hex(4))
     parser.add_argument('--account', required=True)
     parser.add_argument('--region', required=True)
@@ -45,9 +53,13 @@ def main(argv=None) -> None:
         return
     if not CHROME.is_file():
         raise RuntimeError('Chrome executable not found')
+    if args.deploy_app:
+        subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
+                       check=True, capture_output=True, text=True, timeout=20)
     state = Path('.onedeploy') / 'browser-db-drills' / args.application
     state.mkdir(mode=0o700, parents=True, exist_ok=False)
     app = App(state / 'app', AISettings('fixture-only', 'scripted'),
+              PostgresFixture if args.deploy_app else None,
               aws_settings=settings, monitor_interval=0)
 
     class QuietHandler(handler_for(app)):
@@ -58,6 +70,20 @@ def main(argv=None) -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     profile = state / 'chrome-profile'
+    archive_path = state / 'probe.zip'
+    if args.deploy_app:
+        archive_path.write_bytes(archive())
+    probe_key = secrets.token_urlsafe(32)
+    record_id = uuid.uuid4().hex
+    base = f'http://127.0.0.1:{server.server_port}'
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def api(path: str, data: bytes | None = None) -> dict:
+        request = urllib.request.Request(base + path, data=data,
+                                         headers={'X-OneDeploy-Token': app.token})
+        with opener.open(request, timeout=30) as response:
+            return json.load(response)
+
     chrome_log = (state / 'chrome.log').open('w')
     chrome = subprocess.Popen([str(CHROME), '--headless=new', '--no-first-run',
         '--no-default-browser-check', '--disable-gpu', '--disable-background-networking',
@@ -108,6 +134,38 @@ def main(argv=None) -> None:
                 or app.jobs):
             raise AssertionError('브라우저 작업 기록과 AWS 결과가 일치하지 않습니다.')
         print('PASS: browser operations match the owned AWS network and RDS', flush=True)
+        if args.deploy_app:
+            environment = {**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key}
+            subprocess.run(['node', str(DRIVER), base + '/',
+                            port_file.read_text().splitlines()[0], args.application,
+                            'deploy', str(archive_path.resolve())],
+                           check=True, timeout=10 * 60, env=environment)
+            deadline = time.monotonic() + 2400
+            while time.monotonic() < deadline:
+                jobs = list(app.jobs.values())
+                if len(jobs) == 1 and jobs[0]['status'] in {
+                        'succeeded', 'failed', 'interrupted', 'cancelled'}:
+                    break
+                time.sleep(3)
+            jobs = list(app.jobs.values())
+            if len(jobs) != 1:
+                raise AssertionError('브라우저 배포 작업이 하나로 기록되지 않았습니다.')
+            job = jobs[0]
+            if (job['status'] != 'succeeded' or job.get('attempts') != 1
+                    or job.get('result', {}).get('database', {}).get('database_id')
+                    != created_db['database_id']
+                    or job.get('result', {}).get('migration', {}).get('cleanup_complete') is not True):
+                raise AssertionError('새로 만든 DB의 브라우저 배포·마이그레이션이 완료되지 않았습니다.')
+            if not api('/api/jobs/' + job['id'] + '/health').get('healthy'):
+                raise AssertionError('새 DB 배포의 상태 확인이 실패했습니다.')
+            endpoint = job['result']['url']
+            probe(endpoint, probe_key, record_id, 'POST')
+            probe(endpoint, probe_key, record_id, 'GET')
+            probe(endpoint, probe_key, record_id, 'DELETE')
+            subprocess.run(['node', str(DRIVER), base + '/',
+                            port_file.read_text().splitlines()[0], args.application,
+                            'verify-deploy'], check=True, timeout=120)
+            print('PASS: browser upload -> new RDS migration -> HTTP write/read/delete', flush=True)
     finally:
         try:
             deadline = time.monotonic() + 3900
@@ -118,8 +176,23 @@ def main(argv=None) -> None:
                 time.sleep(5)
             db_operation = app.postgres_operations.operations.get(args.application)
             network_operation = app.network_operations.operations.get(args.application)
+            jobs = list(app.jobs.values())
+            for job in jobs:
+                if (job.get('status') == 'succeeded'
+                        and job.get('deployment_state', 'active') in {'active', 'delete_failed'}):
+                    api('/api/jobs/' + job['id'] + '/retire', b'')
+                    deadline = time.monotonic() + 1200
+                    while time.monotonic() < deadline:
+                        retired = api('/api/jobs/' + job['id'])
+                        if retired.get('deployment_state') in {'deleted', 'delete_failed'}:
+                            break
+                        time.sleep(3)
+                    print('Temporary ECS retirement:', retired.get('deployment_state'), flush=True)
+            ecs_retired = all(job.get('status') != 'succeeded'
+                              or api('/api/jobs/' + job['id']).get('deployment_state') == 'deleted'
+                              for job in jobs)
             if db_operation and db_operation['status'] == 'succeeded' and network_operation \
-                    and network_operation['status'] == 'succeeded':
+                    and network_operation['status'] == 'succeeded' and ecs_retired:
                 db_request = PostgresRequest(args.application, args.account, args.region,
                     network['vpc_id'], tuple(network['subnet_ids']),
                     network_operation['service_security_group'])
