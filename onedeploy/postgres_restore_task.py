@@ -142,7 +142,7 @@ def verifier_run_request(plan: dict, definition_arn: str, attempt_id: str) -> di
 class RestoreVerifierRunner:
     def __init__(self, adapter: AwsExpressAdapter, plan: dict,
                  attempt_id: str, image_digest: str | None = None,
-                 marker_id: str | None = None):
+                 marker_id: str | None = None, checkpoint=None):
         if (adapter.settings.region != plan['region']
                 or adapter.settings.expected_account != plan['account']):
             raise AwsConfigurationError('검사 작업의 AWS 계정·리전이 계획과 다릅니다.')
@@ -154,6 +154,7 @@ class RestoreVerifierRunner:
                            if image_digest else None)
         self.image_digest = image_digest
         self.marker_id = marker_id
+        self.checkpoint = checkpoint or (lambda _stage, **_fields: None)
         self.tag = 'restore-verify-' + attempt_id
         self.definition_arn: str | None = None
         self.task_arn: str | None = None
@@ -169,6 +170,7 @@ class RestoreVerifierRunner:
                 or any(item.get('imageTag') == self.tag for item in images)):
             raise AwsConfigurationError('검사 이미지 태그가 이미 있거나 목록이 불완전합니다.')
         image = self.plan['repository'] + ':' + self.tag
+        self.checkpoint('building', image_tag=self.tag)
         with tempfile.TemporaryDirectory(prefix='onedeploy-restore-verify-build-') as directory:
             context = stage_restore_verifier_context(bundle, Path(directory) / 'context')
             self.adapter.command(['docker', 'build', '--platform', 'linux/amd64',
@@ -186,7 +188,9 @@ class RestoreVerifierRunner:
                                            self.plan['repository'].split('/')[0]],
                                  stdin=password, private=True)
             self.adapter.command(docker + ['push', image], timeout=600)
+        self.checkpoint('image_pushed', image_tag=self.tag)
         self.verify_image()
+        self.checkpoint('image_verified', image_digest=self.image_digest)
         return image
 
     def verify_image(self) -> None:
@@ -209,6 +213,8 @@ class RestoreVerifierRunner:
 
     def register(self) -> str:
         self.verify_image()
+        self.checkpoint('registering', image_digest=self.image_digest,
+                        task_family=self.definition['family'])
         with tempfile.NamedTemporaryFile('w', prefix='onedeploy-restore-verify-',
                                          suffix='.json', encoding='utf-8') as file:
             json.dump(self.definition, file)
@@ -223,12 +229,14 @@ class RestoreVerifierRunner:
                 or not arn.removeprefix(prefix).isdigit()):
             raise AwsConfigurationError('검사 태스크 정의 등록 결과가 불확실합니다.')
         self.definition_arn = arn
+        self.checkpoint('registered', task_definition_arn=arn)
         return arn
 
     def launch(self) -> str:
         if self.definition_arn is None:
             raise AwsConfigurationError('검사 태스크 정의를 먼저 등록해야 합니다.')
         payload = verifier_run_request(self.plan, self.definition_arn, self.attempt_id)
+        self.checkpoint('launching', task_definition_arn=self.definition_arn)
         with tempfile.NamedTemporaryFile('w', prefix='onedeploy-restore-run-',
                                          suffix='.json', encoding='utf-8') as file:
             json.dump(payload, file)
@@ -244,6 +252,7 @@ class RestoreVerifierRunner:
                 or not re.fullmatch(r'[a-f0-9]{32}', arn.removeprefix(prefix))):
             raise AwsConfigurationError('검사 태스크 시작 결과가 불확실합니다. 태스크 정의를 재조회하세요.')
         self.task_arn = arn
+        self.checkpoint('launched', task_arn=arn)
         return arn
 
     def inspect(self, task_arn: str, definition_arn: str) -> dict:
@@ -340,7 +349,10 @@ class RestoreVerifierRunner:
                 raise AwsConfigurationError('검사 태스크 상태가 불확실합니다.')
             try:
                 if status == 'succeeded':
-                    return self.inspect_result(task_arn, definition_arn)
+                    result = self.inspect_result(task_arn, definition_arn)
+                    self.checkpoint('verified', task_arn=task_arn,
+                                    log_stream=result['log_stream'])
+                    return result
             except AwsConfigurationError:
                 if attempt == 11:
                     raise
@@ -359,12 +371,14 @@ class RestoreVerifierRunner:
         if (definition.get('taskDefinitionArn') != self.definition_arn
                 or definition.get('status') != 'INACTIVE'):
             raise AwsConfigurationError('검사 태스크 정의 정리를 확인하지 못했습니다.')
+        self.checkpoint('definition_retired', task_definition_arn=self.definition_arn)
         removed = json.loads(self.adapter.aws(['ecr', 'batch-delete-image',
             '--repository-name', 'onedeploy-managed', '--image-ids',
             'imageTag=' + self.tag], private=True, quiet=True))
         if (removed.get('failures') or not any(item.get('imageTag') == self.tag
                                              for item in removed.get('imageIds', []))):
             raise AwsConfigurationError('검사 이미지 태그 정리를 확인하지 못했습니다.')
+        self.checkpoint('cleaned', image_tag=self.tag)
         return {'task_definition_arn': self.definition_arn,
                 'image_tag': self.tag, 'status': 'cleaned'}
 

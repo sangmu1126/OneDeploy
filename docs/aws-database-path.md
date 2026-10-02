@@ -100,7 +100,7 @@ UI의 **기존 RDS 수동 스냅샷**은 `POST /api/applications/<앱 ID>/snapsh
 
 `postgres_restore_credentials`는 원본 RDS의 소유권·관리형 비밀 ARN과 소유 스냅샷 시각을 확인하고, 비밀 값 없이 Secrets Manager 버전 메타데이터만 읽는다. `AWSCURRENT`가 정확히 하나이고 버전 생성 시각이 스냅샷보다 앞설 때만 [ECS의 버전 ID 고정 비밀 참조](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html)를 반환한다. 서울 리전의 보존 스냅샷에서 읽기 전용으로 통과했다. 이 시각 비교는 비밀번호 일치의 증명이 아니므로 실제 인증·SQL 성공이 복원 검증의 필수 조건이다.
 
-`postgres_restore_task`의 사전 계획은 검사 연결이 열린 보안 그룹 쌍, 소유 태그를 가진 `available` 복원 DB와 엔드포인트, 원본 RDS 스택의 제한된 ECS 실행 역할, 고정 비밀 버전, 이미지·비밀 다운로드가 가능한 공개 서브넷, 14일 보존 로그 그룹을 대조한다. 실행기는 검증 manifest만 담은 이미지를 빌드해 ECR digest를 확인하고, 그 digest와 비밀 버전을 고정한 단일 Fargate 작업을 실행한다. 종료 코드 0과 CloudWatch의 SQL 성공 메시지를 모두 확인해야 통과한다. 성공 시에만 작업 정의와 이미지 태그를 정리한다. 이 경로는 아직 단위 테스트만 통과했으며 실제 복원 DB·ECS 결과는 없다. 중단 후 재실행 방지를 위한 영속 작업 기록도 아직 없다.
+`postgres_restore_task`의 사전 계획은 검사 연결이 열린 보안 그룹 쌍, 소유 태그를 가진 `available` 복원 DB와 엔드포인트, 원본 RDS 스택의 제한된 ECS 실행 역할, 고정 비밀 버전, 이미지·비밀 다운로드가 가능한 공개 서브넷, 14일 보존 로그 그룹을 대조한다. 실행기는 검증 manifest만 담은 이미지를 빌드해 ECR digest를 확인하고, 그 digest와 비밀 버전을 고정한 단일 Fargate 작업을 실행한다. 종료 코드 0과 CloudWatch의 SQL 성공 메시지를 모두 확인해야 통과한다. 성공 시에만 작업 정의와 이미지 태그를 정리한다. `postgres_restore_task_operations`는 대상당 한 번만 시작하도록 로컬 기록을 AWS 변경 전에 동기화하고 단계마다 이미지 digest·정의 ARN·작업 ARN을 저장한다. 중단 후 `--reconcile`은 STS 계정과 AWS 자원·기록된 SQL 결과를 읽기 전용으로 재확인한다. 작업 ARN을 받기 전에 실행 응답이 끊기면 자동 재시작하지 않고 수동 조사를 요구한다. 실제 복원 DB·ECS 검사 결과는 아직 없다.
 
 마이그레이션 실행기의 로컬 구성도 준비했다. 앱의 `migrations/0001_name.sql` 형식 SQL 파일을
 최대 32개·파일당 64 KiB로 검증하고, 파일명과 SHA-256을 고정한 별도 Docker 빌드 문맥을 만든다.
