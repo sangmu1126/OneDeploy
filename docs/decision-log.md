@@ -1,5 +1,11 @@
 # 의사결정 기록
 
+## 2026-10-02 — 실제 RDS 복원·ECS SQL 검사·임시 리소스 정리
+
+- 서울 리전에서 보존한 `onedeploy-demo-app-backup-20261002`를 별도 `onedeploy-restore-demo-app-drill-20261002` 인스턴스로 복원했다. 생성 기록과 소유 태그·격리 그룹을 재확인했고, 생성 도중 AWS가 반환한 `configuring-enhanced-monitoring`은 진행 상태로 처리했다 ([RDS 상태 목록](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/accessing-monitoring.html)).
+- 임시 검사 그룹으로만 DB 5432를 열고 고정 비밀 버전·이미지 digest를 쓰는 단일 Fargate 작업에서 마이그레이션 원장 1건의 이름·SHA-256을 읽기 전용으로 대조했다. 종료 코드 0과 CloudWatch 성공 로그가 일치했고, 이미지 태그와 태스크 정의 정리를 읽기 전용으로 재확인했다. 이 스냅샷에는 사전 데이터 표식이 없어 애플리케이션 행 복원까지 증명하지는 않는다.
+- 검사 연결을 닫고 임시 RDS 인스턴스 삭제 완료를 기다린 뒤 격리 그룹을 제거했다. `--finalize`로 SQL 성공과 임시 DB·그룹 부재를 확인했다. 원본 RDS는 `available`·삭제 보호 켜짐이고 암호화된 수동 스냅샷은 `available`로 보존됐다. 실제 청구 금액은 확인하지 않았다.
+
 ## 2026-10-02 — 복원 DB 시작의 영속 기록
 
 - 복원 대상당 로컬 작업 기록을 AWS 변경 전에 동기화한다. 격리 그룹 생성과 RDS 복원 요청의 전후 단계를 저장하고 같은 대상의 두 번째 시작을 차단한다.

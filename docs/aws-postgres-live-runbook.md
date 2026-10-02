@@ -1,5 +1,23 @@
 # AWS PostgreSQL 실계정 검증 절차
 
+## 2026-10-02 복원 드릴 완료
+
+서울 리전에서 `onedeploy-demo-app-backup-20261002`를 임시 DB `onedeploy-restore-demo-app-drill-20261002`로 복원했다. 로컬 작업 기록을 먼저 만들고 격리 그룹 `sg-0613f406d2cb9daf7`과 DB ARN을 저장했다. 생성 도중 `configuring-enhanced-monitoring`을 거쳐 `available`이 됐고, 소유 태그·비공개 연결·구성을 재확인했다.
+
+임시 검사 그룹 `sg-0510cff6da1403d80`으로만 DB 5432를 열었다. 고정 비밀 버전과 ECR 이미지 digest를 사용한 Fargate 검사 태스크가 기존 마이그레이션 원장 1건의 이름·SHA-256을 `BEGIN READ ONLY`에서 대조했다. 태스크 종료 코드 0과 CloudWatch의 SQL 성공 메시지를 함께 확인했다. `--reconcile`에서 검사 이미지 태그가 없고 태스크 정의가 비활성 상태인 것도 재확인했다. 이 스냅샷에는 사전 데이터 표식이 없어 애플리케이션 행 데이터 비교는 수행하지 않았다.
+
+검사 연결을 닫고 임시 DB 삭제 완료를 기다린 뒤 격리 그룹을 삭제했다. `--finalize`는 SQL 성공과 ECS·RDS·임시 그룹 정리 상태를 읽기 전용으로 대조하고 작업 기록을 `cleaned`로 마감했다. 원본 `onedeploy-demo-app`은 `available`·삭제 보호 켜짐이고 수동 스냅샷은 `available`·암호화 상태로 남아 있다. 임시 DB·그룹은 남지 않았다. 실제 청구 금액은 확인하지 않았다.
+
+```sh
+python3 -m onedeploy.postgres_restore_drill_operations \
+  --finalize --state-dir .onedeploy/restore-drill \
+  --verifier-state-dir .onedeploy/restore-verification \
+  --application demo-app --snapshot-id onedeploy-demo-app-backup-20261002 \
+  --target-id onedeploy-restore-demo-app-drill-20261002 \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --vpc-id <VPC_ID> \
+  --service-security-group <APP_SERVICE_GROUP_ID>
+```
+
 ## 2026-10-01 기존 DB 백업 상태 확인
 
 서버 UI에서 앱 ID `demo-app`과 AWS ECS Express를 선택한 뒤 **기존 OneDeploy PostgreSQL RDS 사용** → **백업·보호 상태 확인**을 누른다. 인증 API `GET /api/applications/demo-app/postgres/backups`는 기존 DB 소유권 검사를 먼저 수행한다. 실제 서울 리전의 읽기 전용 조회에서 자동 백업 7일, 삭제 보호 켜짐, CloudFormation 스택 삭제 시 DB 보존, 수동 스냅샷 0개를 확인했다. UI 호출 자체의 실제 Chrome 검증과 스냅샷 생성·복원은 아직 수행하지 않았다.
@@ -16,9 +34,9 @@
 
 2026-10-02 같은 VPC에서 임시 대상 `onedeploy-restore-demo-app-netprobe-69d47d34`의 복원 전용 그룹 `sg-077ceef5e7b19bcf6`을 생성했다. 앱·대상 태그와 빈 인바운드·아웃바운드 규칙을 확인한 뒤 네트워크 인터페이스·보안 그룹 참조가 없을 때 그룹을 삭제하고 이름 조회로 삭제를 검증했다. 원본 RDS와 스냅샷은 그대로 보존했다. 실제 복원 DB는 만들지 않았다.
 
-복원 인스턴스의 코드 경로는 다음 순서다. 아래 복원 DB 명령은 실제 리소스와 비용을 만들 수 있으며 이 경로의 실계정 검증은 아직 하지 않았다. DB 생성 후 `--inspect`로 조회하고, 데이터 확인 후 `--delete`로 복원 DB 삭제를 요청한다. 삭제 완료를 AWS에서 확인한 다음 보안 그룹을 정리한다. 원본 스냅샷은 보존한다.
+복원 인스턴스의 코드 경로는 다음 순서다. 아래 복원 DB 명령은 실제 리소스와 비용을 만들 수 있다. DB 생성 후 `--inspect`로 조회하고, 데이터 확인 후 `--delete`로 복원 DB 삭제를 요청한다. 삭제 완료를 AWS에서 확인한 다음 보안 그룹을 정리한다. 이 순서는 위 실계정 복원 드릴에서 통과했고 원본 스냅샷은 보존했다.
 
-복원 시작은 `onedeploy.postgres_restore_drill_operations`를 사용한다. 기본 실행은 스냅샷·대상·격리 그룹의 읽기 전용 계획이고 `--apply`만 그룹과 과금 가능한 RDS 인스턴스를 만든다. 이 CLI는 `.onedeploy/restore-drill`에 로컬 기록을 먼저 저장한다. 응답이 불확실하면 같은 대상에 `--apply`를 반복하지 않고 `--reconcile`로 그룹·DB를 읽기 전용 재확인한다. 이 실행 경로는 단위 테스트만 통과했고 실계정 복원은 아직 하지 않았다.
+복원 시작은 `onedeploy.postgres_restore_drill_operations`를 사용한다. 기본 실행은 스냅샷·대상·격리 그룹의 읽기 전용 계획이고 `--apply`만 그룹과 과금 가능한 RDS 인스턴스를 만든다. 이 CLI는 `.onedeploy/restore-drill`에 로컬 기록을 먼저 저장한다. 응답이 불확실하면 같은 대상에 `--apply`를 반복하지 않고 `--reconcile`로 그룹·DB를 읽기 전용 재확인한다. 이 실행 경로는 위 실계정 복원에서 통과했다.
 
 2026-10-02 서울 리전에서 이 새 CLI의 기본 읽기 전용 계획을 실행했다. 보존 스냅샷과 원본 DB의 계정·VPC·구성이 일치하고 대상 ID와 대상 그룹 이름이 비어 있음을 확인했다. 계획 조회는 그룹·DB를 만들지 않았으며 `--apply`는 실행하지 않았다.
 
@@ -32,11 +50,11 @@ python3 -m onedeploy.postgres_restore_drill_operations \
 # 생성할 때만 --apply; 생성 결과 재확인은 --reconcile
 ```
 
-데이터 검사 작업의 네트워크는 DB가 `available`이고 아래 `--inspect`가 통과한 뒤 `onedeploy.postgres_restore_probe_network`에 같은 앱·대상·계정·리전·VPC와 `--db-group-id <RESTORE_GROUP_ID>`를 지정해 준비한다. 기본 실행은 읽기 전용이고 `--apply`로 연결을 연다. 작업 종료 후 `--close <PROBE_GROUP_ID>`로 닫고 DB `--inspect`를 다시 실행한다. 이 연결 절차만 검증됐으며, 실제 읽기 전용 SQL 작업은 아직 없다.
+데이터 검사 작업의 네트워크는 DB가 `available`이고 아래 `--inspect`가 통과한 뒤 `onedeploy.postgres_restore_probe_network`에 같은 앱·대상·계정·리전·VPC와 `--db-group-id <RESTORE_GROUP_ID>`를 지정해 준비한다. 기본 실행은 읽기 전용이고 `--apply`로 연결을 연다. 작업 종료 후 `--close <PROBE_GROUP_ID>`로 닫는다. 실제 복원 DB의 읽기 전용 SQL 검사에서 이 연결·해제를 통과했다.
 
 SQL 검사 이미지 문맥은 `stage_restore_verifier_context`로 준비한다. 기존 마이그레이션 manifest만 포함해 복원 DB 원장의 이름·SHA-256과 선택적 검사 행을 `BEGIN READ ONLY`에서 대조한다. Python·Node 단위 테스트는 통과했다. 이 단계만으로 복원 데이터 검증이 완료됐다고 기록하지 않는다.
 
-이후 `onedeploy.postgres_restore_task`의 읽기 전용 사전 계획과 `RestoreVerifierRunner` 실행 코드가 추가됐다. 이미지 digest·고정 비밀 버전·검사 그룹을 task definition에 넣고, 소유 ECS 작업 종료 코드와 CloudWatch SQL 성공 로그를 함께 확인한다. `onedeploy.postgres_restore_task_operations`는 대상별 로컬 기록을 AWS 변경 전에 만들고 실행 단계를 저장한다. 같은 대상의 중복 시작을 차단하며 중단 후 `--reconcile`은 STS·ECR·ECS·CloudWatch를 읽기 전용으로 조회한다. 작업 ARN 없이 시작 요청이 불확실하면 자동 재실행하지 않는다. 이 경로는 단위 테스트만 통과했으며 실제 복원 DB와 ECS 작업은 만들지 않았다.
+이후 `onedeploy.postgres_restore_task`의 읽기 전용 사전 계획과 `RestoreVerifierRunner` 실행 코드가 추가됐다. 이미지 digest·고정 비밀 버전·검사 그룹을 task definition에 넣고, 소유 ECS 작업 종료 코드와 CloudWatch SQL 성공 로그를 함께 확인한다. `onedeploy.postgres_restore_task_operations`는 대상별 로컬 기록을 AWS 변경 전에 만들고 실행 단계를 저장한다. 같은 대상의 중복 시작을 차단하며 중단 후 `--reconcile`은 STS·ECR·ECS·CloudWatch를 읽기 전용으로 조회한다. 작업 ARN 없이 시작 요청이 불확실하면 자동 재실행하지 않는다. 실제 복원 DB의 ECS 검사와 정리 재확인을 통과했다.
 
 복원 DB와 검사용 네트워크를 준비한 후에만 다음과 같이 실행한다. `--apply`는 이미지 업로드와 과금 가능한 ECS 작업을 시작한다. 상태 디렉터리는 `.onedeploy/` 아래에 두어 Git 추적에서 제외한다. 같은 대상의 재시도는 기록을 지워 강행하지 않고 먼저 `--reconcile`로 조사한다.
 
@@ -55,7 +73,7 @@ python3 -m onedeploy.postgres_restore_task_operations \
   --account <AWS_ACCOUNT_ID> --region ap-northeast-2
 ```
 
-2026-10-02 `onedeploy.postgres_restore_credentials`를 서울 리전의 원본 RDS·보존 스냅샷·관리형 비밀 메타데이터에 읽기 전용으로 실행했다. 현재 `AWSCURRENT` 버전의 생성 시각은 2026-09-30 15:47:53 UTC이고 스냅샷 생성 시각은 2026-10-01 15:10:08 UTC였다. 계획은 해당 버전 ID를 ECS 비밀 참조에 고정했으며 비밀번호 값은 조회하지 않았다. 실제 복원 DB 연결 성공은 아직 확인하지 않았다.
+2026-10-02 `onedeploy.postgres_restore_credentials`를 서울 리전의 원본 RDS·보존 스냅샷·관리형 비밀 메타데이터에 읽기 전용으로 실행했다. 현재 `AWSCURRENT` 버전의 생성 시각은 2026-09-30 15:47:53 UTC이고 스냅샷 생성 시각은 2026-10-01 15:10:08 UTC였다. 계획은 해당 버전 ID를 ECS 비밀 참조에 고정했으며 비밀번호 값은 조회하지 않았다. 이후 실제 복원 DB의 ECS 검사에서 인증과 SQL 조회가 성공했다.
 
 ```sh
 python3 -m onedeploy.postgres_restore_credentials \

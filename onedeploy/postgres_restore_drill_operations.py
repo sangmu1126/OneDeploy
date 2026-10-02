@@ -14,6 +14,8 @@ from onedeploy.aws import AwsConfigurationError, AwsSettings
 from onedeploy.postgres_restore import plan_restore_drill
 from onedeploy.postgres_restore_instance import RestoreInstance
 from onedeploy.postgres_restore_network import RestoreNetworkRequest, RestoreSecurityGroup
+from onedeploy.postgres_restore_probe_network import RestoreProbeNetwork
+from onedeploy.postgres_restore_task_operations import RestoreVerificationOperations
 
 
 class RestoreDrillOperations:
@@ -68,7 +70,7 @@ class RestoreDrillOperations:
                 or record.get('region') != req.region
                 or record.get('vpc_id') != req.vpc_id
                 or record.get('status') not in {'starting', 'restoring', 'ready_for_probe',
-                                                'needs_attention'}):
+                                                'needs_attention', 'cleaned'}):
             raise ValueError('복원 작업 기록의 소유권·상태가 예상과 다릅니다.')
         return record
 
@@ -162,6 +164,8 @@ class RestoreDrillOperations:
     def reconcile(self) -> dict:
         with self._exclusive():
             record = self._read()
+            if record['status'] == 'cleaned':
+                return self._public(record)
             self.network._account()
             try:
                 group = self.network.inspect()
@@ -190,12 +194,45 @@ class RestoreDrillOperations:
                 if database['status'] == 'available':
                     record['status'] = 'ready_for_probe'
                     record['message'] = '복원 DB가 준비됐습니다. SQL 데이터 검사는 아직 필요합니다.'
-                elif database['status'] == 'creating':
+                elif database['status'] in {'creating', 'configuring-enhanced-monitoring'}:
                     record['status'] = 'restoring'
-                    record['message'] = '복원 DB가 생성 중입니다.'
+                    record['message'] = '복원 DB가 생성·설정 중입니다.'
                 else:
                     record['status'] = 'needs_attention'
                     record['message'] = '복원 DB 상태를 수동으로 조사하세요.'
+            self._replace(record)
+            return self._public(record)
+
+    def finalize(self, verifier_state_dir: Path) -> dict:
+        """Record cleanup only after read-only checks of the SQL result and AWS absence."""
+        with self._exclusive():
+            record = self._read()
+            group_id = record.get('db_group_id')
+            if not group_id or not record.get('target_arn'):
+                raise AwsConfigurationError('복원 DB와 격리 그룹 생성 기록이 필요합니다.')
+            verification = RestoreVerificationOperations(
+                verifier_state_dir, self.settings).reconcile(self.request.target_id)
+            if (verification['status'] != 'succeeded'
+                    or verification['sql_verified'] is not True
+                    or verification['cleanup_complete'] is not True):
+                raise AwsConfigurationError('SQL 검사와 ECS 작업 정리가 먼저 확인돼야 합니다.')
+            self.network._account()
+            response = json.loads(self.network.adapter.aws(
+                ['rds', 'describe-db-instances'], private=True, quiet=True))
+            databases = response.get('DBInstances')
+            if (response.get('Marker') or not isinstance(databases, list)
+                    or any(not isinstance(db, dict) for db in databases)
+                    or any(db.get('DBInstanceIdentifier') == self.request.target_id
+                           for db in databases)):
+                raise AwsConfigurationError('복원 DB 삭제 완료를 확인하지 못했습니다.')
+            if self.network._matching_groups():
+                raise AwsConfigurationError('복원 DB 격리 그룹이 아직 남아 있습니다.')
+            if RestoreProbeNetwork(self.request, group_id)._existing():
+                raise AwsConfigurationError('복원 검사 그룹이 아직 남아 있습니다.')
+            record['status'] = 'cleaned'
+            record['stage'] = 'cleaned'
+            record['database_status'] = 'deleted'
+            record['message'] = 'SQL 검사와 임시 AWS 리소스 정리를 확인했습니다.'
             self._replace(record)
             return self._public(record)
 
@@ -206,6 +243,7 @@ def main(argv=None) -> None:
     mode.add_argument('--apply', action='store_true', help='Create billable restore resources')
     mode.add_argument('--reconcile', action='store_true', help='Read-only AWS recovery')
     mode.add_argument('--record', action='store_true', help='Read local operation record')
+    mode.add_argument('--finalize', action='store_true', help='Verify SQL and cleanup, then close record')
     parser.add_argument('--state-dir', type=Path, required=True)
     parser.add_argument('--application', required=True)
     parser.add_argument('--snapshot-id', required=True)
@@ -214,14 +252,18 @@ def main(argv=None) -> None:
     parser.add_argument('--region', required=True)
     parser.add_argument('--vpc-id', required=True)
     parser.add_argument('--service-security-group')
+    parser.add_argument('--verifier-state-dir', type=Path)
     args = parser.parse_args(argv)
     settings = AwsSettings(args.region, expected_account=args.account,
                            account_pin_required=True,
                            service_security_group=args.service_security_group)
     operations = RestoreDrillOperations(args.state_dir, args.application,
         args.snapshot_id, args.target_id, settings, args.vpc_id)
+    if args.finalize and args.verifier_state_dir is None:
+        parser.error('--finalize에는 --verifier-state-dir이 필요합니다.')
     result = (operations.start() if args.apply else operations.reconcile()
-              if args.reconcile else operations.get() if args.record else operations.plan())
+              if args.reconcile else operations.get() if args.record else
+              operations.finalize(args.verifier_state_dir) if args.finalize else operations.plan())
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

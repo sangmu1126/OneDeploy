@@ -102,6 +102,61 @@ class RestoreDrillOperationTests(unittest.TestCase):
             with self.assertRaisesRegex(AwsConfigurationError, 'ID'):
                 self.operation.reconcile()
 
+    def test_enhanced_monitoring_configuration_is_still_restoring(self):
+        with patch.object(self.operation, 'plan', return_value={'vpc_id': 'vpc-12345678'}), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreSecurityGroup.create',
+                      return_value={'group_id': GROUP}), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreInstance.create',
+                      return_value={'target_arn': ARN, 'status': 'creating'}):
+            self.operation.start()
+        with patch('onedeploy.postgres_restore_drill_operations.RestoreSecurityGroup._account'), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreSecurityGroup.inspect',
+                      return_value={'group_id': GROUP}), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreInstance.inspect',
+                      return_value={'target_arn': ARN,
+                                    'status': 'configuring-enhanced-monitoring'}):
+            result = self.operation.reconcile()
+        self.assertEqual(result['status'], 'restoring')
+        self.assertEqual(result['database_status'], 'configuring-enhanced-monitoring')
+
+    def test_finalize_requires_verified_sql_and_absent_temporary_resources(self):
+        with patch.object(self.operation, 'plan', return_value={'vpc_id': 'vpc-12345678'}), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreSecurityGroup.create',
+                      return_value={'group_id': GROUP}), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreInstance.create',
+                      return_value={'target_arn': ARN, 'status': 'creating'}):
+            self.operation.start()
+        verified = {'status': 'succeeded', 'sql_verified': True, 'cleanup_complete': True}
+        with patch('onedeploy.postgres_restore_drill_operations.RestoreVerificationOperations.reconcile',
+                   return_value=verified), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreSecurityGroup._account'), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreSecurityGroup._matching_groups',
+                      return_value=[]), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreProbeNetwork._existing',
+                      return_value=[]), \
+                patch.object(self.operation.network.adapter, 'aws',
+                             return_value='{"DBInstances": []}'):
+            result = self.operation.finalize(self.root / 'verifier')
+        self.assertEqual(result['status'], 'cleaned')
+        self.assertEqual(self.operation.get()['stage'], 'cleaned')
+
+    def test_finalize_refuses_to_close_record_while_db_exists(self):
+        with patch.object(self.operation, 'plan', return_value={'vpc_id': 'vpc-12345678'}), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreSecurityGroup.create',
+                      return_value={'group_id': GROUP}), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreInstance.create',
+                      return_value={'target_arn': ARN, 'status': 'creating'}):
+            self.operation.start()
+        verified = {'status': 'succeeded', 'sql_verified': True, 'cleanup_complete': True}
+        with patch('onedeploy.postgres_restore_drill_operations.RestoreVerificationOperations.reconcile',
+                   return_value=verified), \
+                patch('onedeploy.postgres_restore_drill_operations.RestoreSecurityGroup._account'), \
+                patch.object(self.operation.network.adapter, 'aws',
+                             return_value='{"DBInstances": [{"DBInstanceIdentifier": "' + TARGET + '"}]}'):
+            with self.assertRaisesRegex(AwsConfigurationError, '삭제 완료'):
+                self.operation.finalize(self.root / 'verifier')
+        self.assertNotEqual(self.operation.get()['status'], 'cleaned')
+
 
 if __name__ == '__main__':
     unittest.main()
