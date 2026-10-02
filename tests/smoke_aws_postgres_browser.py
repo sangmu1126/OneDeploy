@@ -111,8 +111,10 @@ def main(argv=None):
                 raise AssertionError('Read-only browser check created a deployment job')
             if app.snapshot_operations.operations:
                 raise AssertionError('Read-only browser check recorded a snapshot create operation')
+            if app.postgres_retirement_operations.operations:
+                raise AssertionError('Read-only browser check recorded a database retirement operation')
             retired = True
-            print('PASS: real browser verified RDS, backup status, and snapshot plan without creation', flush=True)
+            print('PASS: real browser verified RDS, backup, snapshot and retirement plans without mutation', flush=True)
             return
         if args.snapshot_apply:
             operation = app.snapshot_operations.get(args.application, snapshot_id)

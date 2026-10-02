@@ -68,6 +68,15 @@ try {
     const planned = await until(() => evaluate(`(() => {const e = id => document.getElementById(id); const text = e('snapshotPlanInfo').textContent; if (text && !text.includes('이 조회는 스냅샷을 생성하지 않았습니다')) throw Error(text); return text.includes(${JSON.stringify('onedeploy-demo-app-' + snapshotName)}) && text.includes('저장 비용') && !e('snapshotCreate').hidden;})()`), 60000);
     assert.ok(planned);
     console.log('PASS: browser showed a read-only snapshot plan and separate create action');
+    if (mode === 'read-only') {
+      await evaluate("document.getElementById('retirementPlan').click(); true");
+      const retirement = await until(() => evaluate("(() => {const e = id => document.getElementById(id); const text = e('retirementPlanInfo').textContent; if (text && !text.includes('DB ID를 입력해야')) throw Error(text); return text.includes('onedeploy-demo-app') && text.includes('삭제 보호 켜짐') && !e('retirementStart').hidden;})()"), 60000);
+      assert.ok(retirement);
+      await evaluate("(() => {const e = id => document.getElementById(id); e('retirementConfirm').value = 'wrong-db'; e('retirementStart').click(); return true;})()");
+      const refused = await evaluate("document.getElementById('retirementOperationInfo').textContent.includes('DB ID를 정확히 입력하세요')");
+      assert.ok(refused);
+      console.log('PASS: browser showed read-only retirement plan and rejected wrong DB ID');
+    }
     if (mode === 'snapshot-apply') {
       await evaluate("document.getElementById('snapshotCreate').click(); true");
       await until(() => evaluate("document.getElementById('snapshotOperationInfo').textContent.includes(' · running · ')"), 60000);

@@ -289,5 +289,8 @@ RDS 스택 `DELETE_COMPLETE`, 삭제 후 스냅샷 `available` 재확인을 통�
 마이그레이션 로그 그룹은 목록에 없고, RDS·네트워크 스택은 모두
 `DELETE_COMPLETE`였다. 기존 `onedeploy-demo-app`은
 `available`·삭제 보호 켜짐이며 `onedeploy-demo-app-backup-20261002`는 암호화된
-`available`로 남았다. 실제 브라우저 폐기 클릭과 강제 중단 시험은 아직 하지 않았다.
+`available`로 남았다. 실제 Chrome에서는 보존 `demo-app`의 읽기 전용 폐기 계획에
+계정·DB ID·삭제 보호와 별도 실행 버튼이 표시됐고, 잘못된 DB ID를 입력하면
+실행하지 않음을 확인했다. 서버의 폐기 작업 기록도 비어 있었다. 유효 DB ID로
+브라우저에서 실제 폐기하는 흐름과 강제 중단 시험은 아직 하지 않았다.
 이 임시 RDS와 스냅샷의 실제 청구액은 확인하지 않았다.
