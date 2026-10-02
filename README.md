@@ -2,7 +2,8 @@
 
 **앱을 올리고 배포를 요청하면, AI가 필요한 설정·코드를 준비하고 실제 실행까지 진행하는 배포 도구.**
 
-현재 구현·실계정 검증·남은 작업은 [프로젝트 현황](docs/status.md)에 정리했습니다.
+현재 구현·실계정 검증·남은 작업은 [프로젝트 현황](docs/status.md)에,
+문서와 커밋 기록의 안내는 [개발 기록](docs/development-log.md)에 정리했습니다.
 
 현재 구현은 Node.js 앱 또는 기존 Dockerfile을 가진 웹 앱 → Local Docker, Google Cloud Run 또는 AWS ECS Express Mode 경로입니다. UI에서 앱 폴더 또는 ZIP·앱 ID·자동/수동 배포 대상을 선택하고
 **배포하기**를 누르면 작업용 소스의 읽기·수정, Dockerfile 준비, 빌드·실행, HTTP 검증을 진행합니다.
