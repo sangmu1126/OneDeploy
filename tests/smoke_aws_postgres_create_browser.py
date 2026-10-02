@@ -20,6 +20,7 @@ from onedeploy.aws import AwsSettings
 from onedeploy.aws_network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
 from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
+from onedeploy.postgres_snapshot import inspect_snapshot
 from onedeploy.server import App, handler_for
 from tests.smoke_aws_network import retire_probe
 from tests.smoke_aws_postgres import probe
@@ -30,17 +31,57 @@ CHROME = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
 DRIVER = Path(__file__).with_name('browser_postgres_create_cdp.mjs')
 
 
+def retire_final_snapshot(application: str, operation: dict, settings: AwsSettings,
+                          request: PostgresRequest) -> None:
+    """Remove only the final snapshot of this completed disposable UI drill."""
+    if (not re.fullmatch(r'dbdrill-[a-f0-9]{8}', application)
+            or operation['application_id'] != application
+            or operation['database_id'] != 'onedeploy-' + application
+            or request.application_id != application
+            or operation['status'] != 'succeeded'
+            or operation['stage'] != 'stack_deleted'
+            or not re.fullmatch(r'onedeploy-' + application + r'-final-[a-f0-9]{12}',
+                                operation['snapshot_id'])):
+        raise AssertionError('임시 폐기 기록의 앱·DB·최종 스냅샷을 확인하지 못했습니다.')
+    snapshot = inspect_snapshot(application, operation['snapshot_id'], settings)
+    if snapshot['status'] != 'available' or snapshot['encrypted'] is not True:
+        raise AssertionError('앱 소유 암호화 최종 스냅샷이 사용 가능 상태가 아닙니다.')
+    adapter = AwsPostgresProvisioner(request).adapter
+    stack_id = operation['stack_id']
+    stacks = json.loads(adapter.aws(['cloudformation', 'describe-stacks',
+        '--stack-name', stack_id], private=True, quiet=True)).get('Stacks', [])
+    if (len(stacks) != 1 or stacks[0].get('StackId') != stack_id
+            or stacks[0].get('StackStatus') != 'DELETE_COMPLETE'):
+        raise AssertionError('폐기한 RDS 스택이 DELETE_COMPLETE 상태가 아닙니다.')
+    databases = json.loads(adapter.aws(['rds', 'describe-db-instances'], private=True, quiet=True))
+    if (databases.get('Marker') or not isinstance(databases.get('DBInstances'), list)
+            or any(db.get('DBInstanceIdentifier') == operation['database_id']
+                   for db in databases['DBInstances'])):
+        raise AssertionError('폐기한 DB가 AWS 목록에 남아 있습니다.')
+    deleted = json.loads(adapter.aws(['rds', 'delete-db-snapshot',
+        '--db-snapshot-identifier', snapshot['snapshot_id']], private=True, quiet=True))
+    if deleted.get('DBSnapshot', {}).get('DBSnapshotArn') != snapshot['snapshot_arn']:
+        raise AssertionError('시험용 최종 스냅샷 삭제 응답의 ARN이 예상과 다릅니다.')
+    adapter.aws(['rds', 'wait', 'db-snapshot-deleted',
+                 '--db-snapshot-identifier', snapshot['snapshot_id']],
+                timeout=3600, private=True, quiet=True)
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description='Verify browser-created PostgreSQL and retire its resources')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--deploy-app', action='store_true',
                         help='Also upload and deploy a PostgreSQL app through Chrome')
+    parser.add_argument('--retire-through-ui', action='store_true',
+                        help='Retire the disposable RDS using the product browser UI')
     parser.add_argument('--application', default='dbdrill-' + secrets.token_hex(4))
     parser.add_argument('--account', required=True)
     parser.add_argument('--region', required=True)
     args = parser.parse_args(argv)
     if not re.fullmatch(r'dbdrill-[a-f0-9]{8}', args.application):
         parser.error('--application must be a unique dbdrill-<8 hex> ID')
+    if args.deploy_app and args.retire_through_ui:
+        parser.error('Run --deploy-app and --retire-through-ui in separate disposable drills')
     settings = AwsSettings(args.region, expected_account=args.account, account_pin_required=True)
     network = discover_default_network(settings)
     network_request = ServiceNetworkRequest(args.application, args.account, args.region,
@@ -166,6 +207,23 @@ def main(argv=None) -> None:
                             port_file.read_text().splitlines()[0], args.application,
                             'verify-deploy'], check=True, timeout=120)
             print('PASS: browser upload -> new RDS migration -> HTTP write/read/delete', flush=True)
+        if args.retire_through_ui:
+            subprocess.run(['node', str(DRIVER), base + '/',
+                            port_file.read_text().splitlines()[0], args.application, 'retire'],
+                           check=True, timeout=10 * 60)
+            deadline = time.monotonic() + 7200
+            while time.monotonic() < deadline:
+                retirement = app.postgres_retirement_operations.operations.get(args.application)
+                if retirement and retirement['status'] != 'running':
+                    break
+                time.sleep(5)
+            retirement = app.postgres_retirement_operations.get(args.application)
+            if retirement['status'] != 'succeeded' or retirement['stage'] != 'stack_deleted':
+                raise RuntimeError('브라우저 DB 폐기 상태 확인 필요: ' + retirement['message'])
+            subprocess.run(['node', str(DRIVER), base + '/',
+                            port_file.read_text().splitlines()[0], args.application,
+                            'verify-retire'], check=True, timeout=120)
+            print('PASS: browser retirement completed with an available final snapshot', flush=True)
     finally:
         try:
             deadline = time.monotonic() + 3900
@@ -176,6 +234,12 @@ def main(argv=None) -> None:
                 time.sleep(5)
             db_operation = app.postgres_operations.operations.get(args.application)
             network_operation = app.network_operations.operations.get(args.application)
+            retirement_operation = app.postgres_retirement_operations.operations.get(args.application)
+            if retirement_operation:
+                deadline = time.monotonic() + 7200
+                while retirement_operation['status'] == 'running' and time.monotonic() < deadline:
+                    time.sleep(5)
+                retirement_operation = app.postgres_retirement_operations.operations[args.application]
             jobs = list(app.jobs.values())
             for job in jobs:
                 if (job.get('status') == 'succeeded'
@@ -191,7 +255,23 @@ def main(argv=None) -> None:
             ecs_retired = all(job.get('status') != 'succeeded'
                               or api('/api/jobs/' + job['id']).get('deployment_state') == 'deleted'
                               for job in jobs)
-            if db_operation and db_operation['status'] == 'succeeded' and network_operation \
+            if retirement_operation and retirement_operation['status'] == 'succeeded' \
+                    and network_operation and network_operation['status'] == 'succeeded' \
+                    and db_operation and db_operation['status'] == 'succeeded' and ecs_retired:
+                db_request = PostgresRequest(args.application, args.account, args.region,
+                    network['vpc_id'], tuple(network['subnet_ids']),
+                    network_operation['service_security_group'])
+                retire_final_snapshot(args.application, retirement_operation, settings,
+                                      db_request)
+                print('PASS: temporary final snapshot verified and deleted', flush=True)
+                retire_probe(network_provisioner, network_operation['stack_id'],
+                             network_operation['service_security_group'])
+                print('PASS: temporary network stack deleted', flush=True)
+                cleanup_complete = True
+            elif retirement_operation:
+                print('폐기 기록이 완료되지 않아 자동 정리를 중단했습니다. 확인할 앱:',
+                      args.application, retirement_operation['status'], flush=True)
+            elif db_operation and db_operation['status'] == 'succeeded' and network_operation \
                     and network_operation['status'] == 'succeeded' and ecs_retired:
                 db_request = PostgresRequest(args.application, args.account, args.region,
                     network['vpc_id'], tuple(network['subnet_ids']),

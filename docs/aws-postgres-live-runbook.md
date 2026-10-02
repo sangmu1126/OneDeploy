@@ -1,5 +1,18 @@
 # AWS PostgreSQL 실계정 검증 절차
 
+## 2026-10-03 제품 UI에서 임시 RDS 폐기
+
+`tests.smoke_aws_postgres_create_browser --apply --retire-through-ui`로 임시 `dbdrill-e8de6dc2` 앱의 전용 네트워크와 RDS를 실제 Chrome에서 생성했다. 브라우저의 생성 완료 상태, 서버 기록, AWS 리소스 식별자를 대조한 뒤 **PostgreSQL RDS 폐기** 계획을 열었다. 잘못된 DB ID는 UI에서 거부됐고, 정확한 `onedeploy-dbdrill-e8de6dc2` 입력으로 폐기 작업을 접수했다. 제품 작업 기록은 최종 암호화 수동 스냅샷 검증 → DB 삭제 → RDS 스택 `DELETE_COMPLETE`까지 `succeeded`/`stack_deleted`로 끝났다. 새 Chrome 연결에서 폐기 완료와 생성 작업의 `retired` 표시, 기존 DB 사용 체크 해제를 확인했다.
+
+시험 도구의 첫 실행은 제품 폐기 성공 후 정리 단계에서 생성 작업 기록에 없는 `stack_id`를 읽어 종료 코드 1을 반환했다. 폐기 작업의 로컬 기록에 있는 스택 ID를 사용하도록 수정한 뒤, 앱 소유·`available` 스냅샷과 삭제 완료 스택·DB 부재를 확인해 시험용 최종 스냅샷과 전용 네트워크를 별도로 정리했다. 후속 AWS 조회에서 임시 DB·수동 스냅샷·관리형 비밀은 없고, 기존 `onedeploy-demo-app`은 `available`·삭제 보호 켜짐, 기존 백업 스냅샷은 `available`이다. 로컬 기록은 `.onedeploy/browser-db-drills/dbdrill-e8de6dc2/`에 남겼다. 이 실행의 실제 청구액은 확인하지 않았다.
+
+```sh
+python3 -m tests.smoke_aws_postgres_create_browser \
+  --apply --retire-through-ui --account <AWS_ACCOUNT_ID> --region ap-northeast-2
+```
+
+`--apply`가 없으면 읽기 전용 사전 점검만 한다. 이 드릴은 새 임시 RDS와 최종 스냅샷을 생성하고, 제품 UI에서 폐기한 뒤 시험 자원을 정리한다. 폐기 상태가 불확실하면 시험 도구는 DB·스냅샷을 자동으로 삭제하지 않는다.
+
 ## 2026-10-02 생성 중 작업 프로세스 종료·재시작 복구
 
 `tests.smoke_aws_postgres_restart_drill --apply`는 임시 `dbdrill-4f956cb2` 앱의 네트워크를 만들고 별도 프로세스에서 DB 생성 계획·요청을 기록했다. AWS CloudFormation이 앱 소유 `CREATE_IN_PROGRESS` 스택을 접수한 것을 확인한 직후 생성 작업 프로세스와 그 하위 명령을 종료했다. 새 `PostgresOperations` 인스턴스는 디스크의 `running` 기록을 `needs_attention`으로 바꾸고 생성 요청을 자동 반복하지 않았다. AWS 스택이 완료된 뒤 새 인스턴스의 `reconcile()`이 계정·스택 소유 태그·실제 RDS 구성을 읽기 전용으로 대조해 기록을 `succeeded`로 복구했다.

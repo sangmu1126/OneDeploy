@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const [serverUrl, debuggingPort, application, stage = 'create', archive] = process.argv.slice(2);
 assert.match(application, /^dbdrill-[a-f0-9]{8}$/);
-assert.ok(['create', 'verify', 'deploy', 'verify-deploy'].includes(stage));
+assert.ok(['create', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire'].includes(stage));
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl);
@@ -60,7 +60,23 @@ try {
   await command('Runtime.enable');
   await command('Page.navigate', {url: serverUrl});
   await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨')"), 30000);
-  if (stage === 'verify' || stage === 'deploy') {
+  if (stage === 'retire') {
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('retirementPlan').click();return true;})()`);
+    await until(() => evaluate(`(() => {const e=id=>document.getElementById(id);const text=e('retirementPlanInfo').textContent;if(text&&!text.includes('DB ID를 입력해야'))throw Error(text);return text.includes(${JSON.stringify('onedeploy-' + application)})&&!e('retirementStart').hidden;})()`), 120000);
+    console.log('PASS: browser reviewed the owned RDS retirement plan');
+    await evaluate("(() => {const e=id=>document.getElementById(id);e('retirementConfirm').value='wrong-db';e('retirementStart').click();return true;})()");
+    assert.ok(await evaluate("document.getElementById('retirementOperationInfo').textContent.includes('DB ID를 정확히 입력하세요')"));
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('retirementConfirm').value=${JSON.stringify('onedeploy-' + application)};e('retirementStart').click();return true;})()`);
+    await until(() => evaluate("(() => {const text=document.getElementById('retirementOperationInfo').textContent;if(text.includes('needs_attention'))throw Error(text);return text.includes(' · running · ');})()"), 120000);
+    console.log('PASS: browser submitted the confirmed RDS retirement');
+  } else if (stage === 'verify-retire') {
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('retirementOperation').click();return true;})()`);
+    await until(() => evaluate("(() => {const text=document.getElementById('retirementOperationInfo').textContent;if(text.includes('needs_attention'))throw Error(text);return text.includes(' · succeeded · stack_deleted · ');})()"), 60000);
+    await evaluate("document.getElementById('postgresOperation').click();true");
+    await until(() => evaluate("document.getElementById('postgresOperationInfo').textContent.includes(' · retired · ')"), 60000);
+    assert.equal(await evaluate("document.getElementById('postgresExisting').checked"), false);
+    console.log('PASS: browser showed retirement completion without reselecting the deleted RDS');
+  } else if (stage === 'verify' || stage === 'deploy') {
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('postgresOperation').click();return true;})()`);
     const completed = await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresOperationInfo').textContent;if(text.includes(' · needs_attention · '))throw Error(text);return text.includes(' · succeeded · ')&&e('postgresExisting').checked&&e('postgresVpc').value&&e('postgresSubnets').value.split(',').length>=2;})()"), 60000);
     assert.ok(completed);
