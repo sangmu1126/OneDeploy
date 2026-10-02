@@ -1,5 +1,11 @@
 # 의사결정 기록
 
+## 2026-10-02 — 스냅샷 이전 데이터 표식의 실제 복원 비교
+
+- 임시 ECS 앱으로 원본 `demo-app` DB에 32자리 고유 표식을 쓰고 읽은 뒤 `onedeploy-demo-app-marker-20261002` 수동 스냅샷을 만들었다. 스냅샷이 `available`이 된 다음 원본 표식 행을 삭제하고 임시 앱 서비스·이미지를 정리했다. 표식 ID와 진행 단계는 Git에서 제외한 로컬 기록에 남겼고 앱 접근 키는 성공 후 기록에서 제거했다.
+- 별도 `onedeploy-restore-demo-app-marker-20261002` DB로 복원해 Fargate의 읽기 전용 SQL 검사에서 마이그레이션 원장 1건과 표식 행의 ID·값을 대조했다. CloudWatch 결과는 `status: passed`, `migration_count: 1`, `marker_checked: true`였다. 이미지 태그·태스크 정의 정리도 읽기 전용으로 재확인했다.
+- 검사 연결과 임시 DB·보안 그룹을 정리하고 로컬 드릴 기록을 `cleaned`로 마감했다. 이번 표식 시험용 스냅샷도 소유권·`available` 상태 확인 후 삭제했다. 원본 RDS는 `available`·삭제 보호 켜짐이고 기존 `onedeploy-demo-app-backup-20261002` 스냅샷 하나가 남았다. 실제 비용은 확인하지 않았다.
+
 ## 2026-10-02 — 실제 RDS 복원·ECS SQL 검사·임시 리소스 정리
 
 - 서울 리전에서 보존한 `onedeploy-demo-app-backup-20261002`를 별도 `onedeploy-restore-demo-app-drill-20261002` 인스턴스로 복원했다. 생성 기록과 소유 태그·격리 그룹을 재확인했고, 생성 도중 AWS가 반환한 `configuring-enhanced-monitoring`은 진행 상태로 처리했다 ([RDS 상태 목록](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/accessing-monitoring.html)).

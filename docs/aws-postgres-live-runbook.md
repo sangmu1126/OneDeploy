@@ -1,5 +1,23 @@
 # AWS PostgreSQL 실계정 검증 절차
 
+## 2026-10-02 스냅샷 이전 데이터 표식 복원 검증
+
+`tests.smoke_aws_restore_marker_source`로 원본 `demo-app` DB에 고유 표식 행을 쓴 뒤 조회하고, 새 `onedeploy-demo-app-marker-20261002` 스냅샷이 `available`이 될 때까지 기다렸다. 이후 원본 표식 행을 삭제하고 임시 ECS Express 서비스·ECR 이미지를 정리했다. 로컬 `.onedeploy/restore-marker-source.json`에는 표식 ID와 작업 단계가 남으며 앱 접근 키는 성공 후 제거됐다. 이 파일은 Git 추적에서 제외한다.
+
+기록된 경로로 `onedeploy-restore-demo-app-marker-20261002` 인스턴스를 격리 그룹에 복원하고 검사 그룹에서만 5432를 열었다. `postgres_restore_task_operations --marker-id <로컬 표식 ID>`의 실제 Fargate 작업이 마이그레이션 원장 1건의 이름·SHA-256과 복원 표식 행의 ID·값을 읽기 전용으로 대조했다. CloudWatch 로그는 `{"status":"passed","migration_count":1,"marker_checked":true}`였으며 태스크 종료 코드 0, 검사 이미지 태그 부재와 비활성 태스크 정의를 확인했다.
+
+검사 연결을 닫고 복원 DB 삭제 완료 후 격리 그룹을 지웠다. `postgres_restore_drill_operations --finalize`는 SQL 성공과 임시 자원 부재를 확인해 로컬 기록을 `cleaned`로 마감했다. 새 표식 스냅샷은 `postgres_snapshot --inspect`로 원본·소유 태그·`available` 상태를 확인한 뒤 삭제했다. 마지막 수동 스냅샷 목록에는 기존 `onedeploy-demo-app-backup-20261002` 하나만 있고, 원본 RDS는 `available`·삭제 보호 켜짐이며 표식용 ECS 서비스는 `INACTIVE`다. 실제 청구 금액은 확인하지 않았다.
+
+```sh
+python3 -m tests.smoke_aws_restore_marker_source \
+  --application demo-app --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --vpc-id <VPC_ID> --subnet-id <SUBNET_A> --subnet-id <SUBNET_B> \
+  --service-security-group <APP_SERVICE_GROUP_ID> \
+  --snapshot-id onedeploy-demo-app-marker-<UNIQUE_SUFFIX> \
+  --state-file .onedeploy/restore-marker-source.json
+# 위 명령은 읽기 전용 사전 계획이다. 실제 표식·스냅샷 생성 시에만 --apply 추가.
+```
+
 ## 2026-10-02 복원 드릴 완료
 
 서울 리전에서 `onedeploy-demo-app-backup-20261002`를 임시 DB `onedeploy-restore-demo-app-drill-20261002`로 복원했다. 로컬 작업 기록을 먼저 만들고 격리 그룹 `sg-0613f406d2cb9daf7`과 DB ARN을 저장했다. 생성 도중 `configuring-enhanced-monitoring`을 거쳐 `available`이 됐고, 소유 태그·비공개 연결·구성을 재확인했다.
