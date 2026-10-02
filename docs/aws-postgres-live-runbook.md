@@ -265,3 +265,29 @@ PYTHONPATH=. python3 tests/smoke_aws_postgres_browser.py \
 # 실제 Chrome에서 조회만 확인하려면 --browser-read-only 추가
 # 실제 ECS 서비스와 이미지 빌드를 실행할 때만 --apply 추가
 ```
+## 사용자 DB 폐기 경로의 읽기 전용 검증
+
+2026-10-02 `python3 -m onedeploy.postgres_retirement`의 기본 계획을 보존 중인
+`demo-app`에 실행했다. 계정 `265233844540`, 서울 리전, DB
+`onedeploy-demo-app`과 소유 RDS 스택을 재확인했다. DB 삭제 보호는 켜져 있고,
+ECS 서비스·실행 중인 작업에서 해당 DB 비밀을 사용하는 대상은 0건이었다.
+서버 API가 사용하는 `PostgresRetirementOperations.plan()`도 같은 보존 DB에서
+읽기 전용으로 통과했으며 `final_snapshot_required: true`를 반환했다.
+이 호출은 DB·스냅샷·스택을 변경하지 않았다. `--apply`는 실행하지 않았으며,
+최종 스냅샷 생성과 실제 폐기, 작업 중단 후 AWS 상태 수동 대조는 임시 앱으로
+별도 검증해야 한다. 원본 DB와 기존 수동 스냅샷은 보존 중이다.
+
+같은 날 별도 임시 앱 `retire-7c3a9d21`의 네트워크 스택·암호화된 PostgreSQL 18.3
+`db.t4g.micro`/gp3 20 GiB RDS 스택을 생성했다. 폐기 CLI의 읽기 전용 계획에서
+앱 소유권·삭제 보호와 DB 비밀을 사용하는 ECS 사용자 0명을 확인했다. 새 로컬
+기록 `.onedeploy/retirement-live-drill/retire-7c3a9d21.json`을 만든 뒤 정확한 DB ID로
+`--apply`를 실행했다. 최종 스냅샷 `onedeploy-retire-7c3a9d21-final-b501205769f3`가
+소유 태그를 가진 암호화된 `available` 상태인 것을 확인하고 DB 보호 해제·삭제,
+RDS 스택 `DELETE_COMPLETE`, 삭제 후 스냅샷 `available` 재확인을 통과했다.
+이 임시 최종 스냅샷을 별도로 삭제하고 미사용 앱 네트워크 스택도 삭제했다.
+마지막 AWS 조회에서 임시 DB·수동 스냅샷·앱 태그 보안 그룹·Secrets Manager 비밀·
+마이그레이션 로그 그룹은 목록에 없고, RDS·네트워크 스택은 모두
+`DELETE_COMPLETE`였다. 기존 `onedeploy-demo-app`은
+`available`·삭제 보호 켜짐이며 `onedeploy-demo-app-backup-20261002`는 암호화된
+`available`로 남았다. 실제 브라우저 폐기 클릭과 강제 중단 시험은 아직 하지 않았다.
+이 임시 RDS와 스냅샷의 실제 청구액은 확인하지 않았다.

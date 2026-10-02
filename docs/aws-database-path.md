@@ -178,3 +178,11 @@ PYTHONPATH=. python3 tests/smoke_aws_postgres.py --application demo-app \
   --service-security-group <RESTRICTED_SERVICE_GROUP_ID>
 # ECS와 ECR을 실제 사용하고 비용을 발생시킬 때만 --apply 추가
 ```
+
+## 명시적 RDS 폐기
+
+`onedeploy.postgres_retirement`와 서버의 `database-retirement-operations/<앱 ID>.json`은 일반 앱의 명시적 폐기를 담당한다. 읽기 전용 계획은 원본 DB·스택의 소유권과 삭제 보호, 현재 ECS 서비스·실행 중인 태스크의 DB 비밀 미사용을 확인한다. 서버 API는 15분짜리 계획 토큰과 정확한 `onedeploy-<앱 ID>` 입력을 요구하고, 작업을 디스크에 먼저 동기화한 뒤 비동기로 실행한다. CLI는 기본값이 계획이며, 실제 실행에는 `--apply`, 새 로컬 작업 기록 경로, 정확한 DB ID가 모두 필요하다.
+
+실행 순서는 고유한 최종 수동 스냅샷 요청 → `available` 및 소유 태그·암호화 확인 → DB 소유권·ECS 사용자 재검사 → 삭제 보호 해제와 재확인 → ECS 사용자·스냅샷 마지막 확인 → DB 삭제·완료 대기 → 최종 스냅샷 재확인 → 스택 종료 보호 해제·삭제·완료 대기 → 최종 스냅샷 재확인이다. 기존 수동 스냅샷과 앱 네트워크는 보존된다. 자동 백업은 DB와 함께 삭제되며 수동 스냅샷 저장 비용은 계속 발생할 수 있다.
+
+기록의 `stage`는 다음 AWS 변경 **직전**에도 저장된다. `creating_final_snapshot`, `removing_db_protection`, `deleting_database`, `removing_stack_protection`, `deleting_stack`에서 중단되면 요청이 AWS에 접수됐는지 단정할 수 없다. 삭제 보호 해제 단계에서 일반 오류가 나면 보호 복구를 시도해 재확인하지만 프로세스 강제 종료에는 실행되지 않는다. 서버 재시작은 `running`을 `needs_attention`으로 바꾸고 재실행하지 않는다. 그 경우 기록의 계정·DB ARN·스택 ARN·스냅샷 ID로 실제 AWS 자원을 수동 대조한다. 특히 보호 해제 뒤 강제 종료됐다면 원본 DB의 삭제 보호 상태를 확인해야 한다. 성공 기록을 포함한 폐기 기록이 있는 앱 ID의 AWS 재배포는 막는다.

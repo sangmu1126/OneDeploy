@@ -32,6 +32,7 @@ from onedeploy.postgres import (AwsPostgresProvisioner, PostgresRequest,
                                 discover_existing_postgres, inspect_postgres_backup_status,
                                 postgres_settings_for_application)
 from onedeploy.postgres_operations import PostgresOperations
+from onedeploy.postgres_retirement_operations import PostgresRetirementOperations
 from onedeploy.snapshot_operations import SnapshotOperations
 
 
@@ -116,6 +117,9 @@ class App:
         self.recovery_warnings = []
         self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings)
         self.recovery_warnings.extend(self.postgres_operations.recovery_warnings)
+        self.postgres_retirement_operations = PostgresRetirementOperations(
+            self.root / 'database-retirement-operations', self.aws_settings)
+        self.recovery_warnings.extend(self.postgres_retirement_operations.recovery_warnings)
         self.snapshot_operations = SnapshotOperations(self.root / 'snapshot-operations', self.aws_settings)
         self.recovery_warnings.extend(self.snapshot_operations.recovery_warnings)
         self.network_operations = NetworkOperations(self.root / 'network-operations', self.aws_settings)
@@ -248,6 +252,8 @@ class App:
 
     def ensure_application_available(self, application_id, target):
         # The caller holds self.lock while reserving the new job.
+        if target in {'auto', 'aws-ecs-express'} and self.postgres_retirement_operations.blocks_deployment(application_id):
+            raise ValueError(f'{application_id}의 PostgreSQL 폐기 기록이 있어 AWS 배포를 시작할 수 없습니다.')
         if any(job.get("application_id") == application_id and job.get("target") == target
                and job.get("status") in {"running", "waiting_input"} for job in self.jobs.values()):
             raise ValueError(f"{application_id}의 {target} 배포가 이미 진행 중입니다.")
@@ -906,7 +912,20 @@ def handler_for(app: App):
             if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/operation", self.path):
                 application_id = self.path.split('/')[3]
                 try:
-                    self.json_response(200, app.postgres_operations.get(application_id))
+                    operation = app.postgres_operations.get(application_id)
+                    if app.postgres_retirement_operations.blocks_deployment(application_id):
+                        retirement = app.postgres_retirement_operations.get(application_id)
+                        operation = {**operation,
+                            'status': 'retired' if retirement['status'] == 'succeeded' else 'needs_attention',
+                            'message': 'PostgreSQL 폐기 기록이 있습니다. 폐기 상태를 확인하세요.'}
+                    self.json_response(200, operation)
+                except ValueError as exc:
+                    self.json_response(404, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/retirement/operation", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, app.postgres_retirement_operations.get(application_id))
                 except ValueError as exc:
                     self.json_response(404, {"error": str(exc)})
                 return
@@ -1011,6 +1030,34 @@ def handler_for(app: App):
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('PostgreSQL 생성 재확인 요청에는 본문이 없어야 합니다.')
                     self.json_response(200, app.postgres_operations.reconcile(application_id))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/retirement/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('DB 폐기 계획 조회에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.postgres_retirement_operations.plan(application_id))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/retirement/start", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('DB 폐기 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict)
+                            or set(payload) != {'plan_id', 'confirm_database_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])
+                            or not isinstance(payload['confirm_database_id'], str)
+                            or not re.fullmatch(r'onedeploy-[a-z][a-z0-9-]{2,30}', payload['confirm_database_id'])):
+                        raise ValueError('유효한 폐기 계획 ID와 정확한 DB ID가 필요합니다.')
+                    with app.lock:
+                        if any(job.get('application_id') == application_id
+                               and job.get('status') in {'running', 'waiting_input'}
+                               for job in app.jobs.values()):
+                            raise ValueError('이 앱의 배포가 진행 중입니다. 완료 후 다시 시도하세요.')
+                        result = app.postgres_retirement_operations.start(
+                            application_id, payload['plan_id'], payload['confirm_database_id'])
+                    self.json_response(202, result)
                     return
                 if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/plan", self.path):
                     application_id = self.path.split('/')[3]

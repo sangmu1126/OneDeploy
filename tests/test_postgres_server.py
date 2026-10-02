@@ -41,6 +41,44 @@ class PostgresServerTests(unittest.TestCase):
                        aws_settings=self.settings, monitor_interval=0,
                        agent_factory=lambda _: object())
 
+    def test_retirement_plan_is_authenticated_and_read_only(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres/retirement/plan'
+        handler.headers = {'X-OneDeploy-Token': self.app.token, 'Content-Length': '0'}
+        handler.json_response = Mock()
+        with patch.object(self.app.postgres_retirement_operations, 'plan',
+                          return_value={'plan_id': 'token', 'database_id': 'onedeploy-demo-app'}) as planned:
+            handler.do_POST()
+        planned.assert_called_once_with('demo-app')
+        self.assertEqual(handler.json_response.call_args.args[0], 200)
+        handler.headers = {'Content-Length': '0'}
+        handler.json_response.reset_mock()
+        with patch.object(self.app.postgres_retirement_operations, 'plan') as planned:
+            handler.do_POST()
+        planned.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+
+    def test_retirement_start_requires_plan_and_exact_database_id(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres/retirement/start'
+        payload = json.dumps({'plan_id': 'a' * 32,
+                              'confirm_database_id': 'onedeploy-demo-app'}).encode()
+        handler.headers = {'X-OneDeploy-Token': self.app.token,
+                           'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        handler.json_response = Mock()
+        with patch.object(self.app.postgres_retirement_operations, 'start',
+                          return_value={'status': 'running'}) as started:
+            handler.do_POST()
+        started.assert_called_once_with('demo-app', 'a' * 32, 'onedeploy-demo-app')
+        self.assertEqual(handler.json_response.call_args.args[0], 202)
+
+    def test_retirement_record_blocks_new_aws_deployment(self):
+        with patch.object(self.app.postgres_retirement_operations,
+                          'blocks_deployment', return_value=True):
+            with self.assertRaisesRegex(ValueError, '폐기 기록'):
+                self.app.ensure_application_available('demo-app', 'aws-ecs-express')
+
     def upload(self, content, *, postgres=True):
         handler_class = handler_for(self.app)
         handler = handler_class.__new__(handler_class)
