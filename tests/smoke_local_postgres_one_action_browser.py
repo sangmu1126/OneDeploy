@@ -22,7 +22,7 @@ DRIVER = Path(__file__).with_name('browser_postgres_create_cdp.mjs')
 APPLICATION = 'dbdrill-1234abcd'
 
 
-def run() -> dict:
+def run(*, fail_create: bool = False) -> dict:
     if not CHROME.is_file():
         raise RuntimeError('Chrome executable not found')
     settings = AwsSettings('ap-northeast-2', expected_account='123456789012',
@@ -48,6 +48,7 @@ def run() -> dict:
                   return_value=quote) as preflight, \
             patch('onedeploy.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
             patch('onedeploy.postgres_operations.AwsPostgresProvisioner.create',
+                  side_effect=ValueError('simulated RDS creation failure') if fail_create else None,
                   return_value=database) as create, \
             patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
                   return_value=database) as inspect, \
@@ -95,7 +96,8 @@ def run() -> dict:
                     subprocess.run(['node', str(DRIVER),
                         f'http://127.0.0.1:{server.server_port}/',
                         port_file.read_text().splitlines()[0], APPLICATION,
-                        'one-action-local', str(zip_path)], check=True, timeout=60)
+                        'one-action-failed-local' if fail_create else 'one-action-local',
+                        str(zip_path)], check=True, timeout=60)
                 finally:
                     chrome.terminate()
                     try:
@@ -104,23 +106,27 @@ def run() -> dict:
                         chrome.kill()
                         chrome.wait(timeout=10)
             jobs = list(app.jobs.values())
-            if (len(jobs) != 1 or deployments != [jobs[0]['id']]
-                    or jobs[0]['status'] != 'succeeded'
+            expected_status = 'interrupted' if fail_create else 'succeeded'
+            operation_status = 'needs_attention' if fail_create else 'succeeded'
+            if (len(jobs) != 1 or deployments != ([] if fail_create else [jobs[0]['id']])
+                    or jobs[0]['status'] != expected_status
                     or jobs[0]['infrastructure_plan']['database'] != {
                         'binding': 'create', 'database_id': request.database_id}
-                    or app.postgres_operations.get(APPLICATION)['status'] != 'succeeded'
+                    or app.postgres_operations.get(APPLICATION)['status'] != operation_status
                     or jobs[0]['postgres_creation_id'] !=
                     app.postgres_operations.get(APPLICATION)['creation_id']):
                 raise AssertionError('Browser one-action job did not preserve the RDS binding')
-            if preflight.call_count != 2 or create.call_count != 1 or inspect.call_count != 1:
+            if (preflight.call_count != 2 or create.call_count != 1
+                    or inspect.call_count != (0 if fail_create else 1)):
                 raise AssertionError('Browser one-action plan, creation, or ownership check was skipped')
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=10)
     return {'application_id': APPLICATION, 'status': 'passed',
+            'scenario': 'creation_failure' if fail_create else 'creation_success',
             'aws_mode': 'mocked', 'deployment_executed': False}
 
 
 if __name__ == '__main__':
-    print(json.dumps(run(), ensure_ascii=False))
+    print(json.dumps([run(), run(fail_create=True)], ensure_ascii=False))

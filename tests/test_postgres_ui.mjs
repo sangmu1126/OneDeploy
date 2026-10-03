@@ -350,6 +350,9 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
              region: 'ap-northeast-2', engine_version: '18.3', instance_class: 'db.t4g.micro',
              storage_type: 'gp3', storage_gib: 20, pricing: {baseline_730h_usd: '20.87'}}
         : path === '/api/deployments' ? {id: jobId, status: 'provisioning'}
+        : path.endsWith('/postgres/operation')
+          ? {application_id: 'demo-app', status: 'needs_attention',
+             message: 'CloudFormation 결과 확인 필요'}
         : {id: jobId, status: 'interrupted', events: [], target: 'aws-ecs-express'};
       return {ok: true, json: async () => body};
     },
@@ -372,6 +375,10 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
   assert.equal(upload.options.headers['X-Postgres-Create-Plan'], 'planned-token-123456789012');
   assert.equal(upload.options.body, file);
   assert.equal(requests.some(request => request.path.endsWith('/postgres/create')), false);
+  assert.equal(requests.some(request => request.path.endsWith('/postgres/operation')), true);
+  assert.equal(element('postgresRecovery').hidden, false);
+  assert.equal(element('postgresReconcile').hidden, false);
+  assert.equal(element('postgresCreationDetails').open, true);
 });
 
 test('failed RDS creation requires the exact stack ARN before cleanup', async () => {

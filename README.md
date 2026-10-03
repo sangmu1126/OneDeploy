@@ -115,7 +115,7 @@ python3 -m tests.smoke_local_postgres_one_action_browser
 PYTHONPATH=. python3 tests/smoke_agent.py
 ```
 
-첫 로컬 Chrome 드릴은 기존 RDS 자동 연결 계획을 검사합니다. 두 번째 드릴은 새 RDS 가격 계획부터 ZIP 업로드와 동일 작업의 DB 생성·배포 상태 표시까지 모의 AWS·배포 응답으로 검사합니다. 둘 다 실제 AWS 호출이나 배포를 실행하지 않습니다. 마지막 명령은 Docker를 사용하고 AI의 도구 응답만 테스트용으로 고정합니다. 실제 OpenAI 호출을 검증할 때는 키·모델을 설정하고
+첫 로컬 Chrome 드릴은 기존 RDS 자동 연결 계획을 검사합니다. 두 번째 드릴은 새 RDS 가격 계획부터 ZIP 업로드, 동일 작업의 DB 생성·배포 완료 표시와 생성 실패 후 복구 버튼 노출까지 모의 AWS·배포 응답으로 검사합니다. 둘 다 실제 AWS 호출이나 배포를 실행하지 않습니다. 마지막 명령은 Docker를 사용하고 AI의 도구 응답만 테스트용으로 고정합니다. 실제 OpenAI 호출을 검증할 때는 키·모델을 설정하고
 `PYTHONPATH=. python3 tests/smoke_agent.py --live`를 사용합니다. AWS 실계정 smoke는 기본이 읽기 전용 사전 점검이며, 과금 가능한 리소스를
 생성하는 `--apply` 절차와 정리 방법은 [실계정 검증 기록](docs/aws-postgres-live-runbook.md)에 적었습니다. 현재 구현·실계정 증거·남은 작업의 구분은
 [프로젝트 현황](docs/status.md)을 따릅니다.
