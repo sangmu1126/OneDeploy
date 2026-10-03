@@ -244,6 +244,30 @@ class AwsPostgresProvisioner:
                 'publicly_accessible': False, 'deletion_protection': True,
                 'retained_on_stack_delete': True}
 
+    def assert_database_absent(self) -> None:
+        """Check the full account lists before reusing a cleaned application DB ID."""
+        req = self.request
+        identity = json.loads(self.adapter.aws(['sts', 'get-caller-identity'],
+                                              private=True, quiet=True))
+        if identity.get('Account') != req.account:
+            raise AwsConfigurationError('AWS 계정이 PostgreSQL 생성 요청과 다릅니다.')
+        databases = json.loads(self.adapter.aws(['rds', 'describe-db-instances'],
+                                               private=True, quiet=True))
+        instances = databases.get('DBInstances')
+        if (databases.get('Marker') or not isinstance(instances, list)
+                or any(not isinstance(item, dict)
+                       or item.get('DBInstanceIdentifier') == req.database_id
+                       for item in instances)):
+            raise AwsConfigurationError('앱 DB가 없음을 완전히 확인하지 못했습니다.')
+        snapshots = json.loads(self.adapter.aws(['rds', 'describe-db-snapshots',
+            '--snapshot-type', 'manual'], private=True, quiet=True))
+        items = snapshots.get('DBSnapshots')
+        if (snapshots.get('Marker') or not isinstance(items, list)
+                or any(not isinstance(item, dict)
+                       or item.get('DBInstanceIdentifier') == req.database_id
+                       for item in items)):
+            raise AwsConfigurationError('앱 수동 스냅샷이 없음을 완전히 확인하지 못했습니다.')
+
     def assert_stack_available(self, *, allow_deleted: bool = False) -> None:
         """Fail closed when this deterministic stack name already appears in the account."""
         response = json.loads(self.adapter.aws(['cloudformation', 'list-stacks'],

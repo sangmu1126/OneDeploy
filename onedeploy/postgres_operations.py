@@ -100,7 +100,11 @@ class PostgresOperations:
                 raise ValueError('이 앱에는 이미 PostgreSQL 생성 기록이 있습니다. 먼저 생성 상태를 확인하세요.')
         provisioner = AwsPostgresProvisioner(request)
         result = provisioner.preflight()
-        provisioner.assert_stack_available(allow_deleted=True) if request.application_id in self.cleaned else provisioner.assert_stack_available()
+        if request.application_id in self.cleaned:
+            provisioner.assert_database_absent()
+            provisioner.assert_stack_available(allow_deleted=True)
+        else:
+            provisioner.assert_stack_available()
         token = secrets.token_urlsafe(24)
         with self.lock:
             if request.application_id in self.operations:
@@ -122,7 +126,11 @@ class PostgresOperations:
         current = provisioner.preflight()
         if current != expected:
             raise ValueError('생성 계획이 변경됐습니다. 가격을 다시 확인하세요.')
-        provisioner.assert_stack_available(allow_deleted=True) if application_id in self.cleaned else provisioner.assert_stack_available()
+        if application_id in self.cleaned:
+            provisioner.assert_database_absent()
+            provisioner.assert_stack_available(allow_deleted=True)
+        else:
+            provisioner.assert_stack_available()
         operation = {'application_id': application_id, 'request': asdict(request),
                      'expected_plan': expected, 'status': 'running',
                      'created_at': datetime.now(timezone.utc).isoformat(),
@@ -227,7 +235,8 @@ class PostgresOperations:
 
     def _inspect_failed_create(self, request: PostgresRequest, previous_stack_id: str | None = None) -> dict:
         """Fail closed if rollback left any resource, DB, snapshot, or ownership doubt."""
-        adapter = AwsPostgresProvisioner(request).adapter
+        provisioner = AwsPostgresProvisioner(request)
+        adapter = provisioner.adapter
         def aws(args):
             return json.loads(adapter.aws(args, private=True, quiet=True))
         if aws(['sts', 'get-caller-identity']).get('Account') != request.account:
@@ -256,18 +265,7 @@ class PostgresOperations:
                         and item.get('PhysicalResourceId'))
                     for item in resources)):
                 raise AwsConfigurationError('롤백 스택에 남거나 확인되지 않은 리소스가 있습니다.')
-        databases = aws(['rds', 'describe-db-instances'])
-        instances = databases.get('DBInstances')
-        if (databases.get('Marker') or not isinstance(instances, list)
-                or any(not isinstance(item, dict) or
-                       item.get('DBInstanceIdentifier') == request.database_id for item in instances)):
-            raise AwsConfigurationError('앱 DB가 없음을 완전히 확인하지 못했습니다.')
-        snapshots = aws(['rds', 'describe-db-snapshots', '--snapshot-type', 'manual'])
-        items = snapshots.get('DBSnapshots')
-        if (snapshots.get('Marker') or not isinstance(items, list)
-                or any(not isinstance(item, dict) or
-                       item.get('DBInstanceIdentifier') == request.database_id for item in items)):
-            raise AwsConfigurationError('앱 수동 스냅샷이 없음을 완전히 확인하지 못했습니다.')
+        provisioner.assert_database_absent()
         return {'stack_id': stack_id, 'stack_status': status, 'database_id': request.database_id,
                 'account': request.account, 'region': request.region}
 

@@ -242,6 +242,50 @@ class PostgresOperationsTests(unittest.TestCase):
         self.assertFalse(any(args[:2] == ['cloudformation', 'delete-stack']
                              for args in state['calls']))
 
+    def test_interrupted_after_stack_deletion_finalizes_without_repeating_delete(self):
+        self._failed_operation()
+        stack_id, state, aws = self._rollback_aws()
+        with patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True,
+                   side_effect=aws), \
+                patch('onedeploy.postgres_operations.threading.Thread.start'):
+            plan = self.manager.cleanup_plan('demo-app')
+            self.manager.cleanup_start('demo-app', plan['plan_id'], stack_id)
+            state['status'] = 'DELETE_COMPLETE'
+            restored = PostgresOperations(self.root, self.settings)
+            self.assertEqual(restored.get('demo-app')['status'], 'needs_attention')
+            new_plan = restored.cleanup_plan('demo-app')
+            self.assertEqual(new_plan['stack_status'], 'DELETE_COMPLETE')
+            restored.cleanup_start('demo-app', new_plan['plan_id'], stack_id)
+            restored._cleanup_run('demo-app')
+        self.assertEqual(restored.get('demo-app')['status'], 'failed_cleaned')
+        self.assertFalse(any(args[:2] in [
+            ['cloudformation', 'delete-stack'],
+            ['cloudformation', 'update-termination-protection']]
+            for args in state['calls']))
+
+    def test_cleaned_app_replan_rechecks_for_orphan_db_at_plan_and_start(self):
+        self.manager.cleaned.add('demo-app')
+        _, _, safe_aws = self._rollback_aws()
+        _, _, orphan_aws = self._rollback_aws(database=True)
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=self.quote), \
+                patch('onedeploy.postgres_operations.AwsPostgresProvisioner.assert_stack_available') as guard:
+            with patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True,
+                       side_effect=orphan_aws):
+                with self.assertRaisesRegex(AwsConfigurationError, 'DB가 없음을'):
+                    self.manager.plan(self.request)
+            guard.assert_not_called()
+            with patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True,
+                       side_effect=safe_aws):
+                plan = self.manager.plan(self.request)
+            with patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True,
+                       side_effect=orphan_aws), \
+                    patch('onedeploy.postgres_operations.threading.Thread.start') as worker:
+                with self.assertRaisesRegex(AwsConfigurationError, 'DB가 없음을'):
+                    self.manager.start('demo-app', plan['plan_id'])
+            worker.assert_not_called()
+        self.assertFalse((self.root / 'demo-app.json').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
