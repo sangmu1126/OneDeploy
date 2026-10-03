@@ -1341,7 +1341,7 @@ def handler_for(app: App):
                     return
                 if self.path == "/api/deployments":
                     if not app.ai_settings.available:
-                        self.json_response(503, {"error": "AI 배포를 사용하려면 서버에 OPENAI_API_KEY와 ONEDEPLOY_AI_MODEL을 설정하세요."})
+                        self.json_response(503, {"error": "AI 배포를 사용하려면 서버에 OPENAI_API_KEY를 설정하세요."})
                         return
                     requested_target = self.headers.get("X-Deploy-Target", "local-docker")
                     if requested_target not in {"auto", "local-docker", "cloud-run", "aws-ecs-express"}:

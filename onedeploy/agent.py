@@ -83,7 +83,7 @@ class OpenAIDeployAgent:
 
     def next(self, history):
         if not self.settings.available:
-            raise AgentError("서버에 OPENAI_API_KEY와 ONEDEPLOY_AI_MODEL을 설정하세요.")
+            raise AgentError("서버에 OPENAI_API_KEY를 설정하세요.")
         payload = {"model": self.settings.model, "store": False, "instructions": INSTRUCTIONS,
                    "input": history, "tools": TOOLS, "tool_choice": "required",
                    "parallel_tool_calls": False, "include": ["reasoning.encrypted_content"],

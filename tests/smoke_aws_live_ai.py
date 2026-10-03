@@ -27,7 +27,7 @@ def preflight(account: str, region: str, ai: AISettings) -> AwsSettings:
     if not re.fullmatch(r'\d{12}', account):
         raise ValueError('--account에는 12자리 AWS 계정 ID가 필요합니다.')
     if not ai.available:
-        raise ValueError('OPENAI_API_KEY와 ONEDEPLOY_AI_MODEL을 설정하세요.')
+        raise ValueError('OPENAI_API_KEY를 설정하세요.')
     settings = AwsSettings(region, expected_account=account, account_pin_required=True)
     settings.validate()
     reason = settings.unavailable_reason()

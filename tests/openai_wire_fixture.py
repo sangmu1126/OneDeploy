@@ -9,7 +9,7 @@ import urllib.request
 
 class ResponsesWireFixture:
     def __init__(self, actions=None, *, expected_target='local-docker', planner_requests=1,
-                 managed_postgres=False):
+                 managed_postgres=False, expected_model='wire-fixture-model'):
         self.local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.lock = threading.Lock()
         self.planner_requests = 0
@@ -17,6 +17,7 @@ class ResponsesWireFixture:
         self.expected_target = expected_target
         self.expected_planner_requests = planner_requests
         self.managed_postgres = managed_postgres
+        self.expected_model = expected_model
         self.actions = actions if actions is not None else [
             ('read_project_files', {'paths': ['package.json', 'server.js']}),
             ('apply_project_patch', {'path': 'package.json', 'old_text': '"scripts": {}',
@@ -37,7 +38,7 @@ class ResponsesWireFixture:
             raise AssertionError('Unexpected network request: ' + url)
         assert request.get_header('Authorization') == 'Bearer wire-fixture-key'
         payload = json.loads(request.data)
-        assert payload['model'] == 'wire-fixture-model' and payload['store'] is False
+        assert payload['model'] == self.expected_model and payload['store'] is False
         with self.lock:
             body = self._planner_response(payload) if 'text' in payload else self._agent_response(payload)
         return io.BytesIO(json.dumps(body).encode())

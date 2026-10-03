@@ -23,7 +23,7 @@ def smoke(mode):
         if mode == 'fixture-ai':
             settings = AISettings('fixture-not-a-real-key', 'fixture-model')
         if mode == 'live-ai' and not settings.available:
-            raise RuntimeError('Set OPENAI_API_KEY and ONEDEPLOY_AI_MODEL for live AI validation')
+            raise RuntimeError('Set OPENAI_API_KEY for live AI validation')
         app = App(Path(temporary), settings)
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(app))
         threading.Thread(target=server.serve_forever, daemon=True).start()

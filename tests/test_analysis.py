@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from onedeploy.analysis import (
-    AISettings, AnalysisError, OpenAIAnalyzer, analyze_project, parse_response,
+    AISettings, DEFAULT_AI_MODEL, AnalysisError, OpenAIAnalyzer, analyze_project, parse_response,
     redact, source_context, validate_proposal,
 )
 from onedeploy.core import LocalDockerAdapter, analyze, make_plan
@@ -68,6 +68,17 @@ class AnalysisTests(unittest.TestCase):
             with self.assertRaisesRegex(AnalysisError, 'OPENAI_API_KEY'):
                 analyze_project(self.project, 'ai', AISettings())
             propose.assert_not_called()
+
+    def test_api_key_only_uses_default_model_and_override_still_works(self):
+        with patch.dict('os.environ', {'OPENAI_API_KEY': 'fixture-key',
+                                       'ONEDEPLOY_AI_MODEL': ''}):
+            settings = AISettings.from_environment()
+        self.assertTrue(settings.available)
+        self.assertEqual(settings.model, DEFAULT_AI_MODEL)
+        with patch.dict('os.environ', {'OPENAI_API_KEY': 'fixture-key',
+                                       'ONEDEPLOY_AI_MODEL': 'custom-model'}):
+            settings = AISettings.from_environment()
+        self.assertEqual(settings.model, 'custom-model')
 
     def test_static_mode_never_calls_provider(self):
         with patch.object(OpenAIAnalyzer, 'propose') as propose:

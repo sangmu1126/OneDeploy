@@ -80,7 +80,7 @@ def main():
                 AISettings('wire-fixture-key', 'wire-fixture-model') if args.wire_fixture else
                 AISettings('test-fixture', 'fixture-model'))
     if args.live and not settings.available:
-        raise RuntimeError('Set OPENAI_API_KEY and ONEDEPLOY_AI_MODEL for live testing')
+        raise RuntimeError('Set OPENAI_API_KEY for live testing')
     wire = ResponsesWireFixture() if args.wire_fixture else None
     with tempfile.TemporaryDirectory(prefix='onedeploy-agent-smoke-') as directory, \
             (patch('urllib.request.build_opener', return_value=wire) if wire else nullcontext()):

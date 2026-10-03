@@ -265,7 +265,7 @@ class OpenAIInfrastructurePlanner:
 
     def propose(self, files: dict[str, str], available_targets: list[str], public_access: bool) -> dict:
         if not self.settings.available:
-            raise AnalysisError('AI 인프라 선택을 사용하려면 API 키와 모델을 설정하세요.')
+            raise AnalysisError('AI 인프라 선택을 사용하려면 OPENAI_API_KEY를 설정하세요.')
         request_body = {
             'model': self.settings.model, 'store': False, 'instructions': INFRA_INSTRUCTIONS,
             'input': json.dumps({'files': files, 'available_targets': available_targets,

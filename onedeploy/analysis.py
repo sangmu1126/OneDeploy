@@ -51,14 +51,18 @@ class AnalysisError(ValueError):
     """Safe-to-display configuration, provider, or validation failure."""
 
 
+DEFAULT_AI_MODEL = "gpt-5.4-mini"
+
+
 @dataclass(frozen=True)
 class AISettings:
     api_key: str = ""
-    model: str = ""
+    model: str = DEFAULT_AI_MODEL
 
     @classmethod
     def from_environment(cls):
-        return cls(os.getenv("OPENAI_API_KEY", ""), os.getenv("ONEDEPLOY_AI_MODEL", ""))
+        return cls(os.getenv("OPENAI_API_KEY", ""),
+                   os.getenv("ONEDEPLOY_AI_MODEL", "").strip() or DEFAULT_AI_MODEL)
 
     @property
     def available(self):
@@ -123,7 +127,7 @@ class OpenAIAnalyzer:
 
     def propose(self, files: dict[str, str]) -> dict:
         if not self.settings.available:
-            raise AnalysisError("Set OPENAI_API_KEY and ONEDEPLOY_AI_MODEL to enable AI analysis")
+            raise AnalysisError("Set OPENAI_API_KEY to enable AI analysis")
         payload = {
             "model": self.settings.model, "store": False,
             "instructions": INSTRUCTIONS,
@@ -219,7 +223,7 @@ def analyze_project(project: Path, mode: str, settings: AISettings) -> Deploymen
     if mode != "ai":
         raise AnalysisError("Analysis mode must be static or ai")
     if not settings.available:
-        raise AnalysisError("Set OPENAI_API_KEY and ONEDEPLOY_AI_MODEL to enable AI analysis")
+        raise AnalysisError("Set OPENAI_API_KEY to enable AI analysis")
     try:
         files = source_context(project)
         proposal = OpenAIAnalyzer(settings).propose(files)
