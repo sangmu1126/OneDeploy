@@ -219,24 +219,36 @@ def validate_infrastructure(profile: InfrastructureProfile, target: str, *, post
 
 
 def explicit_infrastructure_plan(target: str, profile: InfrastructureProfile,
-                                 *, existing_postgres_id: str | None = None) -> dict:
+                                 *, existing_postgres_id: str | None = None,
+                                 create_postgres_id: str | None = None) -> dict:
     """Record the supported resources that a user-selected deployment will actually use."""
     if target not in TARGET_RESOURCES:
         raise ValueError('지원하지 않는 배포 대상입니다.')
-    if existing_postgres_id is None:
+    if existing_postgres_id and create_postgres_id:
+        raise ValueError('PostgreSQL 신규 생성과 기존 DB 사용을 동시에 선택할 수 없습니다.')
+    if existing_postgres_id is None and create_postgres_id is None:
         return {'target': target, 'workload': 'unconfirmed',
                 'rationale': '사용자가 배포 대상을 지정했습니다. 알려진 영속 저장소 의존성은 사전 검사합니다.',
                 'evidence': [], 'resources': TARGET_RESOURCES[target], 'planner': 'user'}
+    database_id = create_postgres_id or existing_postgres_id
     if (target != 'aws-ecs-express' or profile.database_engines != ('postgresql',)
             or 'database' not in profile.requirements
-            or not re.fullmatch(r'onedeploy-[a-z][a-z0-9]*(?:-[a-z0-9]+)*', existing_postgres_id)):
-        raise ValueError('기존 PostgreSQL 인프라 계획의 대상과 탐지 결과가 다릅니다.')
+            or not re.fullmatch(r'onedeploy-[a-z][a-z0-9]*(?:-[a-z0-9]+)*', database_id)):
+        raise ValueError('PostgreSQL 인프라 계획의 대상과 탐지 결과가 다릅니다.')
+    if create_postgres_id is not None:
+        return {'target': target, 'workload': 'postgresql-http',
+                'rationale': '앱의 PostgreSQL 의존성과 SQL 마이그레이션을 확인했습니다. 검토한 계획으로 앱 소유 RDS를 생성한 뒤 ECS 서비스를 배포합니다. 앱 배포가 실패해도 DB와 데이터는 보존됩니다.',
+                'evidence': [], 'detected_files': list(profile.evidence),
+                'resources': [*TARGET_RESOURCES[target], 'new RDS PostgreSQL',
+                              'one-off SQL migration task'],
+                'database': {'binding': 'create', 'database_id': create_postgres_id},
+                'planner': 'user'}
     return {'target': target, 'workload': 'postgresql-http',
             'rationale': '앱의 PostgreSQL 의존성과 SQL 마이그레이션을 확인했습니다. 소유권을 검증한 기존 RDS에 ECS 서비스를 연결합니다. DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.',
             'evidence': [], 'detected_files': list(profile.evidence),
             'resources': [*TARGET_RESOURCES[target], 'existing RDS PostgreSQL',
                           'one-off SQL migration task'],
-            'database': {'binding': 'existing', 'database_id': existing_postgres_id},
+            'database': {'binding': 'existing', 'database_id': database_id},
             'planner': 'user'}
 
 

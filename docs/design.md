@@ -159,6 +159,7 @@ CLI 서버는 활성 성공 배포를 기본 5분마다 자동 재검사한다. 
 ## API
 
 - `POST /api/deployments`: 폴더/ZIP 업로드와 AI 배포 시작. 대상은 X-Deploy-Target 헤더(`auto` 또는 명시적 대상).
+- 검토한 신규 RDS 계획으로 배포할 때는 같은 API에 `X-Postgres-Create-Plan`을 전달한다. 서버는 소스·SQL을 먼저 검사하고 `provisioning` 작업을 저장한 뒤 DB 생성을 시작한다. 확인된 생성 기록과 소유 DB만 AI 배포로 넘긴다. 중단 시 자동 재시도하지 않는다.
 - `POST /api/deployments/<id>/resume`: environment JSON으로 입력 대기 작업 재개.
 - `POST /api/deployments/<id>/cancel`: 입력 대기 작업은 즉시 취소한다. 실행 중 작업은 첫 배포 시도 전까지만 취소 요청을 기록하고 AI 응답·도구 경계에서 중단한다. 첫 시도 이후에는 거부한다.
 - `GET /api/jobs`, `GET /api/jobs/<id>`: 배포 진행·결과·이력.

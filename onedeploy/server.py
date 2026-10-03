@@ -10,6 +10,7 @@ import secrets
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -146,7 +147,7 @@ class App:
                 elif job.get("mode") != "agent":
                     raise ValueError("Missing deployment plan")
                 postgres_request_from_job(job)
-                if job["status"] not in {"planned", "running", "waiting_input", "succeeded", "failed", "interrupted", "cancelled"}:
+                if job["status"] not in {"planned", "provisioning", "running", "waiting_input", "succeeded", "failed", "interrupted", "cancelled"}:
                     raise ValueError("Invalid job status")
                 if (not isinstance(job["events"], list) or any(
                         not isinstance(event, dict) or any(not isinstance(event.get(key), str)
@@ -181,6 +182,11 @@ class App:
                             if job['status'] == 'cancelled' else
                             "서버 재시작으로 완료 여부를 확인하지 못했습니다. 컨테이너 상태를 확인하세요. 자동 재배포는 하지 않습니다.")})
                     job.pop('cancel_requested', None)
+                    self.save(job_id)
+                if job['status'] == 'provisioning':
+                    job['status'] = 'interrupted'
+                    job['events'].append({'time': datetime.now(timezone.utc).isoformat(),
+                        'stage': 'interrupted', 'message': '서버 재시작으로 DB 생성과 배포 연결을 중단했습니다. DB 생성 상태를 재확인하세요. 자동 배포하지 않습니다.'})
                     self.save(job_id)
                 if job.get('deployment_state') == 'deleting':
                     job['deployment_state'] = 'delete_failed'
@@ -259,7 +265,7 @@ class App:
         if target in {'auto', 'aws-ecs-express'} and self.postgres_retirement_operations.blocks_deployment(application_id):
             raise ValueError(f'{application_id}의 PostgreSQL 폐기 기록이 있어 AWS 배포를 시작할 수 없습니다.')
         if any(job.get("application_id") == application_id and job.get("target") == target
-               and job.get("status") in {"running", "waiting_input"} for job in self.jobs.values()):
+               and job.get("status") in {"provisioning", "running", "waiting_input"} for job in self.jobs.values()):
             raise ValueError(f"{application_id}의 {target} 배포가 이미 진행 중입니다.")
         if any(job.get("application_id") == application_id and job.get("target") == target
                and job.get("deployment_state") in {"deleting", "needs_attention"} for job in self.jobs.values()):
@@ -299,7 +305,7 @@ class App:
                         other is not current
                         and other.get('application_id', other['id']) == current.get('application_id', current['id'])
                         and other.get('target', 'local-docker') == current.get('target', 'local-docker')
-                        and other.get('status') in {'running', 'waiting_input'}
+                        and other.get('status') in {'provisioning', 'running', 'waiting_input'}
                         for other in self.jobs.values()))):
                 return result
             history = (self.health_history.get(job_id, []) + [entry])[-20:]
@@ -331,7 +337,7 @@ class App:
                           and not any(other is not job
                                       and other.get('application_id', other['id']) == job.get('application_id', job['id'])
                                       and other.get('target', 'local-docker') == job.get('target', 'local-docker')
-                                      and other.get('status') in {'running', 'waiting_input'} for other in jobs)]
+                                      and other.get('status') in {'provisioning', 'running', 'waiting_input'} for other in jobs)]
         for job_id in candidates:
             try:
                 self.check_and_record_health(job_id, 'automatic')
@@ -467,6 +473,45 @@ class App:
     def cancel_requested(self, job_id):
         with self.lock:
             return bool(self.jobs[job_id].get('cancel_requested'))
+
+    def run_postgres_then_agent(self, job_id: str) -> None:
+        """Wait for a separately journaled RDS creation; never retry it on restart."""
+        try:
+            job = self.jobs[job_id]
+            request = postgres_request_from_job(job)
+            if request is None:
+                raise ValueError('PostgreSQL 생성 작업에 연결 정보가 없습니다.')
+            deadline = time.monotonic() + 3600
+            while True:
+                operation = self.postgres_operations.get(request.application_id)
+                if operation['status'] == 'succeeded':
+                    if operation['database_id'] != request.database_id:
+                        raise ValueError('생성된 DB 식별자가 배포 계획과 다릅니다.')
+                    database = AwsPostgresProvisioner(request).inspect_current()
+                    self.postgres_operations.require_deployable(
+                        request.application_id, database['database_id'])
+                    with self.lock:
+                        job = self.jobs[job_id]
+                        if job['status'] != 'provisioning':
+                            return
+                        job['status'] = 'running'
+                        self.save(job_id)
+                    self.event(job_id, 'database_ready', '소유 PostgreSQL 생성 완료. 앱 배포를 시작합니다.')
+                    self.run_agent(job_id)
+                    return
+                if operation['status'] != 'running':
+                    raise ValueError('DB 생성 결과가 불확실합니다. 생성 상태를 재확인하세요. 앱은 자동 배포하지 않습니다.')
+                if time.monotonic() > deadline:
+                    raise TimeoutError('DB 생성 대기 시간이 초과됐습니다. 상태를 재확인하세요. 앱은 자동 배포하지 않습니다.')
+                time.sleep(3)
+        except Exception as exc:
+            with self.lock:
+                job = self.jobs[job_id]
+                if job['status'] not in {'provisioning', 'running'}:
+                    return
+                job['status'] = 'interrupted'
+                self.save(job_id)
+            self.event(job_id, 'database_attention', redact(str(exc))[:500])
 
     def run(self, job_id, environment=None):
         environment = {} if environment is None else environment
@@ -658,7 +703,7 @@ class App:
                     or any(other is not failed and other is not previous
                            and other.get('application_id') == failed.get('application_id')
                            and other.get('target') == 'aws-ecs-express'
-                           and other.get('status') in {'running', 'waiting_input'} for other in self.jobs.values())):
+                           and other.get('status') in {'provisioning', 'running', 'waiting_input'} for other in self.jobs.values())):
                 raise ValueError('정리할 수 있는 실패 AWS 이미지가 아닙니다.')
             failed['aws_image_cleanup_state'] = 'running'
             self.save(job_id)
@@ -732,7 +777,7 @@ class App:
                     or any(other is not current and other is not previous
                            and other.get('application_id') == current.get('application_id')
                            and other.get('target') == 'aws-ecs-express'
-                           and (other.get('status') in {'running', 'waiting_input'}
+                           and (other.get('status') in {'provisioning', 'running', 'waiting_input'}
                                 or other.get('deployment_state') in {'deleting', 'needs_attention'}
                                 or other.get('aws_image_cleanup_state') == 'running')
                            for other in self.jobs.values())):
@@ -1102,7 +1147,7 @@ def handler_for(app: App):
                         raise ValueError('유효한 폐기 계획 ID와 정확한 DB ID가 필요합니다.')
                     with app.lock:
                         if any(job.get('application_id') == application_id
-                               and job.get('status') in {'running', 'waiting_input'}
+                               and job.get('status') in {'provisioning', 'running', 'waiting_input'}
                                for job in app.jobs.values()):
                             raise ValueError('이 앱의 배포가 진행 중입니다. 완료 후 다시 시도하세요.')
                         result = app.postgres_retirement_operations.start(
@@ -1189,7 +1234,7 @@ def handler_for(app: App):
                                 or job.get('release_rollback_state') in {'running', 'needs_attention'}
                                 or (job.get('target') == 'aws-ecs-express' and any(other is not job and other.get('application_id') == job.get('application_id')
                                        and other.get('target') == 'aws-ecs-express'
-                                       and (other.get('status') in {'running', 'waiting_input'}
+                                       and (other.get('status') in {'provisioning', 'running', 'waiting_input'}
                                             or other.get('aws_image_cleanup_state') == 'running')
                                        for other in app.jobs.values()))):
                             message = ('종료할 수 있는 AWS 배포가 아닙니다.' if job and job.get('target') == 'aws-ecs-express'
@@ -1235,34 +1280,50 @@ def handler_for(app: App):
                     postgres_flag = self.headers.get('X-Postgres-Existing', 'false')
                     if postgres_flag not in {'true', 'false'}:
                         raise ValueError('기존 PostgreSQL 선택 값이 올바르지 않습니다.')
+                    create_plan_id = self.headers.get('X-Postgres-Create-Plan')
+                    if create_plan_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', create_plan_id):
+                        raise ValueError('유효한 PostgreSQL 생성 계획 ID가 필요합니다.')
+                    if create_plan_id is not None and postgres_flag == 'true':
+                        raise ValueError('기존 DB 사용과 신규 DB 생성을 동시에 선택할 수 없습니다.')
                     postgres_headers = ('X-Postgres-Vpc-Id', 'X-Postgres-Subnet-Ids')
                     supplied_postgres_network = tuple(name in self.headers for name in postgres_headers)
                     if postgres_flag != 'true' and any(supplied_postgres_network):
                         raise ValueError('PostgreSQL 연결 정보에는 기존 DB 명시적 선택이 필요합니다.')
                     postgres_request = None
                     aws_settings_for_job = app.aws_settings
-                    if postgres_flag == 'true':
+                    if postgres_flag == 'true' or create_plan_id is not None:
                         settings = app.aws_settings
                         if (target not in {'auto', 'aws-ecs-express'} or public_flag != 'true'
                                 or not settings.expected_account):
-                            raise ValueError('기존 PostgreSQL 경로에는 공개 AWS 대상과 계정 고정이 필요합니다.')
+                            raise ValueError('PostgreSQL 경로에는 공개 AWS 대상과 계정 고정이 필요합니다.')
                         if settings.unavailable_reason():
                             raise ValueError(settings.unavailable_reason())
-                        if supplied_postgres_network == (True, False) or supplied_postgres_network == (False, True):
-                            raise ValueError('PostgreSQL VPC와 서브넷 입력은 함께 지정하세요.')
-                        if supplied_postgres_network == (False, False):
-                            discovered = discover_existing_postgres(application_id, settings)
-                            vpc_id = discovered['vpc_id']
-                            subnet_ids = tuple(discovered['subnet_ids'])
+                        if create_plan_id is not None:
+                            postgres_request = app.postgres_operations.reviewed_request(
+                                application_id, create_plan_id)
+                            vpc_id = postgres_request.vpc_id
                         else:
-                            vpc_id = self.headers['X-Postgres-Vpc-Id']
-                            subnet_ids = tuple(part.strip() for part in
-                                               self.headers['X-Postgres-Subnet-Ids'].split(','))
+                            if supplied_postgres_network == (True, False) or supplied_postgres_network == (False, True):
+                                raise ValueError('PostgreSQL VPC와 서브넷 입력은 함께 지정하세요.')
+                            if supplied_postgres_network == (False, False):
+                                discovered = discover_existing_postgres(application_id, settings)
+                                vpc_id = discovered['vpc_id']
+                                subnet_ids = tuple(discovered['subnet_ids'])
+                            else:
+                                vpc_id = self.headers['X-Postgres-Vpc-Id']
+                                subnet_ids = tuple(part.strip() for part in
+                                                   self.headers['X-Postgres-Subnet-Ids'].split(','))
                         aws_settings_for_job = postgres_settings_for_application(
                             application_id, vpc_id, settings)
-                        postgres_request = PostgresRequest(application_id, settings.expected_account,
-                            settings.region, vpc_id, subnet_ids,
-                            aws_settings_for_job.service_security_group)
+                        if create_plan_id is not None:
+                            if (postgres_request.account != settings.expected_account
+                                    or postgres_request.region != settings.region
+                                    or postgres_request.service_security_group != aws_settings_for_job.service_security_group):
+                                raise ValueError('검토한 DB 계획과 현재 AWS 계정·네트워크 설정이 다릅니다.')
+                        else:
+                            postgres_request = PostgresRequest(application_id, settings.expected_account,
+                                settings.region, vpc_id, subnet_ids,
+                                aws_settings_for_job.service_security_group)
                         postgres_request.validate()
                         if target == 'auto':
                             target = 'aws-ecs-express'
@@ -1286,9 +1347,10 @@ def handler_for(app: App):
                                                 postgres=postgres_request is not None)
                         if postgres_request is not None:
                             collect_sql_migrations(project)
-                            database = AwsPostgresProvisioner(postgres_request).inspect_current()
-                            app.postgres_operations.require_deployable(
-                                application_id, database['database_id'])
+                            if create_plan_id is None:
+                                database = AwsPostgresProvisioner(postgres_request).inspect_current()
+                                app.postgres_operations.require_deployable(
+                                    application_id, database['database_id'])
                         if target == 'auto':
                             available_targets = ['local-docker']
                             if app.cloud_settings.unavailable_reason() is None:
@@ -1302,13 +1364,16 @@ def handler_for(app: App):
                             infrastructure_plan = explicit_infrastructure_plan(
                                 target, infrastructure_profile,
                                 existing_postgres_id=database['database_id']
-                                if postgres_request is not None else None)
+                                if postgres_request is not None and create_plan_id is None else None,
+                                create_postgres_id=postgres_request.database_id
+                                if create_plan_id is not None else None)
                             if requested_target == 'auto' and postgres_request is not None:
                                 infrastructure_plan['planner'] = 'policy'
                                 infrastructure_plan['rationale'] = (
-                                    '검증된 기존 PostgreSQL RDS 연결에는 AWS ECS Express만 지원됩니다. '
-                                    '앱의 PostgreSQL 근거와 RDS 소유권을 확인해 AWS를 선택했습니다. '
-                                    'DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.')
+                                    'PostgreSQL 연결에는 AWS ECS Express만 지원됩니다. 앱의 PostgreSQL 근거와 ' +
+                                    ('검토된 생성 계획을 확인해 AWS를 선택했습니다. DB는 생성 후 앱 실패에도 보존됩니다.'
+                                     if create_plan_id is not None else
+                                     'RDS 소유권을 확인해 AWS를 선택했습니다. DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.'))
                         with app.lock:
                             app.ensure_application_available(application_id, target)
                             latest = None
@@ -1320,6 +1385,8 @@ def handler_for(app: App):
                                             and old.get('deployment_state', 'active') == 'active'
                                             and old.get('result')]
                                 if previous:
+                                    if create_plan_id is not None:
+                                        raise ValueError('활성 AWS 릴리스가 있는 앱에는 신규 DB 생성·배포를 시작할 수 없습니다.')
                                     latest = max(previous, key=lambda item: item.get('created_at', ''))
                                     if postgres_request is None and latest['result'].get('database') is not None:
                                         raise ValueError('기존 PostgreSQL 서비스 업데이트에는 동일한 DB 연결 요청이 필요합니다.')
@@ -1329,7 +1396,8 @@ def handler_for(app: App):
                                 "requested_target": requested_target, "infrastructure_plan": infrastructure_plan,
                                 "application_id": application_id,
                                 "public": target in {"cloud-run", "aws-ecs-express"} and public_flag == "true",
-                                "status": "running", "created_at": datetime.now(timezone.utc).isoformat(),
+                                "status": "provisioning" if create_plan_id is not None else "running",
+                                "created_at": datetime.now(timezone.utc).isoformat(),
                                 "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
                                 "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
                                 "events": []}
@@ -1349,8 +1417,24 @@ def handler_for(app: App):
                         if job_id not in app.jobs:
                             shutil.rmtree(directory)
                         raise
-                    threading.Thread(target=app.run_agent, args=(job_id,), daemon=True).start()
-                    self.json_response(202, {"id": job_id, "status": "running"})
+                    if create_plan_id is not None:
+                        try:
+                            app.postgres_operations.start(application_id, create_plan_id)
+                            threading.Thread(target=app.run_postgres_then_agent,
+                                             args=(job_id,), daemon=True).start()
+                        except Exception as exc:
+                            with app.lock:
+                                app.jobs[job_id]['status'] = 'interrupted'
+                                app.save(job_id)
+                            app.event(job_id, 'database_attention',
+                                      'DB 생성·배포 연결을 시작하지 못했습니다. 생성 상태를 재확인하세요: '
+                                      + redact(str(exc))[:300])
+                            self.json_response(202, {"id": job_id, "status": "interrupted"})
+                            return
+                        self.json_response(202, {"id": job_id, "status": "provisioning"})
+                    else:
+                        threading.Thread(target=app.run_agent, args=(job_id,), daemon=True).start()
+                        self.json_response(202, {"id": job_id, "status": "running"})
                     return
                 if self.path.startswith("/api/deployments/") and self.path.endswith("/resume"):
                     job_id = self.path.split('/')[-2]

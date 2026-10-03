@@ -161,6 +161,16 @@ class PostgresOperations:
                                                    'result': result, 'expires': time.monotonic() + 900}
         return {**result, 'plan_id': token}
 
+    def reviewed_request(self, application_id: str, plan_id: str) -> PostgresRequest:
+        """Return only a live, reviewed creation request for this application."""
+        with self.lock:
+            self._assert_trusted(application_id)
+            plan = self.plans.get(application_id)
+            if (not plan or plan['id'] != plan_id or time.monotonic() > plan['expires']
+                    or application_id in self.operations):
+                raise ValueError('생성 계획이 없거나 만료됐습니다. 가격을 다시 확인하세요.')
+            return plan['request']
+
     def start(self, application_id: str, plan_id: str) -> dict:
         with self.lock:
             self._assert_trusted(application_id)
@@ -211,15 +221,27 @@ class PostgresOperations:
             database = AwsPostgresProvisioner(request).create(expected_plan=expected)
         except Exception as exc:
             with self.lock:
-                operation['status'] = 'needs_attention'
-                operation['message'] = 'RDS 생성 결과를 확인하지 못했습니다: ' + str(exc)
-                self._save(operation)
+                updated = {**operation, 'status': 'needs_attention',
+                           'message': 'RDS 생성 결과를 확인하지 못했습니다: ' + str(exc)}
+                try:
+                    self._save(updated)
+                except OSError:
+                    operation['status'] = 'needs_attention'
+                    operation['message'] = 'RDS 생성 기록 저장에 실패했습니다. AWS 상태를 재확인하세요.'
+                    raise
+                self.operations[application_id] = updated
             return
         with self.lock:
-            operation['status'] = 'succeeded'
-            operation['message'] = '기존 RDS 조회 후 앱 배포를 진행할 수 있습니다.'
-            operation['database_id'] = database['database_id']
-            self._save(operation)
+            updated = {**operation, 'status': 'succeeded',
+                       'message': '기존 RDS 조회 후 앱 배포를 진행할 수 있습니다.',
+                       'database_id': database['database_id']}
+            try:
+                self._save(updated)
+            except OSError:
+                operation['status'] = 'needs_attention'
+                operation['message'] = 'RDS 생성 기록 저장에 실패했습니다. AWS 상태를 재확인하세요.'
+                raise
+            self.operations[application_id] = updated
 
     def get(self, application_id: str) -> dict:
         with self.lock:

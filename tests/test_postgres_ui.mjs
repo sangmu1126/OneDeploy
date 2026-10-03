@@ -327,6 +327,53 @@ test('reviewed RDS plan can start creation and fill the resulting DB connection'
   assert.equal(element('postgresSubnets').value, 'subnet-11111111,subnet-22222222');
 });
 
+test('reviewed RDS plan and selected ZIP start one creation and deployment job', async () => {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: '', checked: false, files: [], hidden: false, disabled: false,
+      textContent: '', replaceChildren() {}, querySelectorAll() { return []; },
+    });
+    return elements.get(id);
+  };
+  const requests = [];
+  const jobId = 'a'.repeat(16);
+  const context = {
+    document: {getElementById: element, hidden: false},
+    fetch: async (path, options) => {
+      requests.push({path, options});
+      const body = path === '/api/config'
+        ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
+        : path === '/api/jobs' ? []
+        : path.endsWith('/postgres/plan')
+          ? {plan_id: 'planned-token-123456789012', account: '123456789012',
+             region: 'ap-northeast-2', engine_version: '18.3', instance_class: 'db.t4g.micro',
+             storage_type: 'gp3', storage_gib: 20, pricing: {baseline_730h_usd: '20.87'}}
+        : path === '/api/deployments' ? {id: jobId, status: 'provisioning'}
+        : {id: jobId, status: 'interrupted', events: [], target: 'aws-ecs-express'};
+      return {ok: true, json: async () => body};
+    },
+    setInterval() {}, setTimeout, FormData, Set, Error, Date,
+  };
+  runInNewContext(html.split('<script>', 2)[1].split('</script>', 1)[0], context);
+  await new Promise(resolve => setImmediate(resolve));
+  element('application').value = 'demo-app';
+  element('target').value = 'aws-ecs-express';
+  element('public').checked = true;
+  element('postgresPlanVpc').value = 'vpc-12345678';
+  element('postgresPlanSubnets').value = 'subnet-11111111,subnet-22222222';
+  const file = {name: 'demo-app.zip', size: 100};
+  element('file').files = [file];
+  await element('postgresPlan').onclick();
+  assert.equal(element('postgresCreateDeploy').hidden, false);
+  await element('postgresCreateDeploy').onclick();
+  const upload = requests.find(request => request.path === '/api/deployments');
+  assert.ok(upload);
+  assert.equal(upload.options.headers['X-Postgres-Create-Plan'], 'planned-token-123456789012');
+  assert.equal(upload.options.body, file);
+  assert.equal(requests.some(request => request.path.endsWith('/postgres/create')), false);
+});
+
 test('failed RDS creation requires the exact stack ARN before cleanup', async () => {
   const elements = new Map();
   const element = id => {

@@ -1,8 +1,10 @@
 import io
 import json
 import tempfile
+import time
 import unittest
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -109,7 +111,7 @@ class PostgresServerTests(unittest.TestCase):
                 self.app.ensure_application_available('demo-app', 'aws-ecs-express')
 
     def upload(self, content, *, postgres=True, target='aws-ecs-express', public=True,
-               network_headers=True, partial_network=False):
+               network_headers=True, partial_network=False, create_plan_id=None):
         handler_class = handler_for(self.app)
         handler = handler_class.__new__(handler_class)
         handler.path = '/api/deployments'
@@ -123,6 +125,8 @@ class PostgresServerTests(unittest.TestCase):
                 handler.headers['X-Postgres-Vpc-Id'] = 'vpc-12345678'
                 if not partial_network:
                     handler.headers['X-Postgres-Subnet-Ids'] = 'subnet-11111111,subnet-22222222'
+        if create_plan_id is not None:
+            handler.headers['X-Postgres-Create-Plan'] = create_plan_id
         handler.rfile = io.BytesIO(content)
         handler.json_response = Mock()
         with patch.object(AwsSettings, 'unavailable_reason', return_value=None), \
@@ -327,6 +331,119 @@ class PostgresServerTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.json_response.call_args.args[0], 400)
         preflight.assert_not_called()
+
+    def reviewed_create_plan(self):
+        token = 'a' * 32
+        request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
+            ('subnet-11111111', 'subnet-22222222'), GROUP)
+        self.app.postgres_operations.plans['demo-app'] = {
+            'id': token, 'request': request, 'result': {}, 'expires': time.monotonic() + 900}
+        return token
+
+    def created_operation(self, status, database_id=None):
+        request = self.app.postgres_operations.plans['demo-app']['request']
+        return {'application_id': 'demo-app', 'status': status,
+                'request': asdict(request), 'expected_plan': {
+                    'pricing': {'baseline_730h_usd': '20.87'}},
+                'database_id': database_id, 'created_at': '2026-10-03T00:00:00+00:00',
+                'message': 'test operation'}
+
+    def test_reviewed_rds_plan_upload_creates_one_provisioning_job(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start', return_value={'status': 'running'}) as start, \
+                patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect:
+            status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        self.assertEqual((status, payload['status']), (202, 'provisioning'))
+        start.assert_called_once_with('demo-app', token)
+        inspect.assert_not_called()
+        job = self.app.jobs[payload['id']]
+        self.assertEqual(job['infrastructure_plan']['database'],
+                         {'binding': 'create', 'database_id': 'onedeploy-demo-app'})
+        self.assertEqual(job['status'], 'provisioning')
+        with self.assertRaisesRegex(ValueError, '이미 진행 중'):
+            self.app.ensure_application_available('demo-app', 'aws-ecs-express')
+
+    def test_reviewed_rds_upload_validates_source_before_creation(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start') as start:
+            status, payload = self.upload(archive(include_migration=False),
+                                          postgres=False, create_plan_id=token)
+        self.assertEqual(status, 400)
+        self.assertIn('migrations/', payload['error'])
+        start.assert_not_called()
+        self.assertFalse(self.app.jobs)
+
+    def test_changed_rds_plan_interrupts_job_without_agent_start(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          side_effect=ValueError('생성 계획이 변경됐습니다.')) as start, \
+                patch.object(self.app, 'run_agent') as deploy:
+            status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        self.assertEqual((status, payload['status']), (202, 'interrupted'))
+        start.assert_called_once_with('demo-app', token)
+        deploy.assert_not_called()
+        self.assertEqual(self.app.jobs[payload['id']]['status'], 'interrupted')
+        self.assertIn('재확인', self.app.jobs[payload['id']]['events'][-1]['message'])
+
+    def test_create_plan_rejects_existing_database_selection(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start') as start:
+            status, payload = self.upload(archive(), create_plan_id=token)
+        self.assertEqual(status, 400)
+        self.assertIn('동시에', payload['error'])
+        start.assert_not_called()
+        self.assertFalse(self.app.jobs)
+
+    def test_creation_result_controls_same_job_deployment(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start', return_value={'status': 'running'}):
+            status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        self.assertEqual(status, 202)
+        job_id = payload['id']
+        self.app.postgres_operations.operations['demo-app'] = self.created_operation(
+            'succeeded', 'onedeploy-demo-app')
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}), \
+                patch('onedeploy.server.DeploymentAgent.run',
+                      return_value={'url': 'https://example.test', 'target': 'aws-ecs-express'}) as deploy:
+            self.app.run_postgres_then_agent(job_id)
+        deploy.assert_called_once_with()
+        self.assertEqual(self.app.jobs[job_id]['status'], 'succeeded')
+        self.assertEqual(self.app.jobs[job_id]['result']['url'], 'https://example.test')
+        self.assertIn('database_ready', [event['stage'] for event in self.app.jobs[job_id]['events']])
+
+    def test_provisioning_waits_for_confirmed_database_before_agent(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start', return_value={'status': 'running'}):
+            _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        operation = self.created_operation('running')
+        self.app.postgres_operations.operations['demo-app'] = operation
+        def finish_create(_seconds):
+            operation['status'] = 'succeeded'
+            operation['database_id'] = 'onedeploy-demo-app'
+        with patch('onedeploy.server.time.sleep', side_effect=finish_create) as sleep, \
+                patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                      return_value={'database_id': 'onedeploy-demo-app'}), \
+                patch('onedeploy.server.DeploymentAgent.run',
+                      return_value={'url': 'https://example.test', 'target': 'aws-ecs-express'}):
+            self.app.run_postgres_then_agent(payload['id'])
+        sleep.assert_called_once_with(3)
+        self.assertEqual(self.app.jobs[payload['id']]['status'], 'succeeded')
+
+    def test_uncertain_creation_never_starts_agent_and_restart_does_not_retry(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start', return_value={'status': 'running'}):
+            status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        self.assertEqual(status, 202)
+        job_id = payload['id']
+        restored = App(self.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.settings, monitor_interval=0)
+        self.assertEqual(restored.jobs[job_id]['status'], 'interrupted')
+        self.app.postgres_operations.operations['demo-app'] = self.created_operation('needs_attention')
+        with patch.object(self.app, 'run_agent') as deploy:
+            self.app.run_postgres_then_agent(job_id)
+        deploy.assert_not_called()
+        self.assertEqual(self.app.jobs[job_id]['status'], 'interrupted')
 
     def test_opt_in_upload_persists_and_restores_postgres_request(self):
         database = {'database_id': 'onedeploy-demo-app'}

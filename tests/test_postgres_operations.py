@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from dataclasses import asdict
 from pathlib import Path
@@ -63,6 +64,17 @@ class PostgresOperationsTests(unittest.TestCase):
                 self.manager.start('demo-app', plan['plan_id'])
         self.assertFalse((self.root / 'demo-app.json').exists())
         start.assert_not_called()
+
+    def test_only_current_reviewed_creation_plan_can_join_an_upload(self):
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=self.quote):
+            plan = self.manager.plan(self.request)
+        self.assertEqual(self.manager.reviewed_request('demo-app', plan['plan_id']), self.request)
+        with self.assertRaisesRegex(ValueError, '계획'):
+            self.manager.reviewed_request('demo-app', 'wrong-token')
+        self.manager.plans['demo-app']['expires'] = time.monotonic() - 1
+        with self.assertRaisesRegex(ValueError, '만료'):
+            self.manager.reviewed_request('demo-app', plan['plan_id'])
 
     def test_corrupt_active_journal_blocks_same_app_before_aws(self):
         (self.root / 'demo-app.json').write_text('{not-json')
@@ -128,6 +140,20 @@ class PostgresOperationsTests(unittest.TestCase):
         self.assertEqual(operation['status'], 'succeeded')
         self.assertNotIn('secret_arn', json.dumps(operation))
         self.assertEqual(operation['database_id'], 'onedeploy-demo-app')
+
+    def test_create_is_not_visible_as_succeeded_until_journal_is_saved(self):
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=self.quote), \
+                patch('onedeploy.postgres_operations.threading.Thread.start'):
+            plan = self.manager.plan(self.request)
+            self.manager.start('demo-app', plan['plan_id'])
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.create',
+                   return_value={'database_id': 'onedeploy-demo-app'}), \
+                patch.object(self.manager, '_save', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.manager._run('demo-app')
+        self.assertEqual(self.manager.operations['demo-app']['status'], 'needs_attention')
+        self.assertEqual(json.loads((self.root / 'demo-app.json').read_text())['status'], 'running')
 
     def test_reconcile_checks_owned_stack_and_completed_database(self):
         with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
