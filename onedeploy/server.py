@@ -419,7 +419,8 @@ class App:
                                     infrastructure_plan=job.get('infrastructure_plan'),
                                     postgres_request=postgres_request_from_job(job),
                                     cancel_check=lambda: self.cancel_requested(job_id),
-                                    require_existing_work=bool(job.get('steps', 0)))
+                                    require_existing_work=bool(job.get('steps', 0)),
+                                    expected_work_digest=job.get('work_digest'))
             self.event(job_id, "starting", "AI가 작업용 소스에서 배포를 준비합니다.")
             result = DeploymentAgent(self.agent_factory(self.ai_settings), tools,
                                      steps=job.get("steps", 0)).run()
@@ -441,10 +442,15 @@ class App:
             # Previous values are not persisted, so ask for their names again on resume too.
             names = sorted(set(exc.names) | set(environment))
             try:
-                checkpoint(status="waiting_input", missing_environment=names, input_reason=exc.reason)
+                digest = source_digest(tools.work)
+                checkpoint(status="waiting_input", missing_environment=names,
+                           input_reason=exc.reason, work_digest=digest)
             except DeploymentCancelled:
                 checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
                 self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
+            except (OSError, ValueError):
+                checkpoint(status="failed", missing_environment=[])
+                self.event(job_id, "error", "작업용 소스의 무결성을 확인하지 못했습니다. 새 배포를 시작하세요.")
             else:
                 self.event(job_id, "waiting_input", exc.reason)
         except Exception as exc:
@@ -1551,6 +1557,16 @@ def handler_for(app: App):
                         job = app.jobs.get(job_id)
                         if not job or job.get('mode') != 'agent' or job['status'] != 'waiting_input':
                             self.json_response(409, {"error": "환경변수 입력을 기다리는 배포가 아닙니다."})
+                            return
+                        work = app.root / job_id / 'work'
+                        expected_digest = job.get('work_digest')
+                        try:
+                            unchanged = (work.is_dir() and not work.is_symlink()
+                                         and (expected_digest is None or source_digest(work) == expected_digest))
+                        except (OSError, ValueError):
+                            unchanged = False
+                        if not unchanged:
+                            self.json_response(409, {"error": "입력 대기 이후 작업용 소스가 없거나 변경됐습니다. 새 배포를 시작하세요."})
                             return
                         environment = validate_environment(payload['environment'], job['missing_environment'])
                         job.update(status="running", environment_names=sorted(environment), missing_environment=[])

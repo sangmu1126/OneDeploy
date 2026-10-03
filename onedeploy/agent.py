@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from onedeploy.analysis import AISettings, redact
-from onedeploy.core import SOURCE_FILENAMES, SOURCE_SUFFIXES, LocalDockerAdapter, make_plan, validate_environment
+from onedeploy.core import SOURCE_FILENAMES, SOURCE_SUFFIXES, LocalDockerAdapter, make_plan, source_digest, validate_environment
 from onedeploy.infrastructure import inspect_infrastructure, validate_infrastructure
 from onedeploy.migrations import collect_sql_migrations
 from onedeploy.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
@@ -115,7 +115,7 @@ class DeploymentTools:
     def __init__(self, original: Path, work: Path, job_id: str, environment, event, checkpoint,
                  attempts=0, adapter_factory=LocalDockerAdapter, target="local-docker",
                  infrastructure_plan=None, postgres_request: PostgresRequest | None = None,
-                 cancel_check=None, require_existing_work=False):
+                 cancel_check=None, require_existing_work=False, expected_work_digest=None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
         self.emit, self.checkpoint = event, checkpoint
@@ -140,6 +140,8 @@ class DeploymentTools:
             raise AgentError('작업용 소스 경로가 올바른 디렉터리가 아닙니다.')
         if require_existing_work and not work.is_dir():
             raise AgentError('재개할 작업용 소스를 찾지 못했습니다. 원본에서 조용히 다시 시작하지 않습니다.')
+        if expected_work_digest is not None and source_digest(work) != expected_work_digest:
+            raise AgentError('입력 대기 이후 작업용 소스가 변경됐습니다. 새 배포를 시작하세요.')
         if not work.exists():
             shutil.copytree(original, work)
 

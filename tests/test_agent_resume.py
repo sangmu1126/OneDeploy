@@ -1,15 +1,16 @@
 """A paused agent must resume from its repaired working copy after a server restart."""
+import io
 import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent_fixture import call
 from onedeploy.analysis import AISettings
-from onedeploy.core import LocalDockerAdapter
-from onedeploy.server import App
+from onedeploy.core import LocalDockerAdapter, source_digest
+from onedeploy.server import App, handler_for
 
 
 class AgentResumeTests(unittest.TestCase):
@@ -74,6 +75,7 @@ class AgentResumeTests(unittest.TestCase):
                 work = root / job_id / 'work'
                 self.assertIn('"start": "node server.js"', (work / 'package.json').read_text())
                 self.assertIn('0.0.0.0', (work / 'server.js').read_text())
+                self.assertEqual(app.jobs[job_id]['work_digest'], source_digest(work))
 
                 restored = App(root, AISettings('fixture-key', 'fixture-model'),
                                agent_factory=factory, monitor_interval=0)
@@ -109,6 +111,43 @@ class AgentResumeTests(unittest.TestCase):
             self.assertEqual(app.jobs[job_id]['status'], 'failed')
             self.assertIn('작업용 소스를 찾지 못했습니다', app.jobs[job_id]['events'][-1]['message'])
             self.assertFalse((root / job_id / 'work').exists())
+            deploy.assert_not_called()
+
+    def test_resume_api_rejects_changed_work_before_accepting_secret(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_id = 'c' * 16
+            source = root / job_id / 'source'
+            work = root / job_id / 'work'
+            shutil.copytree('examples/unready-node', source)
+            shutil.copytree(source, work)
+            app = App(root, AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            app.jobs[job_id] = {'id': job_id, 'mode': 'agent', 'status': 'waiting_input',
+                                'target': 'local-docker', 'project': str(source),
+                                'plan': None, 'events': [], 'steps': 2,
+                                'missing_environment': ['APP_SECRET'],
+                                'work_digest': source_digest(work)}
+            app.save(job_id)
+            (work / 'server.js').write_text('changed after pause')
+            payload = json.dumps({'environment': {'APP_SECRET': 'synthetic-secret'}}).encode()
+            handler = handler_for(app).__new__(handler_for(app))
+            handler.path = f'/api/deployments/{job_id}/resume'
+            handler.headers = {'X-OneDeploy-Token': app.token,
+                               'Content-Length': str(len(payload))}
+            handler.rfile = io.BytesIO(payload)
+            handler.json_response = Mock()
+            with patch('onedeploy.server.threading.Thread.start') as start:
+                handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[0], 409)
+            self.assertEqual(app.jobs[job_id]['status'], 'waiting_input')
+            self.assertNotIn('synthetic-secret', (root / job_id / 'job.json').read_text())
+            start.assert_not_called()
+            # The worker checks again if files change after an API check but before it starts.
+            app.jobs[job_id]['status'] = 'running'
+            with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+                app.run_agent(job_id, {'APP_SECRET': 'synthetic-secret'})
+            self.assertEqual(app.jobs[job_id]['status'], 'failed')
+            self.assertEqual(app.jobs[job_id].get('attempts', 0), 0)
             deploy.assert_not_called()
 
 
