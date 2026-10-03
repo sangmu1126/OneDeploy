@@ -1440,13 +1440,18 @@ def handler_for(app: App):
                             threading.Thread(target=app.run_postgres_then_agent,
                                              args=(job_id,), daemon=True).start()
                         except Exception as exc:
+                            with app.postgres_operations.lock:
+                                creation_recorded = application_id in app.postgres_operations.operations
+                            status = 'interrupted' if creation_recorded else 'failed'
                             with app.lock:
-                                app.jobs[job_id]['status'] = 'interrupted'
+                                app.jobs[job_id]['status'] = status
                                 app.save(job_id)
-                            app.event(job_id, 'database_attention',
-                                      'DB 생성·배포 연결을 시작하지 못했습니다. 생성 상태를 재확인하세요: '
+                            app.event(job_id, 'database_attention' if creation_recorded else 'database_plan_rejected',
+                                      ('DB 생성 요청의 결과가 불확실합니다. 생성 상태를 재확인하세요: '
+                                       if creation_recorded else
+                                       'DB 생성 요청 전 계획 검증에 실패했습니다. 가격 계획을 다시 확인하세요: ')
                                       + redact(str(exc))[:300])
-                            self.json_response(202, {"id": job_id, "status": "interrupted"})
+                            self.json_response(202, {"id": job_id, "status": status})
                             return
                         self.json_response(202, {"id": job_id, "status": "provisioning"})
                     else:

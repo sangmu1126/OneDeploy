@@ -338,6 +338,7 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
   };
   const requests = [];
   const jobId = 'a'.repeat(16);
+  let jobStatus = 'interrupted';
   const context = {
     document: {getElementById: element, hidden: false},
     fetch: async (path, options) => {
@@ -353,7 +354,7 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
         : path.endsWith('/postgres/operation')
           ? {application_id: 'demo-app', status: 'needs_attention',
              message: 'CloudFormation 결과 확인 필요'}
-        : {id: jobId, application_id: 'demo-app', status: 'interrupted', events: [],
+        : {id: jobId, application_id: 'demo-app', status: jobStatus, events: [],
            target: 'aws-ecs-express', infrastructure_plan: {target: 'aws-ecs-express',
              planner: 'explicit', rationale: 'PostgreSQL app',
              resources: ['new RDS PostgreSQL'],
@@ -392,6 +393,14 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
   assert.equal(element('target').value, 'aws-ecs-express');
   assert.equal(element('postgresRecovery').hidden, false);
   assert.equal(element('postgresCreationDetails').open, true);
+  const operationReads = requests.filter(request => request.path.endsWith('/postgres/operation')).length;
+  jobStatus = 'failed';
+  await context.open(jobId);
+  assert.equal(requests.filter(request => request.path.endsWith('/postgres/operation')).length,
+    operationReads);
+  assert.match(element('postgresOperationInfo').textContent, /가격 계획을 다시 확인/);
+  assert.equal(element('postgresRecovery').hidden, true);
+  assert.equal(element('postgresReconcile').hidden, true);
 });
 
 test('failed RDS creation requires the exact stack ARN before cleanup', async () => {

@@ -376,17 +376,30 @@ class PostgresServerTests(unittest.TestCase):
         start.assert_not_called()
         self.assertFalse(self.app.jobs)
 
-    def test_changed_rds_plan_interrupts_job_without_agent_start(self):
+    def test_changed_rds_plan_fails_before_creation_without_agent_start(self):
         token = self.reviewed_create_plan()
         with patch.object(self.app.postgres_operations, 'start',
                           side_effect=ValueError('생성 계획이 변경됐습니다.')) as start, \
                 patch.object(self.app, 'run_agent') as deploy:
             status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
-        self.assertEqual((status, payload['status']), (202, 'interrupted'))
+        self.assertEqual((status, payload['status']), (202, 'failed'))
         start.assert_called_once_with('demo-app', token)
         deploy.assert_not_called()
-        self.assertEqual(self.app.jobs[payload['id']]['status'], 'interrupted')
-        self.assertIn('재확인', self.app.jobs[payload['id']]['events'][-1]['message'])
+        self.assertEqual(self.app.jobs[payload['id']]['status'], 'failed')
+        self.assertIn('가격 계획을 다시 확인', self.app.jobs[payload['id']]['events'][-1]['message'])
+        self.assertEqual(self.app.jobs[payload['id']]['events'][-1]['stage'], 'database_plan_rejected')
+
+    def test_recorded_creation_start_failure_stays_interrupted(self):
+        token = self.reviewed_create_plan()
+        def record_then_fail(*_args):
+            self.app.postgres_operations.operations['demo-app'] = self.created_operation('running')
+            raise RuntimeError('worker start failed')
+        with patch.object(self.app.postgres_operations, 'start', side_effect=record_then_fail), \
+                patch.object(self.app, 'run_agent') as deploy:
+            status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        self.assertEqual((status, payload['status']), (202, 'interrupted'))
+        deploy.assert_not_called()
+        self.assertEqual(self.app.jobs[payload['id']]['events'][-1]['stage'], 'database_attention')
 
     def test_create_plan_rejects_existing_database_selection(self):
         token = self.reviewed_create_plan()
