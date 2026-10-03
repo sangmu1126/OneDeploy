@@ -271,6 +271,19 @@ class PostgresTests(unittest.TestCase):
                 'StackSummaries': [], 'NextToken': 'truncated'})):
             with self.assertRaisesRegex(AwsConfigurationError, '완전히'):
                 self.provisioner.assert_stack_available()
+        with patch.object(self.provisioner.adapter, 'aws', return_value=json.dumps({
+                'StackSummaries': [{'StackName': self.request.stack_name,
+                                    'StackStatus': 'DELETE_COMPLETE'}]})):
+            self.provisioner.assert_stack_available(allow_deleted=True)
+            with self.assertRaisesRegex(AwsConfigurationError, '이미'):
+                self.provisioner.assert_stack_available()
+        with patch.object(self.provisioner.adapter, 'aws', return_value=json.dumps({
+                'StackSummaries': [{'StackName': self.request.stack_name,
+                                    'StackStatus': 'DELETE_COMPLETE'},
+                                   {'StackName': self.request.stack_name,
+                                    'StackStatus': 'CREATE_COMPLETE'}]})):
+            with self.assertRaisesRegex(AwsConfigurationError, '이미'):
+                self.provisioner.assert_stack_available(allow_deleted=True)
 
     def test_inspect_rejects_public_or_misowned_database(self):
         stack = {'StackId': STACK, 'StackStatus': 'CREATE_COMPLETE',

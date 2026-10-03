@@ -1031,6 +1031,28 @@ def handler_for(app: App):
                         raise ValueError('PostgreSQL 생성 재확인 요청에는 본문이 없어야 합니다.')
                     self.json_response(200, app.postgres_operations.reconcile(application_id))
                     return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/failed-create/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('실패 스택 정리 계획 조회에는 본문이 없어야 합니다.')
+                    self.json_response(200, app.postgres_operations.cleanup_plan(application_id))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/failed-create/start", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 512:
+                        raise ValueError('실패 스택 정리 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict)
+                            or set(payload) != {'plan_id', 'confirm_stack_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])
+                            or not isinstance(payload['confirm_stack_id'], str)
+                            or len(payload['confirm_stack_id']) > 256):
+                        raise ValueError('유효한 계획 ID와 스택 ARN이 필요합니다.')
+                    self.json_response(202, app.postgres_operations.cleanup_start(
+                        application_id, payload['plan_id'], payload['confirm_stack_id']))
+                    return
                 if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/retirement/plan", self.path):
                     application_id = self.path.split('/')[3]
                     if int(self.headers.get('Content-Length', '0')) != 0:

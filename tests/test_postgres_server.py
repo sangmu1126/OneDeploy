@@ -58,6 +58,35 @@ class PostgresServerTests(unittest.TestCase):
         planned.assert_not_called()
         self.assertEqual(handler.json_response.call_args.args[0], 403)
 
+    def test_failed_create_cleanup_routes_require_auth_and_exact_confirmation(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/applications/demo-app/postgres/failed-create/plan'
+        handler.headers = {'X-OneDeploy-Token': self.app.token, 'Content-Length': '0'}
+        handler.json_response = Mock()
+        with patch.object(self.app.postgres_operations, 'cleanup_plan',
+                          return_value={'plan_id': 'a' * 32}) as planned:
+            handler.do_POST()
+        planned.assert_called_once_with('demo-app')
+        self.assertEqual(handler.json_response.call_args.args[0], 200)
+        handler.path = '/api/applications/demo-app/postgres/failed-create/start'
+        payload = json.dumps({'plan_id': 'a' * 32,
+            'confirm_stack_id': 'arn:aws:cloudformation:ap-northeast-2:123456789012:stack/onedeploy-db-demo-app/id'}).encode()
+        handler.headers = {'X-OneDeploy-Token': self.app.token,
+                           'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        with patch.object(self.app.postgres_operations, 'cleanup_start',
+                          return_value={'status': 'recovering'}) as started:
+            handler.do_POST()
+        started.assert_called_once_with('demo-app', 'a' * 32,
+            'arn:aws:cloudformation:ap-northeast-2:123456789012:stack/onedeploy-db-demo-app/id')
+        self.assertEqual(handler.json_response.call_args.args[0], 202)
+        handler.headers = {'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        with patch.object(self.app.postgres_operations, 'cleanup_start') as started:
+            handler.do_POST()
+        started.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+
     def test_retirement_start_requires_plan_and_exact_database_id(self):
         handler = handler_for(self.app).__new__(handler_for(self.app))
         handler.path = '/api/applications/demo-app/postgres/retirement/start'

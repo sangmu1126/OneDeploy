@@ -244,7 +244,7 @@ class AwsPostgresProvisioner:
                 'publicly_accessible': False, 'deletion_protection': True,
                 'retained_on_stack_delete': True}
 
-    def assert_stack_available(self) -> None:
+    def assert_stack_available(self, *, allow_deleted: bool = False) -> None:
         """Fail closed when this deterministic stack name already appears in the account."""
         response = json.loads(self.adapter.aws(['cloudformation', 'list-stacks'],
                                                private=True, quiet=True))
@@ -252,7 +252,9 @@ class AwsPostgresProvisioner:
         if (not isinstance(stacks, list) or response.get('NextToken')
                 or any(not isinstance(item, dict) for item in stacks)):
             raise AwsConfigurationError('CloudFormation 스택 목록을 완전히 확인하지 못했습니다.')
-        if any(item.get('StackName') == self.request.stack_name for item in stacks):
+        if any(item.get('StackName') == self.request.stack_name and
+               (not allow_deleted or item.get('StackStatus') != 'DELETE_COMPLETE')
+               for item in stacks):
             raise AwsConfigurationError('이 앱 ID의 RDS 스택 기록이 이미 있습니다. 기존 DB 조회 또는 생성 결과 재확인을 사용하세요.')
 
     def create(self, expected_plan: dict | None = None) -> dict:

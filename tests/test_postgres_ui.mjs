@@ -292,6 +292,52 @@ test('reviewed RDS plan can start creation and fill the resulting DB connection'
   assert.equal(element('postgresSubnets').value, 'subnet-11111111,subnet-22222222');
 });
 
+test('failed RDS creation requires the exact stack ARN before cleanup', async () => {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: '', checked: false, files: [], hidden: false, disabled: false,
+      textContent: '', replaceChildren() {}, querySelectorAll() { return []; },
+    });
+    return elements.get(id);
+  };
+  const requests = [];
+  const stackId = 'arn:aws:cloudformation:ap-northeast-2:123456789012:stack/onedeploy-db-demo-app/id';
+  const context = {
+    document: {getElementById: element, hidden: false},
+    fetch: async (path, options) => {
+      requests.push({path, options});
+      const body = path === '/api/config'
+        ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
+        : path === '/api/jobs' ? []
+        : path.endsWith('/failed-create/plan')
+        ? {plan_id: 'a'.repeat(32), stack_id: stackId, stack_status: 'ROLLBACK_COMPLETE',
+           message: '앱 DB 없음'}
+        : path.endsWith('/failed-create/start')
+        ? {application_id: 'demo-app', status: 'failed_cleaned', message: '정리 완료'}
+        : {application_id: 'demo-app', status: 'needs_attention', message: 'ROLLBACK_COMPLETE'};
+      return {ok: true, json: async () => body};
+    },
+    setInterval() {}, setTimeout, FormData, Set, Error, Date,
+  };
+  runInNewContext(html.split('<script>', 2)[1].split('</script>', 1)[0], context);
+  await new Promise(resolve => setImmediate(resolve));
+  element('application').value = 'demo-app';
+  element('target').value = 'aws-ecs-express';
+  await element('postgresOperation').onclick();
+  assert.equal(element('postgresRecovery').hidden, false);
+  await element('postgresRecoveryPlan').onclick();
+  assert.equal(element('postgresRecoveryStart').hidden, false);
+  element('postgresRecoveryConfirm').value = stackId + '-wrong';
+  await element('postgresRecoveryStart').onclick();
+  assert.equal(requests.filter(item => item.path.endsWith('/failed-create/start')).length, 0);
+  element('postgresRecoveryConfirm').value = stackId;
+  await element('postgresRecoveryStart').onclick();
+  const started = requests.find(item => item.path.endsWith('/failed-create/start'));
+  assert.equal(JSON.parse(started.options.body).confirm_stack_id, stackId);
+  assert.equal(element('postgresRecovery').hidden, true);
+});
+
 test('RDS retirement requires reviewed plan and exact database ID', async () => {
   const elements = new Map();
   const element = id => {
