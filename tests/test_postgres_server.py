@@ -108,7 +108,8 @@ class PostgresServerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '폐기 기록'):
                 self.app.ensure_application_available('demo-app', 'aws-ecs-express')
 
-    def upload(self, content, *, postgres=True, target='aws-ecs-express', public=True):
+    def upload(self, content, *, postgres=True, target='aws-ecs-express', public=True,
+               network_headers=True, partial_network=False):
         handler_class = handler_for(self.app)
         handler = handler_class.__new__(handler_class)
         handler.path = '/api/deployments'
@@ -117,9 +118,11 @@ class PostgresServerTests(unittest.TestCase):
                            'X-Public-Access': str(public).lower(), 'X-Application-Id': 'demo-app',
                            'Content-Length': str(len(content))}
         if postgres:
-            handler.headers.update({'X-Postgres-Existing': 'true',
-                'X-Postgres-Vpc-Id': 'vpc-12345678',
-                'X-Postgres-Subnet-Ids': 'subnet-11111111,subnet-22222222'})
+            handler.headers['X-Postgres-Existing'] = 'true'
+            if network_headers:
+                handler.headers['X-Postgres-Vpc-Id'] = 'vpc-12345678'
+                if not partial_network:
+                    handler.headers['X-Postgres-Subnet-Ids'] = 'subnet-11111111,subnet-22222222'
         handler.rfile = io.BytesIO(content)
         handler.json_response = Mock()
         with patch.object(AwsSettings, 'unavailable_reason', return_value=None), \
@@ -368,6 +371,31 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(job['target'], 'aws-ecs-express')
         self.assertEqual(job['infrastructure_plan']['planner'], 'policy')
         self.assertEqual(job['infrastructure_plan']['database']['binding'], 'existing')
+
+    def test_single_action_existing_rds_upload_resolves_owned_network(self):
+        database = {'database_id': 'onedeploy-demo-app', 'account': ACCOUNT,
+                    'region': REGION, 'vpc_id': 'vpc-12345678',
+                    'subnet_ids': ['subnet-11111111', 'subnet-22222222']}
+        with patch('onedeploy.server.discover_existing_postgres',
+                   return_value=database) as discover, \
+                patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                      return_value=database) as inspect:
+            status, payload = self.upload(archive(), target='auto', network_headers=False)
+        self.assertEqual(status, 202)
+        discover.assert_called_once_with('demo-app', self.settings)
+        inspect.assert_called_once_with()
+        job = self.app.jobs[payload['id']]
+        self.assertEqual(job['postgres']['vpc_id'], 'vpc-12345678')
+        self.assertEqual(job['postgres']['subnet_ids'], database['subnet_ids'])
+        self.assertEqual(job['target'], 'aws-ecs-express')
+
+    def test_partial_postgres_network_headers_are_rejected_before_discovery(self):
+        with patch('onedeploy.server.discover_existing_postgres') as discover:
+            status, payload = self.upload(archive(), partial_network=True)
+        self.assertEqual(status, 400)
+        self.assertIn('함께', payload['error'])
+        discover.assert_not_called()
+        self.assertFalse(self.app.jobs)
 
     def test_auto_target_without_explicit_binding_still_rejects_postgres(self):
         status, payload = self.upload(archive(), postgres=False, target='auto')

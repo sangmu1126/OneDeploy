@@ -1208,7 +1208,8 @@ def handler_for(app: App):
                     if postgres_flag not in {'true', 'false'}:
                         raise ValueError('기존 PostgreSQL 선택 값이 올바르지 않습니다.')
                     postgres_headers = ('X-Postgres-Vpc-Id', 'X-Postgres-Subnet-Ids')
-                    if postgres_flag != 'true' and any(self.headers.get(name) for name in postgres_headers):
+                    supplied_postgres_network = tuple(name in self.headers for name in postgres_headers)
+                    if postgres_flag != 'true' and any(supplied_postgres_network):
                         raise ValueError('PostgreSQL 연결 정보에는 기존 DB 명시적 선택이 필요합니다.')
                     postgres_request = None
                     aws_settings_for_job = app.aws_settings
@@ -1219,11 +1220,18 @@ def handler_for(app: App):
                             raise ValueError('기존 PostgreSQL 경로에는 공개 AWS 대상과 계정 고정이 필요합니다.')
                         if settings.unavailable_reason():
                             raise ValueError(settings.unavailable_reason())
-                        vpc_id = self.headers.get('X-Postgres-Vpc-Id', '')
+                        if supplied_postgres_network == (True, False) or supplied_postgres_network == (False, True):
+                            raise ValueError('PostgreSQL VPC와 서브넷 입력은 함께 지정하세요.')
+                        if supplied_postgres_network == (False, False):
+                            discovered = discover_existing_postgres(application_id, settings)
+                            vpc_id = discovered['vpc_id']
+                            subnet_ids = tuple(discovered['subnet_ids'])
+                        else:
+                            vpc_id = self.headers['X-Postgres-Vpc-Id']
+                            subnet_ids = tuple(part.strip() for part in
+                                               self.headers['X-Postgres-Subnet-Ids'].split(','))
                         aws_settings_for_job = postgres_settings_for_application(
                             application_id, vpc_id, settings)
-                        subnet_ids = tuple(part.strip() for part in
-                                           self.headers.get('X-Postgres-Subnet-Ids', '').split(','))
                         postgres_request = PostgresRequest(application_id, settings.expected_account,
                             settings.region, vpc_id, subnet_ids,
                             aws_settings_for_job.service_security_group)

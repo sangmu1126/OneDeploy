@@ -74,15 +74,16 @@ PostgreSQL 엔진만 확인된 AWS 앱에만 적용하고, `PGHOST`·`PGPASSWORD
 MySQL·MongoDB·혼합/불명 엔진과 `DATABASE_URL` 접속 방식은 이 경로에서 차단한다.
 서버 업로드 API에는 **기존에 생성된 OneDeploy RDS 스택**을 사용하는 명시적 옵션만 노출한다.
 `POST /api/deployments`에서 일반 세션 토큰과 앱 ZIP/폴더 업로드 외에 다음 헤더가 필요하다.
-`X-Deploy-Target: aws-ecs-express`, `X-Public-Access: true`,
-`X-Application-Id: <DB_APP_ID>`, `X-Postgres-Existing: true`,
-`X-Postgres-Vpc-Id: <DEFAULT_VPC_ID>`,
-`X-Postgres-Subnet-Ids: <SUBNET_A_ID>,<SUBNET_B_ID>`.
+`X-Deploy-Target: aws-ecs-express` 또는 `auto`, `X-Public-Access: true`,
+`X-Application-Id: <DB_APP_ID>`, `X-Postgres-Existing: true`.
+호환용 `X-Postgres-Vpc-Id: <DEFAULT_VPC_ID>`와
+`X-Postgres-Subnet-Ids: <SUBNET_A_ID>,<SUBNET_B_ID>`는 둘 다 제공하거나 둘 다 생략한다.
+생략하면 서버가 앱 ID로 소유 DB를 조회해 검증된 네트워크 값을 사용한다.
 서버에는 `ONEDEPLOY_AWS_ACCOUNT_ID`가 고정돼 있어야 한다. 서비스 그룹은 `ONEDEPLOY_AWS_SERVICE_SECURITY_GROUP`에 고정하거나, 앱 ID·VPC가 일치하는 `onedeploy-network-<앱 ID>` 스택을 미리 만든 뒤 해당 환경 변수를 비워 두어 서버가 검증해 선택하게 한다.
 업로드된 앱은 PostgreSQL 단일 엔진으로 확인돼야 하고 `migrations/` SQL 묶음이 있어야 한다.
 API는 작업 생성 전에 DB 소유권을 읽기 전용으로 확인하며, DB 리소스를 새로 만들지는 않는다.
-헤더를 생략한 일반 업로드에서의 DB 앱 차단은 유지한다. UI는 사용자가 기존 DB와 VPC·서브넷을 명시한 경우에만 위 헤더를 보낸다.
-`GET /api/applications/<앱 ID>/postgres`는 세션 토큰과 서버의 AWS 계정·고정 또는 앱별 검증 서비스 보안 그룹을 사용해 해당 앱의 RDS 인스턴스를 찾고 전체 스택·DB 소유권을 다시 확인한다. 응답에는 DB ID·계정·리전·VPC·서브넷·엔진 버전·보존 상태만 포함하고 비밀 ARN·엔드포인트는 포함하지 않는다. UI의 **이 앱의 기존 RDS 조회**가 이 값을 입력란에 채운다. 조회와 업로드 시점은 다를 수 있어 업로드 API가 다시 검사한다. 2026-10-01 실제 AWS 계정에서 인증 HTTP 조회를 읽기 전용으로 통과했다. 앱별 선택 경로는 모의 AWS 테스트만 통과했다.
+`X-Postgres-Existing`을 생략한 일반 업로드에서의 DB 앱 차단은 유지한다. UI는 명시적 기존 DB 선택만 업로드 헤더로 보내며 VPC·서브넷을 전송하지 않는다.
+`GET /api/applications/<앱 ID>/postgres`는 세션 토큰과 서버의 AWS 계정·고정 또는 앱별 검증 서비스 보안 그룹을 사용해 해당 앱의 RDS 인스턴스를 찾고 전체 스택·DB 소유권을 다시 확인한다. 응답에는 DB ID·계정·리전·VPC·서브넷·엔진 버전·보존 상태만 포함하고 비밀 ARN·엔드포인트는 포함하지 않는다. UI의 **이 앱의 기존 RDS 조회**는 배포 전 미리보기이며, 업로드 API는 현재 상태를 다시 검사한다. 2026-10-01 실제 AWS 계정에서 인증 HTTP 조회를 읽기 전용으로 통과했다. 네트워크 헤더 없는 업로드 경로는 로컬 모의 AWS 테스트만 통과했다.
 
 `GET /api/applications/<앱 ID>/postgres/backups`는 같은 세션 인증과 RDS 소유권 검사를 거쳐 자동 백업 보존 기간, 최근 복원 가능 시점, 삭제 보호·스택 삭제 시 보존 상태와 수동 스냅샷 수·최신 10개를 반환한다. 스냅샷은 [RDS 스냅샷 조회 API](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_DescribeDBSnapshots.html)의 `manual` 유형으로 조회하고 응답의 계정·리전·DB ID를 대조한다. UI의 **백업·보호 상태 확인**은 이 읽기 전용 API만 호출한다. 보존 기간·스냅샷 목록 확인은 실제 복원 시험을 대신하지 않는다. `demo-app` 실계정에서는 보존 7일·삭제 보호 켜짐·수동 스냅샷 0개를 확인했다. 수동 스냅샷은 [자동 백업 보존 기간과 별도로 유지](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CreateSnapshot.html)되므로 이후 생성·폐기 정책과 비용 검토가 필요하다.
 

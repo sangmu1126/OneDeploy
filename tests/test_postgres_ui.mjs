@@ -10,33 +10,28 @@ assert.ok(start >= 0 && end > start);
 const source = html.slice(start, end);
 
 function headers({target = 'aws-ecs-express', publicAccess = true, existing = true,
-                  vpc = 'vpc-12345678', subnets = 'subnet-11111111,subnet-22222222',
                   application = 'demo-app'} = {}) {
   const fields = {
     target: {value: target}, public: {checked: publicAccess},
-    postgresExisting: {checked: existing}, postgresVpc: {value: vpc},
-    postgresSubnets: {value: subnets},
+    postgresExisting: {checked: existing},
   };
   const context = {el: id => fields[id], Set, Error};
   runInNewContext(source, context);
   return context.postgresUploadHeaders(application);
 }
 
-test('existing RDS opt-in sends only the server-supported headers', () => {
+test('existing RDS opt-in needs no manually entered network headers', () => {
   assert.deepEqual({...headers()}, {
     'X-Postgres-Existing': 'true',
-    'X-Postgres-Vpc-Id': 'vpc-12345678',
-    'X-Postgres-Subnet-Ids': 'subnet-11111111,subnet-22222222',
   });
   assert.deepEqual({...headers({existing: false})}, {});
   assert.deepEqual({...headers({target: 'auto'})}, {...headers()});
 });
 
-test('database opt-in rejects unsupported target, private service and malformed network', () => {
+test('database opt-in rejects unsupported target, private service and malformed app ID', () => {
   for (const options of [
     {target: 'cloud-run'}, {publicAccess: false},
-    {vpc: 'vpc-invalid'}, {subnets: 'subnet-11111111,subnet-11111111'},
-    {subnets: 'subnet-11111111'}, {application: 'demo--app'},
+    {application: 'demo--app'},
   ]) assert.throws(() => headers(options));
 });
 
@@ -158,15 +153,12 @@ test('deploy button includes existing RDS headers in the upload request', async 
   element('target').value = 'aws-ecs-express';
   element('public').checked = true;
   element('postgresExisting').checked = true;
-  element('postgresVpc').value = 'vpc-12345678';
-  element('postgresSubnets').value = 'subnet-11111111,subnet-22222222';
   await element('deploy').onclick();
   const upload = requests.find(request => request.path === '/api/deployments');
   assert.ok(upload, element('error').textContent);
   assert.equal(upload.options.headers['X-Postgres-Existing'], 'true');
-  assert.equal(upload.options.headers['X-Postgres-Vpc-Id'], 'vpc-12345678');
-  assert.equal(upload.options.headers['X-Postgres-Subnet-Ids'],
-    'subnet-11111111,subnet-22222222');
+  assert.equal(upload.options.headers['X-Postgres-Vpc-Id'], undefined);
+  assert.equal(upload.options.headers['X-Postgres-Subnet-Ids'], undefined);
 });
 
 test('existing RDS lookup fills the network fields from the authenticated API', async () => {
