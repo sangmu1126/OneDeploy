@@ -119,3 +119,8 @@ Chrome에서 검토한 RDS 계획과 ZIP이 작업 `ed11706270f042b2` 하나로 
 제공한다. 컨테이너 소유권이 달라지면 삭제를 거부하고 `delete_failed`로 남겨
 재확인·재시도하게 했다. 재시작 복원, 시도 범위, 중복 요청 거부, 소유권 불일치와
 화면 노출 조건을 로컬 테스트로 검증했다.
+이어 실제 Docker에서 고정 AI 응답으로 두 번 시도해 HTTP 200을 얻은 뒤 결과를
+기록하지 못한 서버 재시작 상황을 재현했다. 새 서버가 작업을 `interrupted`로
+복원했고, `/api/jobs/{id}/retire` 호출 뒤 두 시도의 컨테이너·이미지 태그가 모두
+없음을 Docker inspect로 확인했다. 명령은
+`PYTHONPATH=. python3 tests/smoke_agent.py --interrupted-retire`다.

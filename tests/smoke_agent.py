@@ -59,11 +59,15 @@ def main():
     parser.add_argument('--python', action='store_true', help='Use a scripted fixture for a Python Dockerfile app')
     parser.add_argument('--folder', action='store_true', help='Upload a browser-style folder instead of a ZIP')
     parser.add_argument('--auto', action='store_true', help='Exercise infrastructure target planning')
+    parser.add_argument('--interrupted-retire', action='store_true',
+                        help='Restart a completed scripted local job as interrupted, then retire its owned Docker attempts')
     args = parser.parse_args()
     if args.python and (args.live or args.environment):
         parser.error('--python cannot be combined with --live or --environment')
     if args.live and args.auto:
         parser.error('--live --auto may select a billable cloud target; use a dedicated cloud drill')
+    if args.interrupted_retire and (args.live or args.environment or args.python or args.folder or args.auto):
+        parser.error('--interrupted-retire uses the default scripted Node deployment only')
     settings = AISettings.from_environment() if args.live else AISettings('test-fixture', 'fixture-model')
     if args.live and not settings.available:
         raise RuntimeError('Set OPENAI_API_KEY and ONEDEPLOY_AI_MODEL for live testing')
@@ -158,6 +162,21 @@ def main():
                 assert observed['last_health']['source'] == 'automatic'
                 assert (app.root / job_id / 'health.json').is_file()
                 print('PASS: automatic health check recorded Docker ownership and HTTP 200', flush=True)
+            if args.interrupted_retire:
+                # Reproduce the crash window after Docker succeeded but before its result was durable.
+                with app.lock:
+                    app.jobs[job_id]['status'] = 'running'
+                    app.jobs[job_id].pop('result')
+                    app.save(job_id)
+                server.shutdown()
+                server.server_close()
+                app = App(Path(directory), settings, RepairFixture)
+                assert app.jobs[job_id]['status'] == 'interrupted'
+                assert app.jobs[job_id]['attempts'] == job['attempts']
+                server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(app))
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                base = f'http://127.0.0.1:{server.server_port}'
+                assert request('/api/jobs/' + job_id)['status'] == 'interrupted'
             request('/api/jobs/' + job_id + '/retire', b'')
             for _ in range(30):
                 retired = request('/api/jobs/' + job_id)
@@ -169,7 +188,16 @@ def main():
                                   capture_output=True).returncode != 0
             assert subprocess.run(['docker', 'image', 'inspect', job['result']['image']],
                                   capture_output=True).returncode != 0
-            print('PASS: retirement API removed the owned container and image tag', flush=True)
+            if args.interrupted_retire:
+                for number in range(1, job['attempts'] + 1):
+                    attempt = f'{job_id}-a{number}'
+                    assert subprocess.run(['docker', 'container', 'inspect', f'onedeploy-{attempt}'],
+                                          capture_output=True).returncode != 0
+                    assert subprocess.run(['docker', 'image', 'inspect', f'onedeploy/{attempt}:latest'],
+                                          capture_output=True).returncode != 0
+                print('PASS: restart -> interrupted -> retirement API removed every owned attempt', flush=True)
+            else:
+                print('PASS: retirement API removed the owned container and image tag', flush=True)
         finally:
             server.shutdown()
             server.server_close()
