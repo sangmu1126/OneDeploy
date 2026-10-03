@@ -89,9 +89,15 @@ OneDeploy는 업로드 원본과 수정용 복사본, 실제 빌드 시도, 상�
 
 ## 검증
 
+GitHub Actions는 `main` 푸시와 PR에서 Python 3.11·3.14 단위 테스트 및 Node 22의
+UI·PostgreSQL JavaScript 테스트를 실행합니다. 이 CI에는 AWS 자격 증명이 없으며
+실제 Docker·브라우저·클라우드 배포 드릴은 포함하지 않습니다.
+
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 node tests/test_postgres_ui.mjs
+node tests/test_postgres_migrator.js
+node tests/test_postgres_restore_verifier.mjs
 python3 -m tests.smoke_local_auto_postgres_browser
 PYTHONPATH=. python3 tests/smoke_agent.py
 ```

@@ -24,6 +24,8 @@
 보존된 AWS 자원의 Terraform 구성은 원격 상태를 새로 읽는 plan으로 다시 확인했다.
 ECS Express provider의 제자리 갱신 1건이 남아 있어 apply하지 않았고, 이 변경과
 예상 밖의 변경을 구분하되 어느 쪽도 자동 적용하지 않는 [plan 점검기](../terraform/aws-live/README.md)를 추가했다.
+로컬에서만 실행하던 Python·Node 회귀 테스트는 GitHub Actions의 `main` 푸시와
+PR에서도 실행하도록 연결했다. 이 자동 검증에는 AWS 자격 증명이나 실제 배포가 없다.
 
 로컬 `.onedeploy/`에는 임시 작업의 원본 JSON·로그·ZIP과 식별자가 들어 있다.
 이 폴더는 Git에서 제외하며 공유용 개발 기록으로 사용하지 않는다. 공유 가능한
