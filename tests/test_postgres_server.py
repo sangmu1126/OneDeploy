@@ -480,6 +480,108 @@ class PostgresServerTests(unittest.TestCase):
         deploy.assert_not_called()
         self.assertEqual(self.app.jobs[job_id]['status'], 'interrupted')
 
+    def test_confirmed_creation_can_manually_resume_untouched_app_job(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
+            _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        job_id = payload['id']
+        self.app.jobs[job_id]['status'] = 'interrupted'
+        self.app.save(job_id)
+        self.app.postgres_operations.operations['demo-app'] = self.created_operation(
+            'succeeded', 'onedeploy-demo-app')
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}) as inspect, \
+                patch('onedeploy.server.threading.Thread.start') as thread, \
+                patch.object(self.app.postgres_operations, 'start') as create:
+            result = self.app.resume_postgres_deployment(job_id)
+        self.assertEqual(result, {'id': job_id, 'status': 'running'})
+        self.assertEqual(self.app.jobs[job_id]['status'], 'running')
+        self.assertEqual(self.app.jobs[job_id]['events'][-1]['stage'], 'database_manual_resume')
+        inspect.assert_called_once_with()
+        thread.assert_called_once_with()
+        create.assert_not_called()
+        with self.assertRaisesRegex(ValueError, '재개할 수 없는'):
+            self.app.resume_postgres_deployment(job_id)
+
+    def test_restart_preserves_manual_resume_without_recreating_rds(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
+            _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        operation = self.created_operation('succeeded', 'onedeploy-demo-app')
+        self.app.postgres_operations._save(operation)
+        restored = App(self.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.settings, monitor_interval=0)
+        self.assertEqual(restored.jobs[payload['id']]['status'], 'interrupted')
+        self.assertEqual(restored.postgres_operations.get('demo-app')['creation_id'], 'a' * 16)
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}), \
+                patch('onedeploy.server.threading.Thread.start') as thread, \
+                patch.object(restored.postgres_operations, 'start') as create:
+            result = restored.resume_postgres_deployment(payload['id'])
+        self.assertEqual(result['status'], 'running')
+        thread.assert_called_once_with()
+        create.assert_not_called()
+
+    def test_manual_resume_rejects_unconfirmed_or_touched_job(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
+            _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        job_id = payload['id']
+        self.app.jobs[job_id]['status'] = 'interrupted'
+        operation = self.created_operation('needs_attention')
+        self.app.postgres_operations.operations['demo-app'] = operation
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect:
+            with self.assertRaisesRegex(ValueError, '성공 기록'):
+                self.app.resume_postgres_deployment(job_id)
+        inspect.assert_not_called()
+        operation.update(status='succeeded', database_id='onedeploy-demo-app',
+                         creation_id='b' * 16)
+        with self.assertRaisesRegex(ValueError, '성공 기록'):
+            self.app.resume_postgres_deployment(job_id)
+        operation['creation_id'] = 'a' * 16
+        self.app.jobs[job_id]['steps'] = 1
+        with self.assertRaisesRegex(ValueError, '재개할 수 없는'):
+            self.app.resume_postgres_deployment(job_id)
+
+    def test_manual_resume_does_not_replace_a_newer_active_release(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
+            _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        job_id = payload['id']
+        self.app.jobs[job_id]['status'] = 'interrupted'
+        self.app.postgres_operations.operations['demo-app'] = self.created_operation(
+            'succeeded', 'onedeploy-demo-app')
+        self.app.jobs['b' * 16] = {'id': 'b' * 16, 'application_id': 'demo-app',
+                                   'target': 'aws-ecs-express', 'status': 'succeeded',
+                                   'deployment_state': 'active'}
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}), \
+                patch('onedeploy.server.threading.Thread.start') as thread:
+            with self.assertRaisesRegex(ValueError, '다른 AWS 릴리스'):
+                self.app.resume_postgres_deployment(job_id)
+        thread.assert_not_called()
+        self.assertEqual(self.app.jobs[job_id]['status'], 'interrupted')
+
+    def test_manual_postgres_resume_route_requires_authentication(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/deployments/' + 'a' * 16 + '/resume-postgres'
+        handler.headers = {'Content-Length': '0'}
+        handler.json_response = Mock()
+        with patch.object(self.app, 'resume_postgres_deployment') as resume:
+            handler.do_POST()
+        resume.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+        handler.headers['X-OneDeploy-Token'] = self.app.token
+        with patch.object(self.app, 'resume_postgres_deployment',
+                          return_value={'id': 'a' * 16, 'status': 'running'}) as resume:
+            handler.do_POST()
+        resume.assert_called_once_with('a' * 16)
+        self.assertEqual(handler.json_response.call_args.args[0], 202)
+
     def test_opt_in_upload_persists_and_restores_postgres_request(self):
         database = {'database_id': 'onedeploy-demo-app'}
         with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',

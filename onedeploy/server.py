@@ -524,6 +524,66 @@ class App:
                 self.save(job_id)
             self.event(job_id, 'database_attention', redact(str(exc))[:500])
 
+    def resume_postgres_deployment(self, job_id: str) -> dict:
+        """Explicitly continue an untouched app job after its RDS create is confirmed."""
+        def eligible(job):
+            return (job and job.get('status') == 'interrupted'
+                    and job.get('mode') == 'agent'
+                    and job.get('target') == 'aws-ecs-express'
+                    and job.get('infrastructure_plan', {}).get('database', {}).get('binding') == 'create'
+                    and isinstance(job.get('postgres_creation_id'), str)
+                    and job.get('attempts') == 0 and job.get('steps') == 0
+                    and not job.get('changes') and job.get('plan') is None
+                    and not job.get('result') and not job.get('cancel_requested')
+                    and not job.get('aws_update_submitted') and not job.get('persistence_failed')
+                    and not (self.root / job_id / 'work').exists())
+
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job):
+                raise ValueError('DB 생성 후 앱 배포를 안전하게 재개할 수 없는 작업입니다.')
+            request = postgres_request_from_job(job)
+            if request is None:
+                raise ValueError('저장된 DB 연결 요청을 확인하지 못했습니다.')
+            creation_id = job['postgres_creation_id']
+        operation = self.postgres_operations.get(request.application_id)
+        if (operation.get('creation_id') != creation_id
+                or operation['status'] != 'succeeded'
+                or operation.get('database_id') != request.database_id):
+            raise ValueError('원래 생성 시도의 DB 성공 기록을 확인하지 못했습니다. 생성 상태를 재확인하세요.')
+        database = AwsPostgresProvisioner(request).inspect_current()
+        self.postgres_operations.require_deployable(request.application_id, database['database_id'])
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job):
+                raise ValueError('배포 작업 상태가 변경됐습니다. 이력을 다시 확인하세요.')
+            self.ensure_application_available(request.application_id, 'aws-ecs-express')
+            if any(other is not job and other.get('application_id') == request.application_id
+                   and other.get('target') == 'aws-ecs-express'
+                   and other.get('status') == 'succeeded'
+                   and other.get('deployment_state', 'active') == 'active'
+                   for other in self.jobs.values()):
+                raise ValueError('같은 앱의 다른 AWS 릴리스가 활성 상태입니다. 이전 작업을 재개할 수 없습니다.')
+            operation = self.postgres_operations.get(request.application_id)
+            if (operation.get('creation_id') != creation_id
+                    or operation['status'] != 'succeeded'
+                    or operation.get('database_id') != database['database_id']):
+                raise ValueError('DB 생성 상태가 변경됐습니다. 다시 확인하세요.')
+            job['status'] = 'running'
+            self.save(job_id)
+        self.event(job_id, 'database_manual_resume',
+                   '생성된 소유 PostgreSQL을 재확인했습니다. 요청에 따라 앱 배포만 시작합니다.')
+        try:
+            threading.Thread(target=self.run_agent, args=(job_id,), daemon=True).start()
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['status'] = 'interrupted'
+                self.save(job_id)
+            self.event(job_id, 'database_attention',
+                       '앱 배포 작업을 시작하지 못했습니다: ' + redact(str(exc))[:300])
+            return {'id': job_id, 'status': 'interrupted'}
+        return {'id': job_id, 'status': 'running'}
+
     def run(self, job_id, environment=None):
         environment = {} if environment is None else environment
         try:
@@ -1476,6 +1536,12 @@ def handler_for(app: App):
                         app.save(job_id)
                     threading.Thread(target=app.run_agent, args=(job_id, environment), daemon=True).start()
                     self.json_response(202, {"id": job_id, "status": "running"})
+                    return
+                if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/resume-postgres", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('DB 생성 후 앱 배포 재개에는 본문이 없어야 합니다.')
+                    self.json_response(202, app.resume_postgres_deployment(job_id))
                     return
                 if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/cancel", self.path):
                     job_id = self.path.split('/')[3]

@@ -24,7 +24,7 @@ APPLICATION = 'dbdrill-1234abcd'
 
 
 def run(*, fail_create: bool = False, wait_input: bool = False,
-        reject_plan: bool = False) -> dict:
+        reject_plan: bool = False, manual_resume: bool = False) -> dict:
     if not CHROME.is_file():
         raise RuntimeError('Chrome executable not found')
     settings = AwsSettings('ap-northeast-2', expected_account='123456789012',
@@ -39,7 +39,7 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
              'storage_type': 'gp3', 'storage_gib': 20,
              'pricing': {'baseline_730h_usd': '20.87'}}
     database = {'database_id': request.database_id}
-    if sum((fail_create, wait_input, reject_plan)) > 1:
+    if sum((fail_create, wait_input, reject_plan, manual_resume)) > 1:
         raise ValueError('Choose one local drill scenario')
     changed_quote = {**quote, 'pricing': {'baseline_730h_usd': '22.00'}}
     probe_key = 'local-browser-probe-key'
@@ -72,8 +72,15 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
                   aws_settings=settings, monitor_interval=0,
                   agent_factory=lambda _: object())
         deployments = []
+        agent_calls = []
 
         def finish_deployment(job_id, environment=None):
+            agent_calls.append(job_id)
+            if manual_resume and len(agent_calls) == 1:
+                with app.lock:
+                    app.jobs[job_id]['status'] = 'interrupted'
+                    app.save(job_id)
+                return
             if wait_input and environment is None:
                 with app.lock:
                     app.jobs[job_id]['status'] = 'waiting_input'
@@ -118,6 +125,7 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
                         port_file.read_text().splitlines()[0], APPLICATION,
                         'one-action-failed-local' if fail_create else
                         'one-action-plan-rejected-local' if reject_plan else
+                        'one-action-manual-resume-local' if manual_resume else
                         'one-action-deploy' if wait_input else 'one-action-local',
                         str(zip_path)], check=True, timeout=60,
                         env={**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key})
@@ -148,7 +156,10 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
                         or 'postgres_creation_id' in jobs[0]))):
                 raise AssertionError('Browser one-action job did not preserve the RDS binding')
             if (preflight.call_count != 2 or create.call_count != (0 if reject_plan else 1)
-                    or inspect.call_count != (0 if fail_create or reject_plan else 1)):
+                    or inspect.call_count != (0 if fail_create or reject_plan else
+                                              2 if manual_resume else 1)
+                    or agent_calls != ([jobs[0]['id']] * 2 if manual_resume or wait_input else
+                                       [] if fail_create or reject_plan else [jobs[0]['id']])):
                 raise AssertionError('Browser one-action plan, creation, or ownership check was skipped')
         finally:
             server.shutdown()
@@ -157,11 +168,12 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
     return {'application_id': APPLICATION, 'status': 'passed',
             'scenario': 'creation_failure' if fail_create else
                         'plan_rejected' if reject_plan else
+                        'manual_resume' if manual_resume else
                         'environment_resume' if wait_input else 'creation_success',
             'aws_mode': 'mocked', 'deployment_executed': False}
 
 
 if __name__ == '__main__':
     print(json.dumps([run(), run(fail_create=True), run(wait_input=True),
-                      run(reject_plan=True)],
+                      run(reject_plan=True), run(manual_resume=True)],
                      ensure_ascii=False))

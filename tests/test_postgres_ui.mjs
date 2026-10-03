@@ -339,6 +339,8 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
   const requests = [];
   const jobId = 'a'.repeat(16);
   let jobStatus = 'interrupted';
+  let creationId = null;
+  let operationStatus = 'needs_attention';
   const context = {
     document: {getElementById: element, hidden: false},
     fetch: async (path, options) => {
@@ -351,10 +353,15 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
              region: 'ap-northeast-2', engine_version: '18.3', instance_class: 'db.t4g.micro',
              storage_type: 'gp3', storage_gib: 20, pricing: {baseline_730h_usd: '20.87'}}
         : path === '/api/deployments' ? {id: jobId, status: 'provisioning'}
+        : path.endsWith('/resume-postgres')
+          ? (jobStatus = 'waiting_input', {id: jobId, status: 'running'})
         : path.endsWith('/postgres/operation')
-          ? {application_id: 'demo-app', status: 'needs_attention',
+          ? {application_id: 'demo-app', status: operationStatus,
+             database_id: 'onedeploy-demo-app', vpc_id: 'vpc-12345678',
+             subnet_ids: ['subnet-11111111', 'subnet-22222222'],
              message: 'CloudFormation 결과 확인 필요'}
         : {id: jobId, application_id: 'demo-app', status: jobStatus, events: [],
+           postgres_creation_id: creationId, attempts: 0, steps: 0,
            target: 'aws-ecs-express', infrastructure_plan: {target: 'aws-ecs-express',
              planner: 'explicit', rationale: 'PostgreSQL app',
              resources: ['new RDS PostgreSQL'],
@@ -401,6 +408,14 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
   assert.match(element('postgresOperationInfo').textContent, /가격 계획을 다시 확인/);
   assert.equal(element('postgresRecovery').hidden, true);
   assert.equal(element('postgresReconcile').hidden, true);
+  jobStatus = 'interrupted';
+  creationId = 'a'.repeat(16);
+  operationStatus = 'succeeded';
+  await context.open(jobId);
+  assert.equal(element('resumePostgres').hidden, false);
+  await element('resumePostgres').onclick();
+  assert.equal(requests.some(request => request.path.endsWith('/resume-postgres')),
+    true);
 });
 
 test('failed RDS creation requires the exact stack ARN before cleanup', async () => {
