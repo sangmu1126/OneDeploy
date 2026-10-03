@@ -635,8 +635,14 @@ class App:
         try:
             with self.lock:
                 job = json.loads(json.dumps(self.jobs[job_id]))
-            LocalDockerAdapter(lambda stage, message: self.event(job_id, stage, message)).retire(
-                job['result'], job_id)
+            adapter = LocalDockerAdapter(lambda stage, message: self.event(job_id, stage, message))
+            if job['status'] == 'succeeded':
+                adapter.retire(job['result'], job_id)
+            else:
+                for number in range(1, job['attempts'] + 1):
+                    attempt = f'{job_id}-a{number}'
+                    adapter.retire({'container': f'onedeploy-{attempt}',
+                                    'image': f'onedeploy/{attempt}:latest'}, job_id)
         except Exception as exc:
             with self.lock:
                 self.jobs[job_id]['deployment_state'] = 'delete_failed'
@@ -1302,8 +1308,16 @@ def handler_for(app: App):
                         raise ValueError('배포 종료 요청에는 본문을 넣을 수 없습니다.')
                     with app.lock:
                         job = app.jobs.get(job_id)
-                        if (not job or job.get('status') != 'succeeded'
-                                or job.get('target') not in {'aws-ecs-express', 'local-docker', 'cloud-run'} or not job.get('result')
+                        orphan_local = (job and job.get('mode') == 'agent'
+                                        and job.get('target') == 'local-docker'
+                                        and job.get('status') in {'failed', 'interrupted'}
+                                        and not job.get('result')
+                                        and type(job.get('attempts')) is int
+                                        and 1 <= job['attempts'] <= 3)
+                        successful = (job and job.get('status') == 'succeeded'
+                                      and job.get('target') in {'aws-ecs-express', 'local-docker', 'cloud-run'}
+                                      and job.get('result'))
+                        if (not (orphan_local or successful)
                                 or job.get('deployment_state', 'active') not in {'active', 'delete_failed'}
                                 or job.get('release_rollback_state') in {'running', 'needs_attention'}
                                 or (job.get('target') == 'aws-ecs-express' and any(other is not job and other.get('application_id') == job.get('application_id')

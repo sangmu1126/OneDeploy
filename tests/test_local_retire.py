@@ -76,6 +76,60 @@ class LocalRetireTests(unittest.TestCase):
         self.assertEqual(recovered.jobs[JOB_ID]['deployment_state'], 'deleted')
         self.assertIn('retired_at', recovered.jobs[JOB_ID])
 
+    def test_interrupted_agent_cleans_only_recorded_owned_attempts(self):
+        job = self.app.jobs[JOB_ID]
+        job.update(status='running', attempts=2)
+        job.pop('result')
+        self.app.save(JOB_ID)
+        recovered = App(self.app.root)
+        self.assertEqual(recovered.jobs[JOB_ID]['status'], 'interrupted')
+        self.app = recovered
+        handler_class = handler_for(recovered)
+        self.handler = handler_class.__new__(handler_class)
+        self.handler.path = f'/api/jobs/{JOB_ID}/retire'
+        self.handler.headers = {'X-OneDeploy-Token': recovered.token, 'Content-Length': '0'}
+        self.handler.json_response = Mock()
+        with patch('onedeploy.server.threading.Thread') as thread:
+            self.handler.do_POST()
+        self.handler.json_response.assert_called_once_with(
+            202, {'id': JOB_ID, 'deployment_state': 'deleting'})
+        thread.assert_called_once()
+        with patch('onedeploy.server.LocalDockerAdapter.retire') as retire:
+            recovered.retire_local(JOB_ID)
+        self.assertEqual([call.args[0]['container'] for call in retire.call_args_list],
+                         [f'onedeploy-{JOB_ID}-a1', f'onedeploy-{JOB_ID}-a2'])
+        self.assertTrue(all(call.args[1] == JOB_ID for call in retire.call_args_list))
+        self.assertEqual(recovered.jobs[JOB_ID]['deployment_state'], 'deleted')
+        self.handler.json_response.reset_mock()
+        self.handler.do_POST()
+        self.handler.json_response.assert_called_once_with(409, {'error': '종료할 수 있는 배포가 아닙니다.'})
+
+    def test_orphan_cleanup_refuses_foreign_container_and_stays_retryable(self):
+        job = self.app.jobs[JOB_ID]
+        job.update(status='interrupted', attempts=1)
+        job.pop('result')
+        self.app.save(JOB_ID)
+        with patch.object(LocalDockerAdapter, 'inspect_resource', return_value={
+                'Name': '/' + NAME, 'Config': {'Image': IMAGE, 'Labels': {'app': 'other'}}}), \
+                patch.object(LocalDockerAdapter, 'command') as command:
+            self.app.retire_local(JOB_ID)
+            command.assert_not_called()
+        self.assertEqual(job['deployment_state'], 'delete_failed')
+        self.assertIn('ownership changed', job['retire_error'])
+        with patch('onedeploy.server.threading.Thread') as thread:
+            self.handler.do_POST()
+        self.assertEqual(job['deployment_state'], 'deleting')
+        thread.assert_called_once()
+
+    def test_interrupted_job_without_attempt_cannot_retire(self):
+        job = self.app.jobs[JOB_ID]
+        job.update(status='interrupted', attempts=0)
+        job.pop('result')
+        with patch('onedeploy.server.threading.Thread') as thread:
+            self.handler.do_POST()
+        self.handler.json_response.assert_called_once_with(409, {'error': '종료할 수 있는 배포가 아닙니다.'})
+        thread.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

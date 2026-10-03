@@ -17,6 +17,34 @@ test('running deployment can be cancelled only before its first attempt', () => 
   assert.equal(cancelContext.canCancel({status: 'running', attempts: 1}), false);
   assert.equal(cancelContext.canCancel({status: 'succeeded', attempts: 0}), false);
 });
+
+test('interrupted local deployment shows cleanup only for recorded attempts', async () => {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: '', checked: false, files: [], hidden: false, disabled: false,
+      textContent: '', replaceChildren() {}, querySelectorAll() { return []; },
+    });
+    return elements.get(id);
+  };
+  const context = {
+    document: {getElementById: element, hidden: false},
+    fetch: async path => ({ok: true, json: async () => path === '/api/config'
+      ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []} : []}),
+    setInterval() {}, setTimeout, FormData, Set, Error, Date,
+  };
+  runInNewContext(html.split('<script>', 2)[1].split('</script>', 1)[0], context);
+  await new Promise(resolve => setImmediate(resolve));
+  const job = {id: 'a'.repeat(16), mode: 'agent', target: 'local-docker',
+    status: 'interrupted', attempts: 1, events: []};
+  context.show(job);
+  assert.equal(element('retire').hidden, false);
+  assert.match(element('retire').textContent, /로컬 시도 정리/);
+  context.show({...job, attempts: 0});
+  assert.equal(element('retire').hidden, true);
+  context.show({...job, target: 'aws-ecs-express'});
+  assert.equal(element('retire').hidden, true);
+});
 const start = html.indexOf('function postgresUploadHeaders(application)');
 const end = html.indexOf("el('deploy').onclick=", start);
 assert.ok(start >= 0 && end > start);
