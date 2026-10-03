@@ -2,14 +2,17 @@
 
 서울 리전의 계정 `265233844540`에서 2026-10-03 확인한 자원 네 개를 정의한다. 공유 `onedeploy-core` 스택은 ECR 저장소와 ECS 역할 두 개, `onedeploy-db-demo-app` 스택은 보호된 PostgreSQL RDS와 관리형 비밀·DB 보안 그룹·로그 그룹을 소유한다. 앱 서비스 보안 그룹은 스택 밖에 있으며, 무상태 데모 ECS Express 서비스는 자체 로드 밸런서·보안 그룹을 소유한다. Terraform에는 스택과 서비스만 등록해 중복 소유를 피한다.
 
-기존 자원의 import 식별자는 `main.tf`에 있다. 2026-10-03에 네 자원을 로컬 `terraform.tfstate`로 import했고 `terraform validate`가 통과했다. `terraform plan`에는 AWS provider 6.67.0이 import한 ECS Express 서비스의 기본 `wait_for_steady_state=false`를 추가하려는 **제자리 갱신 1건**이 남는다. 이 계획은 적용하지 않았다. 데이터베이스 스택의 매개변수도 provider가 빈 맵으로 읽어 잘못된 갱신을 제안하므로 해당 필드만 변경 무시한다. **계획 확인 없이 `terraform apply`나 `terraform destroy`를 실행하지 않는다.** 이 디렉터리의 로컬 `terraform.tfstate`와 `.terraform/`은 Git에서 제외한다. TF state는 실행 자원 식별자와 메타데이터를 담으므로 별도로 안전하게 보관한다. 이 파일 자체는 스냅샷이나 컨테이너 이미지를 백업하지 않는다.
+기존 자원의 import 식별자는 `main.tf`에 있다. 2026-10-03에 네 자원을 로컬 `terraform.tfstate`로 import했고 `terraform validate`가 통과했다. 원격 상태를 새로 읽은 `terraform plan`에도 AWS provider 6.67.0이 import한 ECS Express 서비스에 **제자리 갱신 1건**을 제안한다. 입력 필드 차이는 `wait_for_steady_state: null → false`이고, endpoint와 service revision은 적용 후 재계산으로 표시된다. `ignore_changes = all`로도 사라지지 않아 **이 계획은 적용하지 않았다.** 데이터베이스 스택의 매개변수도 provider가 빈 맵으로 읽어 잘못된 갱신을 제안하므로 해당 필드만 변경 무시한다. **계획 확인 없이 `terraform apply`나 `terraform destroy`를 실행하지 않는다.** 이 디렉터리의 로컬 `terraform.tfstate`와 `.terraform/`은 Git에서 제외한다. TF state는 실행 자원 식별자와 메타데이터를 담으므로 별도로 안전하게 보관한다. 이 파일 자체는 스냅샷이나 컨테이너 이미지를 백업하지 않는다.
 
 ```sh
 cd terraform/aws-live
 terraform init
 terraform validate
 terraform plan
+sh audit.sh
 ```
+
+`audit.sh`는 AWS 자원을 바꾸지 않고 최신 plan의 변경 범위를 검사한다. 저장한 plan과 JSON은 권한을 제한한 임시 디렉터리에 만들고 종료 시 삭제한다. 종료 코드 `0`은 변경 없음, `2`는 위 ECS provider 갱신만 있음, `3`은 예상 밖의 변경 또는 점검 실패다. **`2`도 적용 허가가 아니다.** 현재 실행 결과는 `2`이며, 예상 패턴과 다른 변경이 생기면 `3`으로 막는다. 실제 적용 전에는 원본 `terraform plan`을 사람이 검토하고 ECS provider 동작을 해결해야 한다.
 
 현재 OneDeploy 실행기도 같은 CloudFormation 스택과 ECS 서비스를 조작할 수 있다. 두 도구를 동시에 변경 실행하지 않는다. Terraform의 `prevent_destroy`는 실수로 스택·DB·서비스를 삭제하는 계획을 막는다. RDS는 별도 수동 스냅샷 `onedeploy-demo-app-backup-20261002`가 보존돼 있다. Terraform 구성의 ECS 서비스는 기존 배포를 기록하고 재생성할 수 있게 하되, OneDeploy가 실제 업데이트를 담당하므로 변경은 무시한다.
 
