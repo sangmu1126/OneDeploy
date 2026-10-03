@@ -4,6 +4,19 @@ import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 
 const html = readFileSync(new URL('../onedeploy/static/index.html', import.meta.url), 'utf8');
+const cancelStart = html.indexOf('function canCancel(job)');
+const cancelEnd = html.indexOf('function show(job)', cancelStart);
+assert.ok(cancelStart >= 0 && cancelEnd > cancelStart);
+const cancelContext = {};
+runInNewContext(html.slice(cancelStart, cancelEnd), cancelContext);
+
+test('running deployment can be cancelled only before its first attempt', () => {
+  assert.equal(cancelContext.canCancel({status: 'waiting_input'}), true);
+  assert.equal(cancelContext.canCancel({status: 'running', attempts: 0}), true);
+  assert.equal(cancelContext.canCancel({status: 'running', attempts: 0, cancel_requested: true}), false);
+  assert.equal(cancelContext.canCancel({status: 'running', attempts: 1}), false);
+  assert.equal(cancelContext.canCancel({status: 'succeeded', attempts: 0}), false);
+});
 const start = html.indexOf('function postgresUploadHeaders(application)');
 const end = html.indexOf("el('deploy').onclick=", start);
 assert.ok(start >= 0 && end > start);

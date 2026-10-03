@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import asdict
 from pathlib import Path
@@ -179,6 +180,71 @@ class EnvironmentHistoryTests(unittest.TestCase):
         self.assertEqual(job['missing_environment'], [])
         self.assertEqual(json.loads((self.root / self.job_id / 'job.json').read_text())['status'], 'cancelled')
         app.ensure_application_available('my-web-app', 'local-docker')
+
+    def test_running_pre_deploy_cancellation_stops_after_ai_response(self):
+        entered, release = threading.Event(), threading.Event()
+        class SlowAgent:
+            def next(self, _history):
+                entered.set()
+                self.assert_release()
+                return [{'type': 'function_call', 'call_id': 'one',
+                         'name': 'deploy_application', 'arguments': '{}'}]
+
+            def assert_release(self):
+                if not release.wait(5):
+                    raise RuntimeError('Timed out waiting for test release')
+
+        app = App(self.root, AISettings(), agent_factory=lambda _: SlowAgent())
+        job = self.job('running')
+        job.update(mode='agent', application_id='my-web-app', target='local-docker', plan=None)
+        app.jobs[self.job_id] = job
+        app.save(self.job_id)
+        worker = threading.Thread(target=app.run_agent, args=(self.job_id,))
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                handler = handler_for(app).__new__(handler_for(app))
+                handler.path = f'/api/deployments/{self.job_id}/cancel'
+                handler.headers = {'X-OneDeploy-Token': app.token, 'Content-Length': '0'}
+                handler.json_response = Mock()
+                handler.do_POST()
+                handler.json_response.assert_called_once_with(
+                    202, {'id': self.job_id, 'status': 'cancelling'})
+                self.assertTrue(job['cancel_requested'])
+            finally:
+                release.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+            deploy.assert_not_called()
+        self.assertEqual(job['status'], 'cancelled')
+        self.assertEqual(job.get('attempts', 0), 0)
+        self.assertEqual(json.loads((self.root / self.job_id / 'job.json').read_text())['status'], 'cancelled')
+        app.ensure_application_available('my-web-app', 'local-docker')
+
+    def test_cancellation_rejected_after_deploy_attempt_starts(self):
+        app = App(self.root, AISettings())
+        job = self.job('running')
+        job.update(mode='agent', application_id='my-web-app', target='local-docker', attempts=1)
+        app.jobs[self.job_id] = job
+        handler = handler_for(app).__new__(handler_for(app))
+        handler.path = f'/api/deployments/{self.job_id}/cancel'
+        handler.headers = {'X-OneDeploy-Token': app.token, 'Content-Length': '0'}
+        handler.json_response = Mock()
+        handler.do_POST()
+        self.assertEqual(handler.json_response.call_args.args[0], 409)
+        self.assertEqual(job['status'], 'running')
+
+    def test_pending_pre_deploy_cancel_survives_server_restart(self):
+        app = App(self.root, AISettings())
+        job = self.job('running')
+        job.update(mode='agent', application_id='my-web-app', target='local-docker',
+                   cancel_requested=True, attempts=0)
+        app.jobs[self.job_id] = job
+        app.save(self.job_id)
+        restored = App(self.root, AISettings())
+        self.assertEqual(restored.jobs[self.job_id]['status'], 'cancelled')
+        self.assertNotIn('cancel_requested', restored.jobs[self.job_id])
 
 
 if __name__ == '__main__':

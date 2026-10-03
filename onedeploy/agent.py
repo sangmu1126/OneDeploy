@@ -73,6 +73,10 @@ class NeedsEnvironment(Exception):
         super().__init__(reason)
 
 
+class DeploymentCancelled(Exception):
+    """The user cancelled before a deployment attempt was submitted."""
+
+
 class OpenAIDeployAgent:
     def __init__(self, settings: AISettings):
         self.settings = settings
@@ -110,10 +114,12 @@ class OpenAIDeployAgent:
 class DeploymentTools:
     def __init__(self, original: Path, work: Path, job_id: str, environment, event, checkpoint,
                  attempts=0, adapter_factory=LocalDockerAdapter, target="local-docker",
-                 infrastructure_plan=None, postgres_request: PostgresRequest | None = None):
+                 infrastructure_plan=None, postgres_request: PostgresRequest | None = None,
+                 cancel_check=None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
         self.emit, self.checkpoint = event, checkpoint
+        self.cancel_check = cancel_check or (lambda: False)
         self.attempts, self.adapter_factory = attempts, adapter_factory
         if target not in {"local-docker", "cloud-run", "aws-ecs-express"}:
             raise ValueError("Unsupported deployment target")
@@ -138,6 +144,10 @@ class DeploymentTools:
             if value:
                 text = text.replace(value, "[REDACTED]")
         return redact(text)
+
+    def check_cancelled(self):
+        if self.cancel_check():
+            raise DeploymentCancelled()
 
     def event(self, stage, message):
         clean = self.clean(message)
@@ -255,6 +265,7 @@ class DeploymentTools:
             raise NeedsEnvironment(missing, "배포에 필요한 환경변수 값을 입력하세요.")
         if self.attempts >= 3:
             raise AgentError("최초 배포와 수정 재시도 2회를 모두 사용했습니다.")
+        self.check_cancelled()
         self.attempts += 1
         self.checkpoint(attempts=self.attempts)
         attempt_id = f"{self.job_id}-a{self.attempts}"
@@ -312,9 +323,11 @@ class DeploymentAgent:
             "attempts_used": self.tools.attempts}, ensure_ascii=False)}]
         started = time.monotonic()
         while self.steps < self.max_steps:
+            self.tools.check_cancelled()
             if time.monotonic() - started > 900:
                 raise AgentError("배포 작업 시간 제한을 초과했습니다.")
             output = self.provider.next(history)
+            self.tools.check_cancelled()
             if not isinstance(output, list) or any(not isinstance(item, dict) for item in output):
                 raise AgentError("AI 도구 호출 형식이 올바르지 않습니다.")
             calls = [item for item in output if item.get("type") == "function_call"]

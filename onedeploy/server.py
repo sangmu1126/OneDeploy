@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from onedeploy.analysis import AISettings, analyze_project, redact
-from onedeploy.agent import DeploymentAgent, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
+from onedeploy.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
 from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 from onedeploy.aws_network import ServiceNetworkRequest, discover_default_network
 from onedeploy.cloud import CloudRunAdapter, CloudRunSettings
@@ -172,11 +172,15 @@ class App:
                     except (OSError, ValueError, TypeError):
                         self.recovery_warnings.append(f"상태 확인 기록을 불러오지 못했습니다: {job_id}")
                 if job["status"] == "running":
-                    job["status"] = "interrupted"
+                    job["status"] = "cancelled" if job.get('cancel_requested') and not job.get('attempts') else "interrupted"
                     if job.get('aws_update_submitted') and not job.get('aws_update_failed_at'):
                         job['aws_update_failed_at'] = datetime.now(timezone.utc).isoformat()
                     job["events"].append({"time": datetime.now(timezone.utc).isoformat(),
-                        "stage": "interrupted", "message": "서버 재시작으로 완료 여부를 확인하지 못했습니다. 컨테이너 상태를 확인하세요. 자동 재배포는 하지 않습니다."})
+                        "stage": job['status'], "message": (
+                            "서버 재시작 후 배포 시도 전 취소 요청을 확인했습니다."
+                            if job['status'] == 'cancelled' else
+                            "서버 재시작으로 완료 여부를 확인하지 못했습니다. 컨테이너 상태를 확인하세요. 자동 재배포는 하지 않습니다.")})
+                    job.pop('cancel_requested', None)
                     self.save(job_id)
                 if job.get('deployment_state') == 'deleting':
                     job['deployment_state'] = 'delete_failed'
@@ -375,6 +379,8 @@ class App:
         def checkpoint(**updates):
             with self.lock:
                 job = self.jobs[job_id]
+                if job.get('cancel_requested') and ('attempts' in updates or updates.get('status') in {'waiting_input', 'succeeded', 'failed'}):
+                    raise DeploymentCancelled()
                 if "change" in updates:
                     job.setdefault("changes", []).append(updates.pop("change"))
                 job.update(updates)
@@ -398,7 +404,8 @@ class App:
                                     environment, lambda s, m: self.event(job_id, s, m), checkpoint,
                                     attempts=job.get("attempts", 0), adapter_factory=adapter_factory, target=target,
                                     infrastructure_plan=job.get('infrastructure_plan'),
-                                    postgres_request=postgres_request_from_job(job))
+                                    postgres_request=postgres_request_from_job(job),
+                                    cancel_check=lambda: self.cancel_requested(job_id))
             self.event(job_id, "starting", "AI가 작업용 소스에서 배포를 준비합니다.")
             result = DeploymentAgent(self.agent_factory(self.ai_settings), tools,
                                      steps=job.get("steps", 0)).run()
@@ -413,18 +420,35 @@ class App:
                         previous['deployment_state'] = 'superseded'
                         self.save(previous['id'])
             self.event(job_id, "succeeded", "실제 HTTP 응답 확인 완료")
+        except DeploymentCancelled:
+            checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
+            self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
         except NeedsEnvironment as exc:
             # Previous values are not persisted, so ask for their names again on resume too.
             names = sorted(set(exc.names) | set(environment))
-            checkpoint(status="waiting_input", missing_environment=names, input_reason=exc.reason)
-            self.event(job_id, "waiting_input", exc.reason)
+            try:
+                checkpoint(status="waiting_input", missing_environment=names, input_reason=exc.reason)
+            except DeploymentCancelled:
+                checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
+                self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
+            else:
+                self.event(job_id, "waiting_input", exc.reason)
         except Exception as exc:
+            if self.cancel_requested(job_id) and not self.jobs[job_id].get('attempts'):
+                checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
+                self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
+                return
             message = str(exc)
             for value in sorted(set(environment.values()), key=len, reverse=True):
                 if value:
                     message = message.replace(value, "[REDACTED]")
             self.event(job_id, "error", message)
-            checkpoint(status="failed")
+            try:
+                checkpoint(status="failed")
+            except DeploymentCancelled:
+                checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
+                self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
+                return
             if self.jobs[job_id].get('aws_update_submitted') and not self.jobs[job_id].get('aws_update_failed_at'):
                 checkpoint(aws_update_failed_at=datetime.now(timezone.utc).isoformat())
             if (self.jobs[job_id].get('aws_update_submitted') or any(
@@ -439,6 +463,10 @@ class App:
             environment.clear()
             if tools is not None:
                 tools.environment.clear()
+
+    def cancel_requested(self, job_id):
+        with self.lock:
+            return bool(self.jobs[job_id].get('cancel_requested'))
 
     def run(self, job_id, environment=None):
         environment = {} if environment is None else environment
@@ -1347,14 +1375,23 @@ def handler_for(app: App):
                         raise ValueError("Cancellation request must be empty")
                     with app.lock:
                         job = app.jobs.get(job_id)
-                        if not job or job.get('mode') != 'agent' or job['status'] != 'waiting_input':
-                            self.json_response(409, {"error": "입력 대기 중인 작업만 취소할 수 있습니다."})
+                        if not job or job.get('mode') != 'agent' or job['status'] not in {'waiting_input', 'running'}:
+                            self.json_response(409, {"error": "입력 대기 또는 배포 시도 전 작업만 취소할 수 있습니다."})
                             return
-                        job.update(status='cancelled', missing_environment=[])
+                        if job['status'] == 'running' and (job.get('attempts', 0) != 0 or job.get('cancel_requested')):
+                            self.json_response(409, {"error": "이미 배포 시도가 시작됐거나 취소 요청이 접수됐습니다. 결과를 확인하세요."})
+                            return
+                        pending = job['status'] == 'running'
+                        if pending:
+                            job['cancel_requested'] = True
+                        else:
+                            job.update(status='cancelled', missing_environment=[])
                         job['events'].append({"time": datetime.now(timezone.utc).isoformat(),
-                                              "stage": "cancelled", "message": "사용자가 입력 대기 작업을 취소했습니다."})
+                                              "stage": "cancel_requested" if pending else "cancelled",
+                                              "message": "배포 시도 전 취소를 요청했습니다." if pending else "사용자가 입력 대기 작업을 취소했습니다."})
                         app.save(job_id)
-                    self.json_response(200, {"id": job_id, "status": "cancelled"})
+                    self.json_response(202 if pending else 200,
+                                       {"id": job_id, "status": "cancelling" if pending else "cancelled"})
                     return
                 if self.path == "/api/analyze":
                     size = int(self.headers.get("Content-Length", "0"))

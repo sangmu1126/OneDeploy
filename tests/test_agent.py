@@ -7,8 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_fixture import RepairFixture, call
-from onedeploy.agent import AgentError, DeploymentAgent, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
+from onedeploy.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
 from onedeploy.analysis import AISettings
+from onedeploy.core import LocalDockerAdapter
 from onedeploy.server import App
 
 
@@ -150,6 +151,17 @@ class AgentTests(unittest.TestCase):
         self.tools.attempts = 3
         with self.assertRaisesRegex(AgentError, '2회'):
             self.tools.deploy_application()
+
+    def test_cancelled_before_first_attempt_never_calls_adapter(self):
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}', '"scripts":{"start":"node server.js"}')
+        self.tools.configure_deployment('start', None, 4321, '/', [])
+        self.tools.cancel_check = lambda: True
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            with self.assertRaises(DeploymentCancelled):
+                self.tools.deploy_application()
+            deploy.assert_not_called()
+        self.assertEqual(self.tools.attempts, 0)
 
     def test_tool_protocol_preserves_reasoning_items(self):
         output = [{'type': 'reasoning', 'encrypted_content': 'opaque'}, *call('read_runtime_logs', {})]
