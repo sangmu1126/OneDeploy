@@ -8,12 +8,16 @@ import urllib.request
 
 
 class ResponsesWireFixture:
-    def __init__(self):
+    def __init__(self, actions=None, *, expected_target='local-docker', planner_requests=1,
+                 managed_postgres=False):
         self.local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.lock = threading.Lock()
         self.planner_requests = 0
         self.agent_requests = 0
-        self.actions = [
+        self.expected_target = expected_target
+        self.expected_planner_requests = planner_requests
+        self.managed_postgres = managed_postgres
+        self.actions = actions if actions is not None else [
             ('read_project_files', {'paths': ['package.json', 'server.js']}),
             ('apply_project_patch', {'path': 'package.json', 'old_text': '"scripts": {}',
                                      'new_text': '"scripts": {"start": "node server.js"}'}),
@@ -39,7 +43,7 @@ class ResponsesWireFixture:
         return io.BytesIO(json.dumps(body).encode())
 
     def _planner_response(self, payload):
-        assert self.planner_requests == 0
+        assert self.planner_requests == 0 and self.expected_planner_requests == 1
         assert payload['text']['format']['type'] == 'json_schema'
         assert payload['text']['format']['strict'] is True
         context = json.loads(payload['input'])
@@ -61,7 +65,9 @@ class ResponsesWireFixture:
         history = payload['input']
         if index == 0:
             assert len(history) == 1 and history[0]['role'] == 'user'
-            assert json.loads(history[0]['content'])['target'] == 'local-docker'
+            initial = json.loads(history[0]['content'])
+            assert initial['target'] == self.expected_target
+            assert initial['managed_postgres_connection'] is self.managed_postgres
         else:
             reasoning, function_call, tool_result = history[-3:]
             assert reasoning['type'] == 'reasoning'
@@ -72,11 +78,12 @@ class ResponsesWireFixture:
             assert tool_result['call_id'] == function_call['call_id']
             result = json.loads(tool_result['output'])
             assert 'error' not in result, result
-            if index == 1:
-                assert 'package.json' in result['files'] and 'server.js' in result['files']
-            if index in {2, 3}:
-                assert result['changed'] == ('package.json' if index == 2 else 'server.js')
-            if index == 4:
+            previous_name, previous_args = self.actions[index - 1]
+            if previous_name == 'read_project_files':
+                assert set(previous_args['paths']) <= set(result['files'])
+            if previous_name == 'apply_project_patch':
+                assert result['changed'] == previous_args['path']
+            if previous_name == 'configure_deployment':
                 assert result['ready'] is True
         name, arguments = self.actions[index]
         self.agent_requests += 1
@@ -89,5 +96,5 @@ class ResponsesWireFixture:
         ]}
 
     def assert_complete(self):
-        assert self.planner_requests == 1, self.planner_requests
+        assert self.planner_requests == self.expected_planner_requests, self.planner_requests
         assert self.agent_requests == len(self.actions), self.agent_requests

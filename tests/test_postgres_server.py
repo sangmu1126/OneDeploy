@@ -8,6 +8,8 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from openai_wire_fixture import ResponsesWireFixture
+from onedeploy.agent import OpenAIDeployAgent
 from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsSettings
 from onedeploy.postgres import PostgresRequest
@@ -456,18 +458,10 @@ class PostgresServerTests(unittest.TestCase):
                                       'required_env': ['PGHOST', 'PGPASSWORD']}),
             ('deploy_application', {}),
         ]
-        class Provider:
-            index = 0
-            def next(self, history):
-                initial = json.loads(history[0]['content'])
-                assert initial['managed_postgres_connection'] is True
-                assert initial['target'] == 'aws-ecs-express'
-                name, arguments = actions[self.index]
-                self.index += 1
-                return [{'type': 'function_call', 'call_id': str(self.index),
-                         'name': name, 'arguments': json.dumps(arguments)}]
-        provider = Provider()
-        self.app.agent_factory = lambda _: provider
+        wire = ResponsesWireFixture(actions, expected_target='aws-ecs-express',
+                                    planner_requests=0, managed_postgres=True)
+        self.app.ai_settings = AISettings('wire-fixture-key', 'wire-fixture-model')
+        self.app.agent_factory = OpenAIDeployAgent
         calls = []
         class Adapter:
             def __init__(self, event, settings, existing=None, checkpoint=None):
@@ -481,8 +475,10 @@ class PostgresServerTests(unittest.TestCase):
                         'database': {'database_id': 'onedeploy-demo-app'}}
         with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'onedeploy-demo-app'}), \
+                patch('urllib.request.build_opener', return_value=wire), \
                 patch('onedeploy.server.AwsExpressAdapter', Adapter):
             self.app.run_postgres_then_agent(job_id)
+        wire.assert_complete()
         job = self.app.jobs[job_id]
         self.assertEqual(job['status'], 'succeeded', job['events'][-1])
         self.assertEqual(job['steps'], 4)
