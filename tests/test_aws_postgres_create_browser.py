@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from onedeploy.aws import AwsSettings
 from onedeploy.postgres import PostgresRequest
-from tests.smoke_aws_postgres_create_browser import retire_final_snapshot
+from tests.smoke_aws_postgres_create_browser import main, retire_final_snapshot
 
 
 class BrowserRetirementCleanupTests(unittest.TestCase):
@@ -52,6 +52,21 @@ class BrowserRetirementCleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'DELETE_COMPLETE'):
                 retire_final_snapshot(self.application, self.operation,
                                       self.settings, self.request)
+
+    def test_one_action_drill_without_apply_stops_after_read_only_preflight(self):
+        network = {'vpc_id': 'vpc-12345678'}
+        with patch('tests.smoke_aws_postgres_create_browser.discover_default_network',
+                   return_value=network), \
+             patch('tests.smoke_aws_postgres_create_browser.AwsServiceNetworkProvisioner') as provisioner, \
+             patch('tests.smoke_aws_postgres_create_browser.App') as app, \
+             patch('tests.smoke_aws_postgres_create_browser.subprocess.run') as command:
+            provisioner.return_value.preflight.return_value = {
+                'stack_name': 'onedeploy-network-dbdrill-1234abcd'}
+            main(['--one-action-deploy', '--application', self.application,
+                  '--account', '123456789012', '--region', 'ap-northeast-2'])
+        provisioner.return_value.preflight.assert_called_once_with()
+        app.assert_not_called()
+        command.assert_not_called()
 
 
 if __name__ == '__main__':

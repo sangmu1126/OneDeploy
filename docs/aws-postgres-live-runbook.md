@@ -1,5 +1,26 @@
 # AWS PostgreSQL 실계정 검증 절차
 
+## 신규 RDS 생성과 앱 배포의 단일 작업 검증 준비 — 미실행
+
+`--one-action-deploy`는 임시 `dbdrill-<8 hex>` 앱의 네트워크를 먼저 준비한 뒤,
+실제 Chrome에서 RDS 가격 계획과 샘플 ZIP을 **한 번의 배포 작업**으로 제출한다.
+생성 작업 ID와 배포 작업의 결합, SQL 마이그레이션, ECS 배포, HTTP 데이터
+쓰기·읽기·삭제를 확인하고, 소유 리소스만 정리하도록 기존 드릴에 연결했다.
+AI 도구 응답은 테스트용으로 고정하며 실제 모델 판단은 검사하지 않는다.
+로컬 Chrome에서는 생성 성공, 생성 실패, `PROBE_KEY` 입력 대기·재개를 모의
+AWS 응답으로 통과했다. **이 새 모드는 아직 실계정에서 실행하지 않았다.**
+데모 AWS 자원은 중지 상태다.
+
+```sh
+python3 -m tests.smoke_aws_postgres_create_browser \
+  --one-action-deploy --account <AWS_ACCOUNT_ID> --region ap-northeast-2
+# 기본은 읽기 전용 사전 점검이다. 실제 임시 RDS·ECS 생성에는 --apply를 추가한다.
+```
+
+`--apply` 실행은 과금 가능한 임시 리소스를 만들며 실패 결과가 불확실하면 자동
+삭제를 멈추고 `.onedeploy/browser-db-drills/<앱 ID>/` 기록을 남긴다. 기존
+`--deploy-app` 모드는 RDS 생성 후 별도 앱 업로드를 검증한 과거 경로로 유지한다.
+
 ## 2026-10-03 생성 실패·CloudFormation 롤백 드릴
 
 `tests.smoke_aws_postgres_rollback_drill --apply`는 임시 `dbdrill-5f443d7b` 앱의 전용 네트워크를 만든 뒤, 제품 `PostgresOperations.plan()`·`start()` 경로로 생성 요청을 기록했다. 드릴은 **시험 프로세스에서만** RDS가 없는 CloudFormation 템플릿을 주입했다. 템플릿에는 신호를 보내지 않는 WaitCondition과 그 핸들만 있으며, 실제 AWS `ValidateTemplate`을 통과했다. 신호 대기 시간 초과로 스택이 `ROLLBACK_COMPLETE`가 됐다. [AWS WaitCondition 동작](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-waitcondition.html)

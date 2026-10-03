@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -22,7 +23,7 @@ DRIVER = Path(__file__).with_name('browser_postgres_create_cdp.mjs')
 APPLICATION = 'dbdrill-1234abcd'
 
 
-def run(*, fail_create: bool = False) -> dict:
+def run(*, fail_create: bool = False, wait_input: bool = False) -> dict:
     if not CHROME.is_file():
         raise RuntimeError('Chrome executable not found')
     settings = AwsSettings('ap-northeast-2', expected_account='123456789012',
@@ -37,6 +38,12 @@ def run(*, fail_create: bool = False) -> dict:
              'storage_type': 'gp3', 'storage_gib': 20,
              'pricing': {'baseline_730h_usd': '20.87'}}
     database = {'database_id': request.database_id}
+    if fail_create and wait_input:
+        raise ValueError('Choose one local drill scenario')
+    probe_key = 'local-browser-probe-key'
+    network = {'account': request.account, 'region': request.region,
+               'vpc_id': request.vpc_id, 'subnet_ids': list(request.subnet_ids),
+               'availability_zones': ['ap-northeast-2a', 'ap-northeast-2c']}
 
     def reject_aws(_adapter, args, **_kwargs):
         raise AssertionError('Unexpected AWS command in local drill: ' + repr(args))
@@ -52,6 +59,8 @@ def run(*, fail_create: bool = False) -> dict:
                   return_value=database) as create, \
             patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
                   return_value=database) as inspect, \
+            patch('onedeploy.server.discover_default_network',
+                  return_value=network), \
             patch.object(AwsSettings, 'unavailable_reason', return_value=None):
         root = Path(directory)
         zip_path = root / 'postgres-app.zip'
@@ -61,7 +70,15 @@ def run(*, fail_create: bool = False) -> dict:
                   agent_factory=lambda _: object())
         deployments = []
 
-        def finish_deployment(job_id):
+        def finish_deployment(job_id, environment=None):
+            if wait_input and environment is None:
+                with app.lock:
+                    app.jobs[job_id]['status'] = 'waiting_input'
+                    app.jobs[job_id]['missing_environment'] = ['PROBE_KEY']
+                    app.save(job_id)
+                return
+            if wait_input and environment != {'PROBE_KEY': probe_key}:
+                raise AssertionError('Browser did not resume with the requested environment value')
             deployments.append(job_id)
             with app.lock:
                 app.jobs[job_id]['status'] = 'succeeded'
@@ -96,8 +113,14 @@ def run(*, fail_create: bool = False) -> dict:
                     subprocess.run(['node', str(DRIVER),
                         f'http://127.0.0.1:{server.server_port}/',
                         port_file.read_text().splitlines()[0], APPLICATION,
-                        'one-action-failed-local' if fail_create else 'one-action-local',
-                        str(zip_path)], check=True, timeout=60)
+                        'one-action-failed-local' if fail_create else
+                        'one-action-deploy' if wait_input else 'one-action-local',
+                        str(zip_path)], check=True, timeout=60,
+                        env={**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key})
+                    if wait_input:
+                        deadline = time.monotonic() + 10
+                        while time.monotonic() < deadline and not deployments:
+                            time.sleep(.1)
                 finally:
                     chrome.terminate()
                     try:
@@ -124,9 +147,11 @@ def run(*, fail_create: bool = False) -> dict:
             server.server_close()
             thread.join(timeout=10)
     return {'application_id': APPLICATION, 'status': 'passed',
-            'scenario': 'creation_failure' if fail_create else 'creation_success',
+            'scenario': 'creation_failure' if fail_create else
+                        'environment_resume' if wait_input else 'creation_success',
             'aws_mode': 'mocked', 'deployment_executed': False}
 
 
 if __name__ == '__main__':
-    print(json.dumps([run(), run(fail_create=True)], ensure_ascii=False))
+    print(json.dumps([run(), run(fail_create=True), run(wait_input=True)],
+                     ensure_ascii=False))

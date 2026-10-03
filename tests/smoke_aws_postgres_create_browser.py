@@ -72,6 +72,8 @@ def main(argv=None) -> None:
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--deploy-app', action='store_true',
                         help='Also upload and deploy a PostgreSQL app through Chrome')
+    parser.add_argument('--one-action-deploy', action='store_true',
+                        help='Create the RDS and deploy the app from one reviewed Chrome upload')
     parser.add_argument('--retire-through-ui', action='store_true',
                         help='Retire the disposable RDS using the product browser UI')
     parser.add_argument('--application', default='dbdrill-' + secrets.token_hex(4))
@@ -80,8 +82,11 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
     if not re.fullmatch(r'dbdrill-[a-f0-9]{8}', args.application):
         parser.error('--application must be a unique dbdrill-<8 hex> ID')
-    if args.deploy_app and args.retire_through_ui:
-        parser.error('Run --deploy-app and --retire-through-ui in separate disposable drills')
+    if args.deploy_app and args.one_action_deploy:
+        parser.error('Choose either --deploy-app or --one-action-deploy')
+    deploy_requested = args.deploy_app or args.one_action_deploy
+    if deploy_requested and args.retire_through_ui:
+        parser.error('Run deployment and --retire-through-ui in separate disposable drills')
     settings = AwsSettings(args.region, expected_account=args.account, account_pin_required=True)
     network = discover_default_network(settings)
     network_request = ServiceNetworkRequest(args.application, args.account, args.region,
@@ -94,13 +99,13 @@ def main(argv=None) -> None:
         return
     if not CHROME.is_file():
         raise RuntimeError('Chrome executable not found')
-    if args.deploy_app:
+    if deploy_requested:
         subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
                        check=True, capture_output=True, text=True, timeout=20)
     state = Path('.onedeploy') / 'browser-db-drills' / args.application
     state.mkdir(mode=0o700, parents=True, exist_ok=False)
     app = App(state / 'app', AISettings('fixture-only', 'scripted'),
-              PostgresFixture if args.deploy_app else None,
+              PostgresFixture if deploy_requested else None,
               aws_settings=settings, monitor_interval=0)
 
     class QuietHandler(handler_for(app)):
@@ -112,7 +117,7 @@ def main(argv=None) -> None:
     thread.start()
     profile = state / 'chrome-profile'
     archive_path = state / 'probe.zip'
-    if args.deploy_app:
+    if deploy_requested:
         archive_path.write_bytes(archive())
     probe_key = secrets.token_urlsafe(32)
     record_id = uuid.uuid4().hex
@@ -142,13 +147,31 @@ def main(argv=None) -> None:
             time.sleep(.2)
         try:
             subprocess.run(['node', str(DRIVER), f'http://127.0.0.1:{server.server_port}/',
-                            port_file.read_text().splitlines()[0], args.application, 'create'],
+                            port_file.read_text().splitlines()[0], args.application,
+                            'network-only' if args.one_action_deploy else 'create'],
                            check=True, timeout=20 * 60)
         except subprocess.CalledProcessError:
             if args.application not in app.postgres_operations.operations:
                 raise
             print('Chrome 연결이 끊겼지만 DB 생성 요청이 기록돼 있어 완료 후 다시 조회합니다.',
                   flush=True)
+        if args.one_action_deploy:
+            deadline = time.monotonic() + 1200
+            while time.monotonic() < deadline:
+                network_operation = app.network_operations.operations.get(args.application)
+                if network_operation and network_operation['status'] != 'running':
+                    break
+                time.sleep(3)
+            network_operation = app.network_operations.get(args.application)
+            created_network = network_provisioner.inspect_current()
+            if (network_operation['status'] != 'succeeded'
+                    or network_operation['stack_id'] != created_network['stack_id']):
+                raise AssertionError('브라우저 네트워크 생성 결과를 확인하지 못했습니다.')
+            environment = {**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key}
+            subprocess.run(['node', str(DRIVER), base + '/',
+                            port_file.read_text().splitlines()[0], args.application,
+                            'one-action-deploy', str(archive_path.resolve())],
+                           check=True, timeout=65 * 60, env=environment)
         deadline = time.monotonic() + 3900
         while time.monotonic() < deadline:
             operation = app.postgres_operations.operations.get(args.application)
@@ -172,15 +195,16 @@ def main(argv=None) -> None:
                 or network_operation['stack_id'] != created_network['stack_id']
                 or db_operation['status'] != 'succeeded'
                 or db_operation['database_id'] != created_db['database_id']
-                or app.jobs):
+                or (app.jobs and not args.one_action_deploy)):
             raise AssertionError('브라우저 작업 기록과 AWS 결과가 일치하지 않습니다.')
         print('PASS: browser operations match the owned AWS network and RDS', flush=True)
-        if args.deploy_app:
-            environment = {**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key}
-            subprocess.run(['node', str(DRIVER), base + '/',
-                            port_file.read_text().splitlines()[0], args.application,
-                            'deploy', str(archive_path.resolve())],
-                           check=True, timeout=10 * 60, env=environment)
+        if deploy_requested:
+            if args.deploy_app:
+                environment = {**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key}
+                subprocess.run(['node', str(DRIVER), base + '/',
+                                port_file.read_text().splitlines()[0], args.application,
+                                'deploy', str(archive_path.resolve())],
+                               check=True, timeout=10 * 60, env=environment)
             deadline = time.monotonic() + 2400
             while time.monotonic() < deadline:
                 jobs = list(app.jobs.values())
@@ -193,6 +217,8 @@ def main(argv=None) -> None:
                 raise AssertionError('브라우저 배포 작업이 하나로 기록되지 않았습니다.')
             job = jobs[0]
             if (job['status'] != 'succeeded' or job.get('attempts') != 1
+                    or (args.one_action_deploy and job.get('postgres_creation_id') !=
+                        db_operation.get('creation_id'))
                     or job.get('result', {}).get('database', {}).get('database_id')
                     != created_db['database_id']
                     or job.get('result', {}).get('migration', {}).get('cleanup_complete') is not True):

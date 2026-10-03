@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const [serverUrl, debuggingPort, application, stage = 'create', archive] = process.argv.slice(2);
 assert.match(application, /^dbdrill-[a-f0-9]{8}$/);
-assert.ok(['create', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan', 'one-action-local', 'one-action-failed-local'].includes(stage));
+assert.ok(['create', 'network-only', 'one-action-deploy', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan', 'one-action-local', 'one-action-failed-local'].includes(stage));
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl);
@@ -81,6 +81,23 @@ try {
       await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('application').value==='dbdrill-1234abcd'&&e('status').textContent==='작업 중단·결과 확인 필요'&&e('postgresOperationInfo').textContent.includes('needs_attention')&&!e('postgresRecovery').hidden&&e('postgresCreationDetails').open;})()"), 30000);
       console.log('PASS: browser reopened failed job from history and showed RDS recovery controls');
     }
+  } else if (stage === 'one-action-deploy') {
+    assert.ok(archive && process.env.ONEDEPLOY_BROWSER_PROBE_KEY);
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('public').checked=true;e('networkDiscover').click();return true;})()`);
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('networkDiscoverInfo').textContent&&!e('networkDiscoverInfo').textContent.includes('서브넷을 채웠습니다'))throw Error(e('networkDiscoverInfo').textContent);return e('postgresPlanVpc').value&&e('postgresPlanSubnets').value.split(',').length>=2;})()"), 60000);
+    const document = await command('DOM.getDocument');
+    const input = await command('DOM.querySelector', {nodeId: document.root.nodeId, selector: '#file'});
+    assert.ok(input.nodeId);
+    await command('DOM.setFileInputFiles', {nodeId: input.nodeId, files: [archive]});
+    await evaluate("document.getElementById('postgresPlan').click();true");
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresPlanInfo').textContent;if(text&&!text.includes('730시간'))throw Error(text);return text.includes('730시간')&&!e('postgresCreateDeploy').hidden;})()"), 120000);
+    await evaluate("document.getElementById('postgresCreateDeploy').click();true");
+    const jobId = await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('jobId').textContent.match(/작업 ([a-f0-9]{16})/)?.[1] || '';})()"), 120000);
+    console.log('PASS: browser submitted one reviewed RDS creation and app deployment job', jobId);
+    const names = await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);if(e('status').textContent==='작업 중단·결과 확인 필요'||e('status').textContent==='배포 실패')throw Error(e('current').textContent);return !e('inputSection').hidden&&!e('resume').disabled?[...e('envInputs').querySelectorAll('input')].map(x=>x.dataset.name):null;})()"), 60 * 60 * 1000);
+    assert.deepEqual(names, ['PROBE_KEY']);
+    await evaluate(`(() => {const input=document.querySelector('#envInputs input');input.value=${JSON.stringify(process.env.ONEDEPLOY_BROWSER_PROBE_KEY)};document.getElementById('resume').click();return true;})()`);
+    console.log('PASS: browser resumed the one-action deployment with the required environment value');
   } else if (stage === 'auto-existing-plan') {
     assert.ok(archive);
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='auto';e('target').onchange();e('public').checked=true;e('postgresExisting').checked=true;e('postgresExisting').onchange();return true;})()`);
@@ -155,12 +172,14 @@ try {
   await evaluate("document.getElementById('networkCreate').click();true");
   await until(() => evaluate("(() => {const text=document.getElementById('networkOperationInfo').textContent;if(text.includes('needs_attention'))throw Error(text);return text.includes(' · succeeded · ');})()"), 15 * 60 * 1000);
   console.log('PASS: browser created the app-owned network');
+  if (stage !== 'network-only') {
   await evaluate("document.getElementById('postgresPlan').click();true");
   await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresPlanInfo').textContent;if(text&&!text.includes('이 조회는 DB를 생성하지 않았습니다'))throw Error(text);return text.includes('이 조회는 DB를 생성하지 않았습니다')&&text.includes('730시간')&&!e('postgresCreate').hidden;})()"), 120000);
   console.log('PASS: browser reviewed the read-only RDS plan and price');
   await evaluate("document.getElementById('postgresCreate').click();true");
   await until(() => evaluate("document.getElementById('postgresOperationInfo').textContent.includes(' · running · ')"), 120000);
   console.log('PASS: browser submitted the RDS create operation');
+  }
   }
 } finally {
   socket.close();
