@@ -48,6 +48,13 @@ class InfrastructureTests(unittest.TestCase):
         self.assertTrue(payload['text']['format']['strict'])
         self.assertEqual(json.loads(payload['input'])['available_targets'], ['local-docker'])
 
+    def test_planner_keeps_response_size_limit_error(self):
+        with patch('onedeploy.infrastructure.urllib.request.build_opener') as opener:
+            opener.return_value.open.return_value = io.BytesIO(b'x' * (1024 * 1024 + 1))
+            with self.assertRaisesRegex(ValueError, '응답 크기 제한'):
+                OpenAIInfrastructurePlanner(AISettings('fixture-key', 'fixture-model')).propose(
+                    {'package.json': 'start'}, ['local-docker'], False)
+
     def test_ai_plan_requires_real_source_evidence_and_available_target(self):
         files = {'package.json': '{"scripts":{"start":"node server.js"}}'}
         proposal = {'target': 'aws-ecs-express', 'workload': 'stateless-http',

@@ -154,6 +154,8 @@ class OpenAIAnalyzer:
             code = exc.code
             exc.close()
             raise AnalysisError(f"AI API returned HTTP {code}; check model, access and quota") from None
+        except AnalysisError:
+            raise
         except (OSError, ValueError):
             raise AnalysisError("AI API connection failed or returned invalid JSON") from None
         return parse_response(body)

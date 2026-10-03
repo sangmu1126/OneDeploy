@@ -290,6 +290,8 @@ class OpenAIInfrastructurePlanner:
             code = exc.code
             exc.close()
             raise AnalysisError(f'AI 인프라 계획 API 오류 HTTP {code}.') from None
+        except AnalysisError:
+            raise
         except (OSError, ValueError):
             raise AnalysisError('AI 인프라 계획 연결 또는 응답 처리에 실패했습니다.') from None
         return parse_response(body)

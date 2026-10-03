@@ -169,6 +169,12 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(payload['text']['format']['strict'])
         self.assertEqual(result, self.proposal)
 
+    def test_provider_keeps_response_size_limit_error(self):
+        with patch('onedeploy.analysis.urllib.request.build_opener') as opener:
+            opener.return_value.open.return_value = io.BytesIO(b'x' * (1024 * 1024 + 1))
+            with self.assertRaisesRegex(AnalysisError, 'response exceeded the size limit'):
+                OpenAIAnalyzer(self.settings).propose(self.files)
+
     def test_provider_error_does_not_expose_response_body(self):
         error = urllib.error.HTTPError('https://api.openai.com', 401, 'unauthorized', {}, io.BytesIO(b'sensitive'))
         with patch('onedeploy.analysis.urllib.request.build_opener') as opener:
