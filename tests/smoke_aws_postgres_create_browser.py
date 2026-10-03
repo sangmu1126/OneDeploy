@@ -182,10 +182,21 @@ def main(argv=None) -> None:
                     or network_operation['stack_id'] != created_network['stack_id']):
                 raise AssertionError('브라우저 네트워크 생성 결과를 확인하지 못했습니다.')
             environment = {**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key}
-            subprocess.run(['node', str(DRIVER), base + '/',
-                            port_file.read_text().splitlines()[0], args.application,
-                            'one-action-deploy', str(archive_path.resolve())],
-                           check=True, timeout=65 * 60, env=environment)
+            try:
+                subprocess.run(['node', str(DRIVER), base + '/',
+                                port_file.read_text().splitlines()[0], args.application,
+                                'one-action-deploy', str(archive_path.resolve())],
+                               check=True, timeout=65 * 60, env=environment)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                jobs = list(app.jobs.values())
+                if len(jobs) != 1 or jobs[0].get('application_id') != args.application:
+                    raise
+                print('Chrome 연결이 끊겨 기존 배포 작업을 다시 엽니다. ZIP·RDS 생성 요청은 반복하지 않습니다.',
+                      flush=True)
+                subprocess.run(['node', str(DRIVER), base + '/',
+                                port_file.read_text().splitlines()[0], args.application,
+                                'one-action-resume-existing'],
+                               check=True, timeout=65 * 60, env=environment)
         deadline = time.monotonic() + 3900
         while time.monotonic() < deadline:
             operation = app.postgres_operations.operations.get(args.application)

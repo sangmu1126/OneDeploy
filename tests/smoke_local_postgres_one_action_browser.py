@@ -24,7 +24,8 @@ APPLICATION = 'dbdrill-1234abcd'
 
 
 def run(*, fail_create: bool = False, wait_input: bool = False,
-        reject_plan: bool = False, manual_resume: bool = False) -> dict:
+        reject_plan: bool = False, manual_resume: bool = False,
+        reconnect: bool = False) -> dict:
     if not CHROME.is_file():
         raise RuntimeError('Chrome executable not found')
     settings = AwsSettings('ap-northeast-2', expected_account='123456789012',
@@ -41,6 +42,8 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
     database = {'database_id': request.database_id}
     if sum((fail_create, wait_input, reject_plan, manual_resume)) > 1:
         raise ValueError('Choose one local drill scenario')
+    if reconnect and not wait_input:
+        raise ValueError('Browser reconnect drill requires environment input')
     changed_quote = {**quote, 'pricing': {'baseline_730h_usd': '22.00'}}
     probe_key = 'local-browser-probe-key'
     network = {'account': request.account, 'region': request.region,
@@ -126,9 +129,16 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
                         'one-action-failed-local' if fail_create else
                         'one-action-plan-rejected-local' if reject_plan else
                         'one-action-manual-resume-local' if manual_resume else
+                        'one-action-submit-only-local' if reconnect else
                         'one-action-deploy' if wait_input else 'one-action-local',
                         str(zip_path)], check=True, timeout=60,
                         env={**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key})
+                    if reconnect:
+                        subprocess.run(['node', str(DRIVER),
+                            f'http://127.0.0.1:{server.server_port}/',
+                            port_file.read_text().splitlines()[0], APPLICATION,
+                            'one-action-resume-existing'], check=True, timeout=60,
+                            env={**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key})
                     if wait_input:
                         deadline = time.monotonic() + 10
                         while time.monotonic() < deadline and not deployments:
@@ -169,11 +179,13 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
             'scenario': 'creation_failure' if fail_create else
                         'plan_rejected' if reject_plan else
                         'manual_resume' if manual_resume else
+                        'browser_reconnect' if reconnect else
                         'environment_resume' if wait_input else 'creation_success',
             'aws_mode': 'mocked', 'deployment_executed': False}
 
 
 if __name__ == '__main__':
     print(json.dumps([run(), run(fail_create=True), run(wait_input=True),
+                      run(wait_input=True, reconnect=True),
                       run(reject_plan=True), run(manual_resume=True)],
                      ensure_ascii=False))

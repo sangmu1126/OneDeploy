@@ -16,6 +16,13 @@ AWS 응답으로 통과했다. **이 새 모드는 아직 실계정에서 실행
 통과했다. 이 점검은 브라우저를 열거나 리소스를 생성하지 않았으며, 단일 작업의
 RDS·ECS 실배포 성공을 뜻하지 않는다.
 
+2026-10-04에는 새 임시 앱 `dbdrill-1ddecda6`의 계정·Docker·네트워크 사전
+점검을 다시 통과했다. 실계정 `--apply` 실행은 AWS 일시 중지 해제에 대한 명시적
+승인 근거가 없다는 자동 검토에서 거부돼 시작하지 않았다. 따라서 이 앱의 AWS
+자원은 만들지 않았다. Chrome 디버그 연결이 끊겨도 이미 기록된 단일 배포 작업을
+이력에서 다시 열어 환경값 입력을 이어가는 안전한 재접속 경로를 로컬 모의 AWS로
+추가·검증했다. 재접속은 ZIP 업로드나 RDS 생성 요청을 반복하지 않는다.
+
 ```sh
 python3 -m tests.smoke_aws_postgres_create_browser \
   --one-action-deploy --account <AWS_ACCOUNT_ID> --region ap-northeast-2
