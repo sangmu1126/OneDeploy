@@ -106,6 +106,10 @@ class OpenAIDeployAgent:
             raise AgentError(f"AI API 오류 HTTP {code}. 모델 접근 권한과 사용 한도를 확인하세요.") from None
         except (OSError, ValueError):
             raise AgentError("AI API 연결 또는 응답 처리에 실패했습니다.") from None
+        if (isinstance(body, dict) and body.get('status') == 'incomplete'
+                and isinstance(body.get('incomplete_details'), dict)
+                and body['incomplete_details'].get('reason') == 'max_output_tokens'):
+            raise AgentError('AI 응답 토큰 한도에 도달했습니다. 배포 도구는 실행하지 않았습니다.')
         if not isinstance(body, dict) or body.get("status") != "completed" or not isinstance(body.get("output"), list):
             raise AgentError("AI 응답이 완료되지 않았습니다.")
         return body["output"]

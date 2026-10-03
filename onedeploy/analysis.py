@@ -161,6 +161,10 @@ class OpenAIAnalyzer:
 
 def parse_response(body: dict) -> dict:
     try:
+        if (body.get("status") == "incomplete"
+                and isinstance(body.get("incomplete_details"), dict)
+                and body["incomplete_details"].get("reason") == "max_output_tokens"):
+            raise AnalysisError("AI 응답 토큰 한도에 도달해 계획을 완료하지 못했습니다.")
         if body.get("status") != "completed":
             raise AnalysisError("AI response was not completed")
         texts = []

@@ -186,6 +186,18 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(payload['store'])
         self.assertIn('reasoning.encrypted_content', payload['include'])
 
+    def test_incomplete_response_never_exposes_partial_tool_call(self):
+        body = {'status': 'incomplete',
+                'incomplete_details': {'reason': 'max_output_tokens'},
+                'output': call('deploy_application', {})}
+        with patch('onedeploy.agent.urllib.request.build_opener') as opener, \
+                patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            opener.return_value.open.return_value = io.BytesIO(json.dumps(body).encode())
+            with self.assertRaisesRegex(AgentError, '토큰 한도'):
+                DeploymentAgent(OpenAIDeployAgent(AISettings('fake', 'model')), self.tools).run()
+            deploy.assert_not_called()
+        self.assertEqual(self.tools.attempts, 0)
+
     def test_waiting_job_and_unconfigured_agent_job_restore(self):
         root = self.root / 'state'
         job_id = 'b' * 16

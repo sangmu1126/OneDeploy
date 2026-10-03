@@ -176,3 +176,9 @@ HTTP 성공·종료를 다시 확인했다. 별도 `--environment` 스모크는 
 기록된 작업용 체크섬과 수정 파일을 확인하고, 환경값을 입력해 같은 소스로 Docker
 HTTP 성공과 컨테이너·이미지 정리까지 통과했다. 모두 고정 AI 응답이며 OpenAI API나
 AWS를 호출하지 않았다.
+
+Responses API의 `incomplete_details.reason=max_output_tokens`를 구분해 표시한다.
+[OpenAI 공식 문서](https://developers.openai.com/api/docs/guides/structured-outputs)는
+이 상태에서 구조화 응답이 완성되지 않았을 수 있음을 명시한다. 계획기와 배포
+에이전트는 부분 텍스트·함수 호출이 포함돼도 완료로 처리하지 않으며, 고정 응답
+테스트로 실행기가 호출되지 않는 것을 확인했다. 실제 API 한도 도달은 재현하지 않았다.

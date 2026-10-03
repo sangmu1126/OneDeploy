@@ -147,6 +147,14 @@ class AnalysisTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(AnalysisError):
                 parse_response(body)
 
+    def test_output_token_limit_has_actionable_error_even_with_partial_text(self):
+        body = {'status': 'incomplete',
+                'incomplete_details': {'reason': 'max_output_tokens'},
+                'output': [{'type': 'message', 'content': [{'type': 'output_text',
+                            'text': json.dumps(self.proposal)}]}]}
+        with self.assertRaisesRegex(AnalysisError, '토큰 한도'):
+            parse_response(body)
+
     def test_provider_uses_responses_structured_output(self):
         response = {'status': 'completed', 'output': [{'type': 'message', 'content': [
             {'type': 'output_text', 'text': json.dumps(self.proposal)}]}]}
