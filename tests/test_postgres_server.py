@@ -343,6 +343,7 @@ class PostgresServerTests(unittest.TestCase):
     def created_operation(self, status, database_id=None):
         request = self.app.postgres_operations.plans['demo-app']['request']
         return {'application_id': 'demo-app', 'status': status,
+                'creation_id': 'a' * 16,
                 'request': asdict(request), 'expected_plan': {
                     'pricing': {'baseline_730h_usd': '20.87'}},
                 'database_id': database_id, 'created_at': '2026-10-03T00:00:00+00:00',
@@ -350,7 +351,8 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_reviewed_rds_plan_upload_creates_one_provisioning_job(self):
         token = self.reviewed_create_plan()
-        with patch.object(self.app.postgres_operations, 'start', return_value={'status': 'running'}) as start, \
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}) as start, \
                 patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect:
             status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
         self.assertEqual((status, payload['status']), (202, 'provisioning'))
@@ -360,6 +362,7 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(job['infrastructure_plan']['database'],
                          {'binding': 'create', 'database_id': 'onedeploy-demo-app'})
         self.assertEqual(job['status'], 'provisioning')
+        self.assertEqual(job['postgres_creation_id'], 'a' * 16)
         with self.assertRaisesRegex(ValueError, '이미 진행 중'):
             self.app.ensure_application_available('demo-app', 'aws-ecs-express')
 
@@ -396,7 +399,8 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_creation_result_controls_same_job_deployment(self):
         token = self.reviewed_create_plan()
-        with patch.object(self.app.postgres_operations, 'start', return_value={'status': 'running'}):
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
             status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
         self.assertEqual(status, 202)
         job_id = payload['id']
@@ -414,7 +418,8 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_provisioning_waits_for_confirmed_database_before_agent(self):
         token = self.reviewed_create_plan()
-        with patch.object(self.app.postgres_operations, 'start', return_value={'status': 'running'}):
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
             _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
         operation = self.created_operation('running')
         self.app.postgres_operations.operations['demo-app'] = operation
@@ -430,9 +435,26 @@ class PostgresServerTests(unittest.TestCase):
         sleep.assert_called_once_with(3)
         self.assertEqual(self.app.jobs[payload['id']]['status'], 'succeeded')
 
+    def test_old_job_does_not_deploy_from_a_later_creation_attempt(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
+            _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        operation = self.created_operation('succeeded', 'onedeploy-demo-app')
+        operation['creation_id'] = 'b' * 16
+        self.app.postgres_operations.operations['demo-app'] = operation
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect, \
+                patch.object(self.app, 'run_agent') as deploy:
+            self.app.run_postgres_then_agent(payload['id'])
+        inspect.assert_not_called()
+        deploy.assert_not_called()
+        self.assertEqual(self.app.jobs[payload['id']]['status'], 'interrupted')
+        self.assertIn('다릅니다', self.app.jobs[payload['id']]['events'][-1]['message'])
+
     def test_uncertain_creation_never_starts_agent_and_restart_does_not_retry(self):
         token = self.reviewed_create_plan()
-        with patch.object(self.app.postgres_operations, 'start', return_value={'status': 'running'}):
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
             status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
         self.assertEqual(status, 202)
         job_id = payload['id']

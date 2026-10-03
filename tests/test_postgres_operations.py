@@ -34,11 +34,14 @@ class PostgresOperationsTests(unittest.TestCase):
             plan = self.manager.plan(self.request)
             operation = self.manager.start('demo-app', plan['plan_id'])
         self.assertEqual(operation['status'], 'running')
+        self.assertRegex(operation['creation_id'], r'^[a-f0-9]{16}$')
         self.assertEqual(start.call_count, 1)
         saved = json.loads((self.root / 'demo-app.json').read_text())
         self.assertEqual(saved['request']['subnet_ids'], list(self.request.subnet_ids))
+        self.assertEqual(saved['creation_id'], operation['creation_id'])
         restored = PostgresOperations(self.root, self.settings)
         self.assertEqual(restored.get('demo-app')['status'], 'needs_attention')
+        self.assertEqual(restored.get('demo-app')['creation_id'], operation['creation_id'])
         with self.assertRaisesRegex(ValueError, '이미'):
             restored.plan(self.request)
 

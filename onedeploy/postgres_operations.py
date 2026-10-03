@@ -68,6 +68,9 @@ class PostgresOperations:
                 if (path.stem != request.application_id
                         or request.account != settings.expected_account
                         or request.region != settings.region
+                        or (operation.get('creation_id') is not None
+                            and (not isinstance(operation['creation_id'], str)
+                                 or not ATTEMPT_ID.fullmatch(operation['creation_id'])))
                         or (settings.service_security_group and
                             request.service_security_group != settings.service_security_group)
                         or operation['status'] not in {'running', 'recovering', 'succeeded', 'needs_attention', 'failed_cleaned'}):
@@ -192,6 +195,7 @@ class PostgresOperations:
             provisioner.assert_stack_available()
         operation = {'application_id': application_id, 'request': asdict(request),
                      'expected_plan': expected, 'status': 'running',
+                     'creation_id': secrets.token_hex(8),
                      'created_at': datetime.now(timezone.utc).isoformat(),
                      'message': 'RDS 스택 생성과 완료 확인을 진행 중입니다.'}
         with self.lock:
@@ -250,6 +254,7 @@ class PostgresOperations:
                 raise ValueError('이 앱의 PostgreSQL 생성 요청 기록이 없습니다.')
             request = operation['request']
             return {'application_id': application_id, 'status': operation['status'],
+                    'creation_id': operation.get('creation_id'),
                     'message': operation['message'], 'created_at': operation['created_at'],
                     'account': request['account'], 'region': request['region'],
                     'vpc_id': request['vpc_id'], 'subnet_ids': request['subnet_ids'],

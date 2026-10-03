@@ -147,6 +147,12 @@ class App:
                 elif job.get("mode") != "agent":
                     raise ValueError("Missing deployment plan")
                 postgres_request_from_job(job)
+                if job.get('postgres_creation_id') is not None and (
+                        not isinstance(job['postgres_creation_id'], str)
+                        or not re.fullmatch(r'[a-f0-9]{16}', job['postgres_creation_id'])
+                        or job.get('target') != 'aws-ecs-express'
+                        or job.get('postgres') is None):
+                    raise ValueError('Invalid PostgreSQL creation binding')
                 if job["status"] not in {"planned", "provisioning", "running", "waiting_input", "succeeded", "failed", "interrupted", "cancelled"}:
                     raise ValueError("Invalid job status")
                 if (not isinstance(job["events"], list) or any(
@@ -481,9 +487,14 @@ class App:
             request = postgres_request_from_job(job)
             if request is None:
                 raise ValueError('PostgreSQL 생성 작업에 연결 정보가 없습니다.')
+            creation_id = job.get('postgres_creation_id')
+            if not creation_id:
+                raise ValueError('DB 생성 시도 연결 기록이 없습니다. 앱은 자동 배포하지 않습니다.')
             deadline = time.monotonic() + 3600
             while True:
                 operation = self.postgres_operations.get(request.application_id)
+                if operation.get('creation_id') != creation_id:
+                    raise ValueError('DB 생성 시도가 배포 작업과 다릅니다. 앱은 자동 배포하지 않습니다.')
                 if operation['status'] == 'succeeded':
                     if operation['database_id'] != request.database_id:
                         raise ValueError('생성된 DB 식별자가 배포 계획과 다릅니다.')
@@ -1419,7 +1430,13 @@ def handler_for(app: App):
                         raise
                     if create_plan_id is not None:
                         try:
-                            app.postgres_operations.start(application_id, create_plan_id)
+                            operation = app.postgres_operations.start(application_id, create_plan_id)
+                            creation_id = operation.get('creation_id')
+                            if not isinstance(creation_id, str) or not re.fullmatch(r'[a-f0-9]{16}', creation_id):
+                                raise ValueError('DB 생성 시도 ID를 확인하지 못했습니다.')
+                            with app.lock:
+                                app.jobs[job_id]['postgres_creation_id'] = creation_id
+                                app.save(job_id)
                             threading.Thread(target=app.run_postgres_then_agent,
                                              args=(job_id,), daemon=True).start()
                         except Exception as exc:
