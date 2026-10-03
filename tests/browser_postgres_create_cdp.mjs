@@ -75,7 +75,11 @@ try {
       console.log('PASS: browser reviewed RDS price, uploaded ZIP, and completed one local simulated creation-to-deployment job');
     } else {
       await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('status').textContent==='작업 중단·결과 확인 필요'&&e('postgresOperationInfo').textContent.includes('needs_attention')&&!e('postgresRecovery').hidden&&e('postgresCreationDetails').open;})()"), 30000);
-      console.log('PASS: browser showed creation failure and opened the RDS recovery controls');
+      await command('Page.navigate', {url: serverUrl});
+      await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨') && document.querySelector('#history button')"), 30000);
+      await evaluate(`(() => {const button=[...document.querySelectorAll('#history button')].find(item=>item.textContent.includes(${JSON.stringify(application)}));if(!button)throw Error('Creation job missing from history');button.click();return true;})()`);
+      await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('application').value==='dbdrill-1234abcd'&&e('status').textContent==='작업 중단·결과 확인 필요'&&e('postgresOperationInfo').textContent.includes('needs_attention')&&!e('postgresRecovery').hidden&&e('postgresCreationDetails').open;})()"), 30000);
+      console.log('PASS: browser reopened failed job from history and showed RDS recovery controls');
     }
   } else if (stage === 'auto-existing-plan') {
     assert.ok(archive);

@@ -353,7 +353,11 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
         : path.endsWith('/postgres/operation')
           ? {application_id: 'demo-app', status: 'needs_attention',
              message: 'CloudFormation 결과 확인 필요'}
-        : {id: jobId, status: 'interrupted', events: [], target: 'aws-ecs-express'};
+        : {id: jobId, application_id: 'demo-app', status: 'interrupted', events: [],
+           target: 'aws-ecs-express', infrastructure_plan: {target: 'aws-ecs-express',
+             planner: 'explicit', rationale: 'PostgreSQL app',
+             resources: ['new RDS PostgreSQL'],
+             database: {binding: 'create', database_id: 'onedeploy-demo-app'}}};
       return {ok: true, json: async () => body};
     },
     setInterval() {}, setTimeout, FormData, Set, Error, Date,
@@ -378,6 +382,15 @@ test('reviewed RDS plan and selected ZIP start one creation and deployment job',
   assert.equal(requests.some(request => request.path.endsWith('/postgres/operation')), true);
   assert.equal(element('postgresRecovery').hidden, false);
   assert.equal(element('postgresReconcile').hidden, false);
+  assert.equal(element('postgresCreationDetails').open, true);
+  element('application').value = 'another-app';
+  element('target').value = 'local-docker';
+  element('postgresRecovery').hidden = true;
+  element('postgresCreationDetails').open = false;
+  await context.open(jobId);
+  assert.equal(element('application').value, 'demo-app');
+  assert.equal(element('target').value, 'aws-ecs-express');
+  assert.equal(element('postgresRecovery').hidden, false);
   assert.equal(element('postgresCreationDetails').open, true);
 });
 
