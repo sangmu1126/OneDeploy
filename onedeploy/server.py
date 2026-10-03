@@ -498,6 +498,9 @@ class App:
                 if operation['status'] == 'succeeded':
                     if operation['database_id'] != request.database_id:
                         raise ValueError('생성된 DB 식별자가 배포 계획과 다릅니다.')
+                    self.postgres_operations.require_successful_creation(request, creation_id)
+                    if source_digest(Path(job['project'])) != job.get('source_digest'):
+                        raise ValueError('업로드한 앱 소스가 변경됐습니다. 기존 DB 사용으로 새 배포를 시작하세요.')
                     database = AwsPostgresProvisioner(request).inspect_current()
                     self.postgres_operations.require_deployable(
                         request.application_id, database['database_id'])
@@ -532,6 +535,8 @@ class App:
                     and job.get('target') == 'aws-ecs-express'
                     and job.get('infrastructure_plan', {}).get('database', {}).get('binding') == 'create'
                     and isinstance(job.get('postgres_creation_id'), str)
+                    and isinstance(job.get('source_digest'), str)
+                    and re.fullmatch(r'[a-f0-9]{64}', job['source_digest'])
                     and job.get('attempts') == 0 and job.get('steps') == 0
                     and not job.get('changes') and job.get('plan') is None
                     and not job.get('result') and not job.get('cancel_requested')
@@ -546,11 +551,11 @@ class App:
             if request is None:
                 raise ValueError('저장된 DB 연결 요청을 확인하지 못했습니다.')
             creation_id = job['postgres_creation_id']
-        operation = self.postgres_operations.get(request.application_id)
-        if (operation.get('creation_id') != creation_id
-                or operation['status'] != 'succeeded'
-                or operation.get('database_id') != request.database_id):
-            raise ValueError('원래 생성 시도의 DB 성공 기록을 확인하지 못했습니다. 생성 상태를 재확인하세요.')
+            project = Path(job['project'])
+            expected_digest = job['source_digest']
+        if source_digest(project) != expected_digest:
+            raise ValueError('업로드한 앱 소스가 변경됐습니다. 기존 DB 사용으로 새 배포를 시작하세요.')
+        self.postgres_operations.require_successful_creation(request, creation_id)
         database = AwsPostgresProvisioner(request).inspect_current()
         self.postgres_operations.require_deployable(request.application_id, database['database_id'])
         with self.lock:
@@ -564,11 +569,9 @@ class App:
                    and other.get('deployment_state', 'active') == 'active'
                    for other in self.jobs.values()):
                 raise ValueError('같은 앱의 다른 AWS 릴리스가 활성 상태입니다. 이전 작업을 재개할 수 없습니다.')
-            operation = self.postgres_operations.get(request.application_id)
-            if (operation.get('creation_id') != creation_id
-                    or operation['status'] != 'succeeded'
-                    or operation.get('database_id') != database['database_id']):
-                raise ValueError('DB 생성 상태가 변경됐습니다. 다시 확인하세요.')
+            self.postgres_operations.require_successful_creation(request, creation_id)
+            if source_digest(project) != expected_digest:
+                raise ValueError('업로드한 앱 소스가 변경됐습니다. 기존 DB 사용으로 새 배포를 시작하세요.')
             job['status'] = 'running'
             self.save(job_id)
         self.event(job_id, 'database_manual_resume',
@@ -1472,6 +1475,8 @@ def handler_for(app: App):
                                 "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
                                 "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
                                 "events": []}
+                            if create_plan_id is not None:
+                                app.jobs[job_id]['source_digest'] = source_digest(project)
                             if target == "cloud-run":
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
                             elif target == "aws-ecs-express":

@@ -448,6 +448,23 @@ class PostgresServerTests(unittest.TestCase):
         sleep.assert_called_once_with(3)
         self.assertEqual(self.app.jobs[payload['id']]['status'], 'succeeded')
 
+    def test_creation_does_not_auto_deploy_changed_source(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
+            _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        self.app.postgres_operations.operations['demo-app'] = self.created_operation(
+            'succeeded', 'onedeploy-demo-app')
+        project_file = Path(self.app.jobs[payload['id']]['project']) / 'server.js'
+        project_file.write_text(project_file.read_text() + '\n// changed during DB creation')
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect, \
+                patch.object(self.app, 'run_agent') as deploy:
+            self.app.run_postgres_then_agent(payload['id'])
+        inspect.assert_not_called()
+        deploy.assert_not_called()
+        self.assertEqual(self.app.jobs[payload['id']]['status'], 'interrupted')
+        self.assertIn('앱 소스가 변경', self.app.jobs[payload['id']]['events'][-1]['message'])
+
     def test_old_job_does_not_deploy_from_a_later_creation_attempt(self):
         token = self.reviewed_create_plan()
         with patch.object(self.app.postgres_operations, 'start',
@@ -545,6 +562,31 @@ class PostgresServerTests(unittest.TestCase):
         self.app.jobs[job_id]['steps'] = 1
         with self.assertRaisesRegex(ValueError, '재개할 수 없는'):
             self.app.resume_postgres_deployment(job_id)
+
+    def test_manual_resume_rejects_changed_source_or_creation_request(self):
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
+            _, payload = self.upload(archive(), postgres=False, create_plan_id=token)
+        job_id = payload['id']
+        job = self.app.jobs[job_id]
+        job['status'] = 'interrupted'
+        operation = self.created_operation('succeeded', 'onedeploy-demo-app')
+        self.app.postgres_operations.operations['demo-app'] = operation
+        project_file = Path(job['project']) / 'server.js'
+        original = project_file.read_text()
+        project_file.write_text(original + '\n// edited after upload')
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect:
+            with self.assertRaisesRegex(ValueError, '앱 소스가 변경'):
+                self.app.resume_postgres_deployment(job_id)
+        inspect.assert_not_called()
+        project_file.write_text(original)
+        operation['request']['service_security_group'] = 'sg-44444444'
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect:
+            with self.assertRaisesRegex(ValueError, 'DB 설정이 배포 작업과 다릅니다'):
+                self.app.resume_postgres_deployment(job_id)
+        inspect.assert_not_called()
+        self.assertEqual(job['status'], 'interrupted')
 
     def test_manual_resume_does_not_replace_a_newer_active_release(self):
         token = self.reviewed_create_plan()

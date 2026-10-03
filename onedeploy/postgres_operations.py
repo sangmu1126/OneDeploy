@@ -273,6 +273,22 @@ class PostgresOperations:
             if operation.get('database_id') != database_id:
                 raise ValueError('PostgreSQL 생성 기록과 실제 DB 식별자가 다릅니다. 배포를 중단합니다.')
 
+    def require_successful_creation(self, request: PostgresRequest, creation_id: str) -> str:
+        """Bind a paused deployment to the exact successful creation request."""
+        with self.lock:
+            self._assert_trusted(request.application_id)
+            operation = self.operations.get(request.application_id)
+            if not operation or operation.get('creation_id') != creation_id or operation.get('status') != 'succeeded':
+                raise ValueError('원래 생성 시도의 DB 성공 기록을 확인하지 못했습니다. 생성 상태를 재확인하세요.')
+            try:
+                saved = operation['request']
+                recorded = PostgresRequest(**{**saved, 'subnet_ids': tuple(saved['subnet_ids'])})
+            except (KeyError, TypeError, ValueError):
+                raise ValueError('DB 생성 요청 기록을 확인하지 못했습니다.') from None
+            if recorded != request or operation.get('database_id') != request.database_id:
+                raise ValueError('원래 생성 시도의 DB 설정이 배포 작업과 다릅니다.')
+            return operation['database_id']
+
     def reconcile(self, application_id: str) -> dict:
         with self.lock:
             operation = self.operations.get(application_id)
