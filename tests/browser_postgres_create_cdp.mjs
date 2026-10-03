@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const [serverUrl, debuggingPort, application, stage = 'create', archive] = process.argv.slice(2);
 assert.match(application, /^dbdrill-[a-f0-9]{8}$/);
-assert.ok(['create', 'network-only', 'one-action-deploy', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan', 'one-action-local', 'one-action-failed-local'].includes(stage));
+assert.ok(['create', 'network-only', 'one-action-deploy', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan', 'one-action-local', 'one-action-failed-local', 'one-action-plan-rejected-local'].includes(stage));
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl);
@@ -60,7 +60,7 @@ try {
   await command('Runtime.enable');
   await command('Page.navigate', {url: serverUrl});
   await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨')"), 30000);
-  if (stage === 'one-action-local' || stage === 'one-action-failed-local') {
+  if (['one-action-local', 'one-action-failed-local', 'one-action-plan-rejected-local'].includes(stage)) {
     assert.ok(archive);
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('public').checked=true;e('postgresPlanVpc').value='vpc-12345678';e('postgresPlanSubnets').value='subnet-11111111,subnet-22222222';return true;})()`);
     const document = await command('DOM.getDocument');
@@ -73,13 +73,20 @@ try {
     if (stage === 'one-action-local') {
       await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('status').textContent==='배포 완료'&&e('infrastructure').textContent.includes('new RDS PostgreSQL');})()"), 30000);
       console.log('PASS: browser reviewed RDS price, uploaded ZIP, and completed one local simulated creation-to-deployment job');
-    } else {
+    } else if (stage === 'one-action-failed-local') {
       await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('status').textContent==='작업 중단·결과 확인 필요'&&e('postgresOperationInfo').textContent.includes('needs_attention')&&!e('postgresRecovery').hidden&&e('postgresCreationDetails').open;})()"), 30000);
       await command('Page.navigate', {url: serverUrl});
       await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨') && document.querySelector('#history button')"), 30000);
       await evaluate(`(() => {const button=[...document.querySelectorAll('#history button')].find(item=>item.textContent.includes(${JSON.stringify(application)}));if(!button)throw Error('Creation job missing from history');button.click();return true;})()`);
       await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('application').value==='dbdrill-1234abcd'&&e('status').textContent==='작업 중단·결과 확인 필요'&&e('postgresOperationInfo').textContent.includes('needs_attention')&&!e('postgresRecovery').hidden&&e('postgresCreationDetails').open;})()"), 30000);
       console.log('PASS: browser reopened failed job from history and showed RDS recovery controls');
+    } else {
+      await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('status').textContent==='배포 실패'&&e('postgresOperationInfo').textContent.includes('가격 계획을 다시 확인')&&e('postgresRecovery').hidden&&e('postgresReconcile').hidden;})()"), 30000);
+      await command('Page.navigate', {url: serverUrl});
+      await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨') && document.querySelector('#history button')"), 30000);
+      await evaluate(`(() => {const button=[...document.querySelectorAll('#history button')].find(item=>item.textContent.includes(${JSON.stringify(application)}));if(!button)throw Error('Rejected job missing from history');button.click();return true;})()`);
+      await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('status').textContent==='배포 실패'&&e('postgresOperationInfo').textContent.includes('가격 계획을 다시 확인')&&e('postgresRecovery').hidden&&e('postgresReconcile').hidden;})()"), 30000);
+      console.log('PASS: browser reopened rejected plan without showing AWS recovery controls');
     }
   } else if (stage === 'one-action-deploy') {
     assert.ok(archive && process.env.ONEDEPLOY_BROWSER_PROBE_KEY);

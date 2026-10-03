@@ -23,7 +23,8 @@ DRIVER = Path(__file__).with_name('browser_postgres_create_cdp.mjs')
 APPLICATION = 'dbdrill-1234abcd'
 
 
-def run(*, fail_create: bool = False, wait_input: bool = False) -> dict:
+def run(*, fail_create: bool = False, wait_input: bool = False,
+        reject_plan: bool = False) -> dict:
     if not CHROME.is_file():
         raise RuntimeError('Chrome executable not found')
     settings = AwsSettings('ap-northeast-2', expected_account='123456789012',
@@ -38,8 +39,9 @@ def run(*, fail_create: bool = False, wait_input: bool = False) -> dict:
              'storage_type': 'gp3', 'storage_gib': 20,
              'pricing': {'baseline_730h_usd': '20.87'}}
     database = {'database_id': request.database_id}
-    if fail_create and wait_input:
+    if sum((fail_create, wait_input, reject_plan)) > 1:
         raise ValueError('Choose one local drill scenario')
+    changed_quote = {**quote, 'pricing': {'baseline_730h_usd': '22.00'}}
     probe_key = 'local-browser-probe-key'
     network = {'account': request.account, 'region': request.region,
                'vpc_id': request.vpc_id, 'subnet_ids': list(request.subnet_ids),
@@ -52,6 +54,7 @@ def run(*, fail_create: bool = False, wait_input: bool = False) -> dict:
             patch('onedeploy.postgres.AwsExpressAdapter.aws', autospec=True,
                   side_effect=reject_aws), \
             patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                  side_effect=[quote, changed_quote] if reject_plan else None,
                   return_value=quote) as preflight, \
             patch('onedeploy.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
             patch('onedeploy.postgres_operations.AwsPostgresProvisioner.create',
@@ -114,6 +117,7 @@ def run(*, fail_create: bool = False, wait_input: bool = False) -> dict:
                         f'http://127.0.0.1:{server.server_port}/',
                         port_file.read_text().splitlines()[0], APPLICATION,
                         'one-action-failed-local' if fail_create else
+                        'one-action-plan-rejected-local' if reject_plan else
                         'one-action-deploy' if wait_input else 'one-action-local',
                         str(zip_path)], check=True, timeout=60,
                         env={**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': probe_key})
@@ -129,18 +133,22 @@ def run(*, fail_create: bool = False, wait_input: bool = False) -> dict:
                         chrome.kill()
                         chrome.wait(timeout=10)
             jobs = list(app.jobs.values())
-            expected_status = 'interrupted' if fail_create else 'succeeded'
+            expected_status = 'interrupted' if fail_create else 'failed' if reject_plan else 'succeeded'
+            operation = (app.postgres_operations.get(APPLICATION)
+                         if not reject_plan else None)
             operation_status = 'needs_attention' if fail_create else 'succeeded'
-            if (len(jobs) != 1 or deployments != ([] if fail_create else [jobs[0]['id']])
+            if (len(jobs) != 1 or deployments != ([] if fail_create or reject_plan else [jobs[0]['id']])
                     or jobs[0]['status'] != expected_status
                     or jobs[0]['infrastructure_plan']['database'] != {
                         'binding': 'create', 'database_id': request.database_id}
-                    or app.postgres_operations.get(APPLICATION)['status'] != operation_status
-                    or jobs[0]['postgres_creation_id'] !=
-                    app.postgres_operations.get(APPLICATION)['creation_id']):
+                    or (operation is not None and operation['status'] != operation_status)
+                    or (operation is not None and jobs[0]['postgres_creation_id'] !=
+                        operation['creation_id'])
+                    or (reject_plan and (APPLICATION in app.postgres_operations.operations
+                        or 'postgres_creation_id' in jobs[0]))):
                 raise AssertionError('Browser one-action job did not preserve the RDS binding')
-            if (preflight.call_count != 2 or create.call_count != 1
-                    or inspect.call_count != (0 if fail_create else 1)):
+            if (preflight.call_count != 2 or create.call_count != (0 if reject_plan else 1)
+                    or inspect.call_count != (0 if fail_create or reject_plan else 1)):
                 raise AssertionError('Browser one-action plan, creation, or ownership check was skipped')
         finally:
             server.shutdown()
@@ -148,10 +156,12 @@ def run(*, fail_create: bool = False, wait_input: bool = False) -> dict:
             thread.join(timeout=10)
     return {'application_id': APPLICATION, 'status': 'passed',
             'scenario': 'creation_failure' if fail_create else
+                        'plan_rejected' if reject_plan else
                         'environment_resume' if wait_input else 'creation_success',
             'aws_mode': 'mocked', 'deployment_executed': False}
 
 
 if __name__ == '__main__':
-    print(json.dumps([run(), run(fail_create=True), run(wait_input=True)],
+    print(json.dumps([run(), run(fail_create=True), run(wait_input=True),
+                      run(reject_plan=True)],
                      ensure_ascii=False))

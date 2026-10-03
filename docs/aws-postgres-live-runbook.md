@@ -11,6 +11,11 @@ AI 도구 응답은 테스트용으로 고정하며 실제 모델 판단은 검�
 AWS 응답으로 통과했다. **이 새 모드는 아직 실계정에서 실행하지 않았다.**
 데모 AWS 자원은 중지 상태다.
 
+2026-10-03 서울 리전에서 `--one-action-deploy`를 **`--apply` 없이** 실행해
+현재 AWS 계정의 기본 네트워크 조회와 임시 앱 네트워크의 읽기 전용 사전 점검을
+통과했다. 이 점검은 브라우저를 열거나 리소스를 생성하지 않았으며, 단일 작업의
+RDS·ECS 실배포 성공을 뜻하지 않는다.
+
 ```sh
 python3 -m tests.smoke_aws_postgres_create_browser \
   --one-action-deploy --account <AWS_ACCOUNT_ID> --region ap-northeast-2
