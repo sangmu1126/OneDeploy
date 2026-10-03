@@ -31,6 +31,20 @@ CHROME = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
 DRIVER = Path(__file__).with_name('browser_postgres_create_cdp.mjs')
 
 
+def deployment_cleanup_blocker(jobs: list[dict]) -> str | None:
+    """Leave disposable DB/network intact while an app deployment can still touch them."""
+    for job in jobs:
+        status = job.get('status')
+        state = job.get('deployment_state', 'active')
+        if status in {'provisioning', 'running', 'waiting_input'}:
+            return '배포 작업이 아직 진행 중입니다.'
+        if state in {'deleting', 'needs_attention'}:
+            return '배포 리소스 종료·확인 결과가 확정되지 않았습니다.'
+        if status in {'failed', 'interrupted'} and (job.get('attempts', 0) or job.get('aws_update_submitted')):
+            return '실제 배포 시도 후 실패·중단된 작업의 AWS 결과를 확인해야 합니다.'
+    return None
+
+
 def retire_final_snapshot(application: str, operation: dict, settings: AwsSettings,
                           request: PostgresRequest) -> None:
     """Remove only the final snapshot of this completed disposable UI drill."""
@@ -267,20 +281,25 @@ def main(argv=None) -> None:
                     time.sleep(5)
                 retirement_operation = app.postgres_retirement_operations.operations[args.application]
             jobs = list(app.jobs.values())
-            for job in jobs:
-                if (job.get('status') == 'succeeded'
-                        and job.get('deployment_state', 'active') in {'active', 'delete_failed'}):
-                    api('/api/jobs/' + job['id'] + '/retire', b'')
-                    deadline = time.monotonic() + 1200
-                    while time.monotonic() < deadline:
-                        retired = api('/api/jobs/' + job['id'])
-                        if retired.get('deployment_state') in {'deleted', 'delete_failed'}:
-                            break
-                        time.sleep(3)
-                    print('Temporary ECS retirement:', retired.get('deployment_state'), flush=True)
-            ecs_retired = all(job.get('status') != 'succeeded'
-                              or api('/api/jobs/' + job['id']).get('deployment_state') == 'deleted'
-                              for job in jobs)
+            blocker = deployment_cleanup_blocker(jobs)
+            if blocker:
+                print('배포 결과가 불확실해 자동 정리를 중단했습니다:', blocker, flush=True)
+            else:
+                for job in jobs:
+                    if (job.get('status') == 'succeeded'
+                            and job.get('deployment_state', 'active') in {'active', 'delete_failed'}):
+                        api('/api/jobs/' + job['id'] + '/retire', b'')
+                        deadline = time.monotonic() + 1200
+                        while time.monotonic() < deadline:
+                            retired = api('/api/jobs/' + job['id'])
+                            if retired.get('deployment_state') in {'deleted', 'delete_failed'}:
+                                break
+                            time.sleep(3)
+                        print('Temporary ECS retirement:', retired.get('deployment_state'), flush=True)
+            ecs_retired = blocker is None and all(
+                job.get('status') != 'succeeded'
+                or api('/api/jobs/' + job['id']).get('deployment_state') == 'deleted'
+                for job in jobs)
             if retirement_operation and retirement_operation['status'] == 'succeeded' \
                     and network_operation and network_operation['status'] == 'succeeded' \
                     and db_operation and db_operation['status'] == 'succeeded' and ecs_retired:
@@ -309,7 +328,7 @@ def main(argv=None) -> None:
                 print('PASS: temporary network stack deleted', flush=True)
                 cleanup_complete = True
             elif db_operation is None and network_operation \
-                    and network_operation['status'] == 'succeeded':
+                    and network_operation['status'] == 'succeeded' and ecs_retired:
                 retire_probe(network_provisioner, network_operation['stack_id'],
                              network_operation['service_security_group'])
                 print('PASS: RDS 요청 전 생성한 임시 네트워크를 정리했습니다.', flush=True)

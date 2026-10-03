@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 from onedeploy.aws import AwsSettings
 from onedeploy.postgres import PostgresRequest
-from tests.smoke_aws_postgres_create_browser import main, retire_final_snapshot
+from tests.smoke_aws_postgres_create_browser import (
+    deployment_cleanup_blocker, main, retire_final_snapshot)
 
 
 class BrowserRetirementCleanupTests(unittest.TestCase):
@@ -67,6 +68,18 @@ class BrowserRetirementCleanupTests(unittest.TestCase):
         provisioner.return_value.preflight.assert_called_once_with()
         app.assert_not_called()
         command.assert_not_called()
+
+    def test_disposable_database_cleanup_waits_for_deployment_outcome(self):
+        for job in ({'status': 'provisioning'}, {'status': 'waiting_input'},
+                    {'status': 'running'}, {'status': 'failed', 'attempts': 1},
+                    {'status': 'interrupted', 'aws_update_submitted': True},
+                    {'status': 'succeeded', 'deployment_state': 'needs_attention'}):
+            with self.subTest(job=job):
+                self.assertIsNotNone(deployment_cleanup_blocker([job]))
+        self.assertIsNone(deployment_cleanup_blocker([]))
+        self.assertIsNone(deployment_cleanup_blocker([
+            {'status': 'failed', 'attempts': 0},
+            {'status': 'succeeded', 'deployment_state': 'deleted'}]))
 
 
 if __name__ == '__main__':

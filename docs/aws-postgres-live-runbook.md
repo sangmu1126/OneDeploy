@@ -20,6 +20,10 @@ python3 -m tests.smoke_aws_postgres_create_browser \
 `--apply` 실행은 과금 가능한 임시 리소스를 만들며 실패 결과가 불확실하면 자동
 삭제를 멈추고 `.onedeploy/browser-db-drills/<앱 ID>/` 기록을 남긴다. 기존
 `--deploy-app` 모드는 RDS 생성 후 별도 앱 업로드를 검증한 과거 경로로 유지한다.
+배포 작업이 생성 중·진행 중·환경값 입력 대기이거나, 실제 배포 시도 후 실패·중단된
+경우에도 DB·네트워크 자동 정리를 보류한다. 성공한 ECS 배포는 종료 상태가
+`deleted`로 확인된 뒤에만 DB 정리로 넘어간다. 보류 시 로컬 기록을 기준으로
+AWS 결과를 먼저 확인해야 한다.
 
 ## 2026-10-03 생성 실패·CloudFormation 롤백 드릴
 
