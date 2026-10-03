@@ -1287,6 +1287,8 @@ def handler_for(app: App):
                         if postgres_request is not None:
                             collect_sql_migrations(project)
                             database = AwsPostgresProvisioner(postgres_request).inspect_current()
+                            app.postgres_operations.require_deployable(
+                                application_id, database['database_id'])
                         if target == 'auto':
                             available_targets = ['local-docker']
                             if app.cloud_settings.unavailable_reason() is None:

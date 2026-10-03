@@ -389,6 +389,46 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(job['postgres']['subnet_ids'], database['subnet_ids'])
         self.assertEqual(job['target'], 'aws-ecs-express')
 
+    def test_upload_waits_for_confirmed_database_creation(self):
+        database = {'database_id': 'onedeploy-demo-app'}
+        operation = {'status': 'running', 'database_id': 'onedeploy-demo-app'}
+        self.app.postgres_operations.operations['demo-app'] = operation
+        for status_name in ('running', 'needs_attention', 'recovering'):
+            with self.subTest(status=status_name), patch(
+                    'onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                    return_value=database):
+                operation['status'] = status_name
+                status, payload = self.upload(archive())
+                self.assertEqual(status, 400)
+                self.assertIn('재확인', payload['error'])
+                self.assertFalse(self.app.jobs)
+
+        operation['status'] = 'succeeded'
+        operation['database_id'] = 'onedeploy-other-app'
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value=database):
+            status, payload = self.upload(archive())
+        self.assertEqual(status, 400)
+        self.assertIn('식별자', payload['error'])
+        self.assertFalse(self.app.jobs)
+
+        operation['database_id'] = database['database_id']
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value=database):
+            status, payload = self.upload(archive())
+        self.assertEqual(status, 202)
+        self.assertEqual(self.app.jobs[payload['id']]['infrastructure_plan']['database']['database_id'],
+                         database['database_id'])
+
+    def test_upload_rejects_untrusted_creation_journal(self):
+        self.app.postgres_operations.untrusted_applications.add('demo-app')
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}):
+            status, payload = self.upload(archive())
+        self.assertEqual(status, 400)
+        self.assertIn('기록', payload['error'])
+        self.assertFalse(self.app.jobs)
+
     def test_partial_postgres_network_headers_are_rejected_before_discovery(self):
         with patch('onedeploy.server.discover_existing_postgres') as discover:
             status, payload = self.upload(archive(), partial_network=True)

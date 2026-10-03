@@ -234,6 +234,18 @@ class PostgresOperations:
                     'database_id': operation.get('database_id'),
                     'baseline_730h_usd': operation['expected_plan']['pricing']['baseline_730h_usd']}
 
+    def require_deployable(self, application_id: str, database_id: str) -> None:
+        """Do not bind a DB whose local creation outcome is still uncertain."""
+        with self.lock:
+            self._assert_trusted(application_id)
+            operation = self.operations.get(application_id)
+            if operation is None:
+                return  # An older owned DB can have no local creation journal.
+            if operation['status'] != 'succeeded':
+                raise ValueError('이 앱의 PostgreSQL 생성 결과를 먼저 재확인하거나 실패 스택을 정리하세요.')
+            if operation.get('database_id') != database_id:
+                raise ValueError('PostgreSQL 생성 기록과 실제 DB 식별자가 다릅니다. 배포를 중단합니다.')
+
     def reconcile(self, application_id: str) -> dict:
         with self.lock:
             operation = self.operations.get(application_id)
