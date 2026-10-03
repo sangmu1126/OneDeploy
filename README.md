@@ -125,9 +125,10 @@ python3 -m tests.smoke_local_auto_postgres_browser
 python3 -m tests.smoke_local_postgres_one_action_browser
 PYTHONPATH=. python3 tests/smoke_agent.py
 PYTHONPATH=. python3 tests/smoke_agent.py --interrupted-retire
+PYTHONPATH=. python3 tests/smoke_agent.py --wire-fixture
 ```
 
-첫 로컬 Chrome 드릴은 기존 RDS 자동 연결 계획을 검사합니다. 두 번째 드릴은 새 RDS 가격 계획부터 ZIP 업로드, 동일 작업의 DB 생성·배포 완료 표시, 생성 실패 후 이력 재진입 시 복구 버튼, 계획 변경 시 재계획 안내, 필수 환경값 입력·재개까지 모의 AWS·배포 응답으로 검사합니다. 둘 다 실제 AWS 호출이나 배포를 실행하지 않습니다. 마지막 두 명령은 Docker를 사용하고 AI의 도구 응답만 테스트용으로 고정합니다. `--interrupted-retire`는 실제 HTTP 성공 후 서버 재시작·중단 상태 복원·종료 API의 모든 시도 자원 삭제를 검사합니다. 실제 OpenAI 호출을 검증할 때는 키·모델을 설정하고
+첫 로컬 Chrome 드릴은 기존 RDS 자동 연결 계획을 검사합니다. 두 번째 드릴은 새 RDS 가격 계획부터 ZIP 업로드, 동일 작업의 DB 생성·배포 완료 표시, 생성 실패 후 이력 재진입 시 복구 버튼, 계획 변경 시 재계획 안내, 필수 환경값 입력·재개까지 모의 AWS·배포 응답으로 검사합니다. 둘 다 실제 AWS 호출이나 배포를 실행하지 않습니다. 마지막 세 명령은 Docker를 사용합니다. `--interrupted-retire`는 실제 HTTP 성공 후 서버 재시작·중단 상태 복원·종료 API의 모든 시도 자원 삭제를 검사합니다. `--wire-fixture`는 실제 OpenAI 호출 코드를 사용하되 Responses HTTP 응답만 고정해 자동 대상 선택·도구 이력 재전달·코드 수정·Docker 배포·종료를 검증합니다. 실제 모델 판단의 증거는 아닙니다. 실제 OpenAI 호출을 검증할 때는 키·모델을 설정하고
 `PYTHONPATH=. python3 tests/smoke_agent.py --live`를 사용합니다. AWS 실계정 smoke는 기본이 읽기 전용 사전 점검이며, 과금 가능한 리소스를
 생성하는 `--apply` 절차와 정리 방법은 [실계정 검증 기록](docs/aws-postgres-live-runbook.md)에 적었습니다. `smoke_agent.py --live`는 로컬 Docker만 사용하며, 원본 보존·실제 시작/PORT/바인딩 수정·HTTP 응답·배포 종료 API의 컨테이너/이미지 삭제를 확인합니다. `--live --auto` 조합은 클라우드 대상 선택과 과금 가능성을 피하도록 거부합니다. 현재 구현·실계정 증거·남은 작업의 구분은
 [프로젝트 현황](docs/status.md)을 따릅니다.

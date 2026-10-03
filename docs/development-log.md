@@ -124,3 +124,10 @@ Chrome에서 검토한 RDS 계획과 ZIP이 작업 `ed11706270f042b2` 하나로 
 복원했고, `/api/jobs/{id}/retire` 호출 뒤 두 시도의 컨테이너·이미지 태그가 모두
 없음을 Docker inspect로 확인했다. 명령은
 `PYTHONPATH=. python3 tests/smoke_agent.py --interrupted-retire`다.
+
+OpenAI API 키 없이도 제품의 Responses 연결 코드를 검증하도록 HTTP 전송 경계의
+고정 응답 드릴을 추가했다. 실제 `OpenAIInfrastructurePlanner`와
+`OpenAIDeployAgent`가 구조화된 자동 대상 계획, `store: false`의 추론 항목·함수
+호출·도구 결과 재전달, 작업용 소스 수정, 로컬 Docker HTTP 성공과 종료 API를
+통과했다. Docker 없는 동일 프로토콜 검사는 CI의 Python 테스트에 포함했다.
+고정된 응답이므로 모델의 판단 품질이나 실제 API 접근 권한을 입증하지는 않는다.

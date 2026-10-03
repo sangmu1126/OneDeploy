@@ -9,10 +9,13 @@ import threading
 import time
 import urllib.request
 import zipfile
+from contextlib import nullcontext
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_fixture import EnvironmentFixture, PythonDockerfileFixture, RepairFixture
+from openai_wire_fixture import ResponsesWireFixture
 from onedeploy.agent import OpenAIDeployAgent
 from onedeploy.analysis import AISettings
 from onedeploy.infrastructure import OpenAIInfrastructurePlanner
@@ -61,6 +64,8 @@ def main():
     parser.add_argument('--auto', action='store_true', help='Exercise infrastructure target planning')
     parser.add_argument('--interrupted-retire', action='store_true',
                         help='Restart a completed scripted local job as interrupted, then retire its owned Docker attempts')
+    parser.add_argument('--wire-fixture', action='store_true',
+                        help='Use mocked Responses HTTP with the real OpenAI planner and agent code')
     args = parser.parse_args()
     if args.python and (args.live or args.environment):
         parser.error('--python cannot be combined with --live or --environment')
@@ -68,11 +73,18 @@ def main():
         parser.error('--live --auto may select a billable cloud target; use a dedicated cloud drill')
     if args.interrupted_retire and (args.live or args.environment or args.python or args.folder or args.auto):
         parser.error('--interrupted-retire uses the default scripted Node deployment only')
-    settings = AISettings.from_environment() if args.live else AISettings('test-fixture', 'fixture-model')
+    if args.wire_fixture and (args.live or args.environment or args.python or args.folder
+                              or args.auto or args.interrupted_retire):
+        parser.error('--wire-fixture uses the default Node app and local automatic target only')
+    settings = (AISettings.from_environment() if args.live else
+                AISettings('wire-fixture-key', 'wire-fixture-model') if args.wire_fixture else
+                AISettings('test-fixture', 'fixture-model'))
     if args.live and not settings.available:
         raise RuntimeError('Set OPENAI_API_KEY and ONEDEPLOY_AI_MODEL for live testing')
-    with tempfile.TemporaryDirectory(prefix='onedeploy-agent-smoke-') as directory:
-        app = App(Path(directory), settings, OpenAIDeployAgent if args.live else
+    wire = ResponsesWireFixture() if args.wire_fixture else None
+    with tempfile.TemporaryDirectory(prefix='onedeploy-agent-smoke-') as directory, \
+            (patch('urllib.request.build_opener', return_value=wire) if wire else nullcontext()):
+        app = App(Path(directory), settings, OpenAIDeployAgent if args.live or wire else
                   (PythonDockerfileFixture if args.python else EnvironmentFixture if args.environment else RepairFixture),
                   infrastructure_planner_factory=InfrastructureFixture if args.auto and not args.live else OpenAIInfrastructurePlanner)
         server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(app))
@@ -84,7 +96,7 @@ def main():
             headers = {'X-OneDeploy-Token': app.token}
             if content_type:
                 headers['Content-Type'] = content_type
-            if path == '/api/deployments' and args.auto:
+            if path == '/api/deployments' and (args.auto or wire):
                 headers['X-Deploy-Target'] = 'auto'
             req = urllib.request.Request(base + path, data=data, headers=headers)
             with opener.open(req, timeout=15) as response:
@@ -132,7 +144,7 @@ def main():
                 time.sleep(1)
             if job['status'] != 'succeeded':
                 raise AssertionError(json.dumps(job, indent=2, ensure_ascii=False))
-            if args.auto:
+            if args.auto or wire:
                 assert job['target'] == 'local-docker'
                 assert job['infrastructure_plan']['planner'] == 'openai'
             with opener.open(job['result']['url'], timeout=5) as response:
@@ -146,13 +158,17 @@ def main():
             else:
                 verify_node_repair(job)
             assert 'synthetic-agent-runtime-value' not in json.dumps(job)
-            if not args.live and not args.python:
+            if not args.live and not args.python and not wire:
                 assert job['attempts'] == 2
                 assert any(e['stage'] == 'attempt_failed' for e in job['events'])
                 containers = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{.Names}}'], text=True)
                 assert f'onedeploy-{job_id}-a1' not in containers.splitlines()
             print('PASS: one request -> source edits -> real Docker -> HTTP URL', flush=True)
-            print('AI mode: ' + ('LIVE' if args.live else 'SCRIPTED TEST FIXTURE (not live AI)'), flush=True)
+            print('AI mode: ' + ('LIVE' if args.live else 'RESPONSES WIRE FIXTURE (not live AI)'
+                                  if wire else 'SCRIPTED TEST FIXTURE (not live AI)'), flush=True)
+            if wire:
+                wire.assert_complete()
+                print('PASS: Responses planner and agent requests replayed tool and reasoning items', flush=True)
             print('Attempts: ' + str(job['attempts']), flush=True)
             print(json.dumps(job['result']), flush=True)
             if args.python:
