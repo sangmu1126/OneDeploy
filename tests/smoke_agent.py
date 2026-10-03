@@ -2,6 +2,7 @@
 import argparse
 import io
 import json
+import re
 import subprocess
 import tempfile
 import threading
@@ -31,6 +32,26 @@ class InfrastructureFixture:
                 'evidence': [{'file': name, 'quote': content[:20]}]}
 
 
+def verify_node_repair(job):
+    """A successful HTTP response alone does not prove the model repaired the upload."""
+    original = Path(job['project'])
+    work = original.parent / 'work'
+    changed = {item.get('path') for item in job.get('changes', [])
+               if isinstance(item.get('diff'), str) and item['diff'].strip()}
+    if not {'package.json', 'server.js'} <= changed:
+        raise AssertionError('시작 스크립트와 서버 바인딩의 AI 수정 기록이 모두 필요합니다.')
+    if (json.loads((original / 'package.json').read_text())['scripts'] != {}
+            or "'127.0.0.1'" not in (original / 'server.js').read_text()
+            or (original / 'Dockerfile').exists()):
+        raise AssertionError('업로드 원본이 변경됐습니다.')
+    scripts = json.loads((work / 'package.json').read_text()).get('scripts', {})
+    server = (work / 'server.js').read_text()
+    if (not isinstance(scripts.get('start'), str) or not scripts['start'].strip()
+            or 'process.env.PORT' not in server or re.search(r'''["']127\.0\.0\.1["']''', server)
+            or not re.search(r'''["']0\.0\.0\.0["']''', server)):
+        raise AssertionError('작업용 복사본에 시작·PORT·바인딩 수정이 없습니다.')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--live', action='store_true', help='Use actual AI API (requires configured key/model)')
@@ -41,6 +62,8 @@ def main():
     args = parser.parse_args()
     if args.python and (args.live or args.environment):
         parser.error('--python cannot be combined with --live or --environment')
+    if args.live and args.auto:
+        parser.error('--live --auto may select a billable cloud target; use a dedicated cloud drill')
     settings = AISettings.from_environment() if args.live else AISettings('test-fixture', 'fixture-model')
     if args.live and not settings.available:
         raise RuntimeError('Set OPENAI_API_KEY and ONEDEPLOY_AI_MODEL for live testing')
@@ -117,10 +140,7 @@ def main():
                 assert (original / 'Dockerfile').exists()
                 assert job['plan']['runtime'] == 'custom-dockerfile'
             else:
-                assert json.loads((original / 'package.json').read_text())['scripts'] == {}
-                assert "'127.0.0.1'" in (original / 'server.js').read_text()
-                assert not (original / 'Dockerfile').exists()
-            assert job['changes']
+                verify_node_repair(job)
             assert 'synthetic-agent-runtime-value' not in json.dumps(job)
             if not args.live and not args.python:
                 assert job['attempts'] == 2
@@ -138,18 +158,18 @@ def main():
                 assert observed['last_health']['source'] == 'automatic'
                 assert (app.root / job_id / 'health.json').is_file()
                 print('PASS: automatic health check recorded Docker ownership and HTTP 200', flush=True)
-                request('/api/jobs/' + job_id + '/retire', b'')
-                for _ in range(30):
-                    retired = request('/api/jobs/' + job_id)
-                    if retired['deployment_state'] != 'deleting':
-                        break
-                    time.sleep(1)
-                assert retired['deployment_state'] == 'deleted', json.dumps(retired, ensure_ascii=False)
-                assert subprocess.run(['docker', 'container', 'inspect', job['result']['container']],
-                                      capture_output=True).returncode != 0
-                assert subprocess.run(['docker', 'image', 'inspect', job['result']['image']],
-                                      capture_output=True).returncode != 0
-                print('PASS: retirement API removed the owned container and image tag', flush=True)
+            request('/api/jobs/' + job_id + '/retire', b'')
+            for _ in range(30):
+                retired = request('/api/jobs/' + job_id)
+                if retired['deployment_state'] != 'deleting':
+                    break
+                time.sleep(1)
+            assert retired['deployment_state'] == 'deleted', json.dumps(retired, ensure_ascii=False)
+            assert subprocess.run(['docker', 'container', 'inspect', job['result']['container']],
+                                  capture_output=True).returncode != 0
+            assert subprocess.run(['docker', 'image', 'inspect', job['result']['image']],
+                                  capture_output=True).returncode != 0
+            print('PASS: retirement API removed the owned container and image tag', flush=True)
         finally:
             server.shutdown()
             server.server_close()
