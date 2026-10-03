@@ -128,7 +128,46 @@ class App:
         self.recovery_warnings.extend(self.network_operations.recovery_warnings)
         self.restore()
 
+    def clean_uncommitted_uploads(self):
+        for directory in sorted(self.root.iterdir()):
+            if not re.fullmatch(r'[a-f0-9]{16}', directory.name):
+                continue
+            marker = directory / '.uncommitted-upload'
+            if not marker.exists() and not marker.is_symlink():
+                continue
+            job_file = directory / 'job.json'
+            if job_file.exists() or job_file.is_symlink():
+                continue
+            try:
+                if (directory.is_symlink() or not directory.is_dir()
+                        or marker.is_symlink() or not marker.is_file()):
+                    raise ValueError('Unsafe upload marker')
+                for entry in directory.iterdir():
+                    if entry.is_symlink():
+                        raise ValueError('Symlink in uncommitted upload')
+                    if entry.name == '.uncommitted-upload' and entry.is_file():
+                        continue
+                    if entry.name == 'source.zip' and entry.is_file():
+                        continue
+                    if entry.name == 'source' and entry.is_dir():
+                        continue
+                    if re.fullmatch(r'\.job-[A-Za-z0-9_]+\.tmp', entry.name) and entry.is_file():
+                        continue
+                    raise ValueError('Unexpected file in uncommitted upload')
+                shutil.rmtree(directory)
+            except (OSError, ValueError):
+                self.recovery_warnings.append(
+                    '미접수 업로드 디렉터리를 안전하게 정리하지 못했습니다: ' + directory.name)
+
+    def clear_upload_marker(self, directory: Path):
+        try:
+            (directory / '.uncommitted-upload').unlink()
+        except OSError:
+            self.recovery_warnings.append(
+                '접수된 작업의 업로드 표시를 정리하지 못했습니다: ' + directory.name)
+
     def restore(self):
+        self.clean_uncommitted_uploads()
         for path in sorted(self.root.glob("*/job.json")):
             try:
                 job = json.loads(path.read_text())
@@ -1426,6 +1465,7 @@ def handler_for(app: App):
                     directory = app.root / job_id
                     directory.mkdir()
                     try:
+                        (directory / '.uncommitted-upload').touch(mode=0o600)
                         archive = directory / "source.zip"
                         upload = self.rfile.read(size)
                         if len(upload) != size:
@@ -1511,6 +1551,7 @@ def handler_for(app: App):
                                     app.jobs[job_id]['prior_result'] = latest['result']
                                     app.jobs[job_id]['replaces_job_id'] = latest['id']
                             app.save(job_id)
+                        app.clear_upload_marker(directory)
                     except Exception:
                         if not (directory / 'job.json').is_file():
                             with app.lock:
@@ -1617,19 +1658,32 @@ def handler_for(app: App):
                     job_id = uuid.uuid4().hex[:16]
                     directory = app.root / job_id
                     directory.mkdir()
-                    archive = directory / "source.zip"
-                    archive.write_bytes(self.rfile.read(size))
                     try:
-                        project = extract_project(archive, directory / "source")
-                    finally:
-                        archive.unlink(missing_ok=True)
-                    plan = analyze_project(project, self.headers.get("X-Analysis-Mode", "static"), app.ai_settings)
-                    diff = dockerfile_diff(project, asdict(plan))
-                    with app.lock:
-                        app.jobs[job_id] = {"id": job_id, "status": "planned",
-                            "created_at": datetime.now(timezone.utc).isoformat(),
-                            "plan": asdict(plan), "diff": diff, "project": str(project), "events": []}
-                        app.save(job_id)
+                        (directory / '.uncommitted-upload').touch(mode=0o600)
+                        archive = directory / "source.zip"
+                        archive.write_bytes(self.rfile.read(size))
+                        try:
+                            project = extract_project(archive, directory / "source")
+                        finally:
+                            archive.unlink(missing_ok=True)
+                        plan = analyze_project(project, self.headers.get("X-Analysis-Mode", "static"), app.ai_settings)
+                        diff = dockerfile_diff(project, asdict(plan))
+                        with app.lock:
+                            app.jobs[job_id] = {"id": job_id, "status": "planned",
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "plan": asdict(plan), "diff": diff, "project": str(project), "events": []}
+                            app.save(job_id)
+                        app.clear_upload_marker(directory)
+                    except Exception:
+                        if not (directory / 'job.json').is_file():
+                            with app.lock:
+                                app.jobs.pop(job_id, None)
+                            try:
+                                shutil.rmtree(directory)
+                            except OSError:
+                                app.recovery_warnings.append(
+                                    '접수 실패 업로드 디렉터리를 정리하지 못했습니다: ' + job_id)
+                        raise
                     self.json_response(201, app.jobs[job_id])
                     return
                 if self.path.startswith("/api/deploy/"):

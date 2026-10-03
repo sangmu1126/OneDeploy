@@ -96,6 +96,32 @@ class EnvironmentHistoryTests(unittest.TestCase):
         self.assertEqual(restored.jobs[self.job_id]['status'], 'interrupted')
         self.assertEqual(json.loads((self.root / self.job_id / 'job.json').read_text())['status'], 'interrupted')
 
+    def test_restart_removes_only_marked_uncommitted_uploads(self):
+        orphan = self.root / ('b' * 16)
+        orphan.mkdir()
+        (orphan / '.uncommitted-upload').touch()
+        (orphan / 'source.zip').write_bytes(b'partial upload')
+        (orphan / '.job-abc123.tmp').write_text('partial record')
+        (orphan / 'source').mkdir()
+        (orphan / 'source' / 'server.js').write_text('partial extraction')
+
+        unknown = self.root / ('c' * 16)
+        unknown.mkdir()
+        (unknown / '.uncommitted-upload').touch()
+        (unknown / 'work').mkdir()
+
+        committed = self.root / ('d' * 16)
+        committed.mkdir()
+        (committed / '.uncommitted-upload').touch()
+        (committed / 'job.json').write_text('{}')
+
+        restored = App(self.root, AISettings())
+        self.assertFalse(orphan.exists())
+        self.assertTrue(unknown.exists())
+        self.assertTrue(committed.exists())
+        self.assertTrue(self.project.exists())
+        self.assertTrue(any(unknown.name in warning for warning in restored.recovery_warnings))
+
     def test_corrupt_state_does_not_stop_startup(self):
         for content in ('{broken', '[]', 'null'):
             with self.subTest(content=content):

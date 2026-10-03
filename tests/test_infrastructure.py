@@ -272,6 +272,28 @@ class InfrastructureTests(unittest.TestCase):
             self.assertFalse((root / ('b' * 16)).exists())
             worker.assert_not_called()
 
+    def test_analyze_failure_removes_uncommitted_upload(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('package.json', '{"scripts":{"start":"node server.js"}}')
+            bundle.writestr('server.js', 'console.log("ready")')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = App(root, AISettings(), monitor_interval=0)
+            handler = handler_for(app).__new__(handler_for(app))
+            handler.path = '/api/analyze'
+            handler.headers = {'X-OneDeploy-Token': app.token,
+                               'Content-Length': str(len(archive.getvalue()))}
+            handler.rfile = io.BytesIO(archive.getvalue())
+            handler.json_response = Mock()
+            with patch('onedeploy.server.uuid.uuid4') as uuid4, \
+                    patch('onedeploy.server.analyze_project', side_effect=ValueError('분석 실패')):
+                uuid4.return_value.hex = 'e' * 32
+                handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[0], 400)
+            self.assertFalse(app.jobs)
+            self.assertFalse((root / ('e' * 16)).exists())
+
     def test_upload_blocks_postgres_before_any_deployment_resource(self):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, 'w') as bundle:
