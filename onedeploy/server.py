@@ -1512,8 +1512,14 @@ def handler_for(app: App):
                                     app.jobs[job_id]['replaces_job_id'] = latest['id']
                             app.save(job_id)
                     except Exception:
-                        if job_id not in app.jobs:
-                            shutil.rmtree(directory)
+                        if not (directory / 'job.json').is_file():
+                            with app.lock:
+                                app.jobs.pop(job_id, None)
+                            try:
+                                shutil.rmtree(directory)
+                            except OSError:
+                                app.recovery_warnings.append(
+                                    '접수 실패 업로드 디렉터리를 정리하지 못했습니다: ' + job_id)
                         raise
                     if create_plan_id is not None:
                         try:
