@@ -92,10 +92,11 @@ OneDeploy는 업로드 원본과 수정용 복사본, 실제 빌드 시도, 상�
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 node tests/test_postgres_ui.mjs
+python3 -m tests.smoke_local_auto_postgres_browser
 PYTHONPATH=. python3 tests/smoke_agent.py
 ```
 
-마지막 명령은 Docker를 사용하고 AI의 도구 응답만 테스트용으로 고정합니다. 실제 OpenAI 호출을 검증할 때는 키·모델을 설정하고
+로컬 Chrome 드릴은 AWS 호출과 실제 배포를 실행하지 않고 기존 RDS 자동 연결 계획만 검사합니다. 마지막 명령은 Docker를 사용하고 AI의 도구 응답만 테스트용으로 고정합니다. 실제 OpenAI 호출을 검증할 때는 키·모델을 설정하고
 `PYTHONPATH=. python3 tests/smoke_agent.py --live`를 사용합니다. AWS 실계정 smoke는 기본이 읽기 전용 사전 점검이며, 과금 가능한 리소스를
 생성하는 `--apply` 절차와 정리 방법은 [실계정 검증 기록](docs/aws-postgres-live-runbook.md)에 적었습니다. 현재 구현·실계정 증거·남은 작업의 구분은
 [프로젝트 현황](docs/status.md)을 따릅니다.

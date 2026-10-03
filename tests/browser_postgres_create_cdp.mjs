@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const [serverUrl, debuggingPort, application, stage = 'create', archive] = process.argv.slice(2);
 assert.match(application, /^dbdrill-[a-f0-9]{8}$/);
-assert.ok(['create', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover'].includes(stage));
+assert.ok(['create', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan'].includes(stage));
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl);
@@ -60,7 +60,18 @@ try {
   await command('Runtime.enable');
   await command('Page.navigate', {url: serverUrl});
   await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨')"), 30000);
-  if (stage === 'recover') {
+  if (stage === 'auto-existing-plan') {
+    assert.ok(archive);
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='auto';e('target').onchange();e('public').checked=true;e('postgresExisting').checked=true;e('postgresExisting').onchange();return true;})()`);
+    const document = await command('DOM.getDocument');
+    const input = await command('DOM.querySelector', {nodeId: document.root.nodeId, selector: '#file'});
+    assert.ok(input.nodeId);
+    await command('DOM.setFileInputFiles', {nodeId: input.nodeId, files: [archive]});
+    assert.equal(await evaluate("document.getElementById('postgresVpc').value"), '');
+    await evaluate("document.getElementById('deploy').click();true");
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('jobId').textContent.includes('작업 ')&&e('infrastructure').textContent.includes('지원 경로 자동 선택')&&e('infrastructure').textContent.includes('existing RDS PostgreSQL');})()"), 30000);
+    console.log('PASS: browser uploaded PostgreSQL app without VPC/subnet inputs and recorded AWS policy plan');
+  } else if (stage === 'recover') {
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('postgresOperation').click();return true;})()`);
     await until(() => evaluate("(() => {const e=id=>document.getElementById(id);return e('postgresOperationInfo').textContent.includes(' · needs_attention · ')&&!e('postgresRecovery').hidden;})()"), 30000);
     await evaluate("document.getElementById('postgresRecoveryPlan').click();true");
