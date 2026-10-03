@@ -5,6 +5,8 @@
 구체적인 경계와 명령은 [AWS 데이터 경로](aws-database-path.md), 결정 이유와 과거
 검증 기록은 [의사결정 기록](decision-log.md)을 따른다.
 
+2026-10-03 현재 데모 AWS 실행 자원은 [일시 중지](aws-pause-2026-10-03.md)했다. `demo-app` RDS는 `stopped`, ECS 목표·실행 태스크는 0개다. 데이터·스냅샷·스택과 ECS Express 서비스는 보존했다. [Terraform 구성](../terraform/aws-live/README.md)에 기존 자원 네 개를 import했으며 실제 계정 변경에 Terraform apply는 사용하지 않았다.
+
 ## 확인된 경로
 
 - Local Docker와 AWS ECS Express의 무상태 HTTP 앱은 실제 빌드·배포·HTTP 응답을 확인했다.

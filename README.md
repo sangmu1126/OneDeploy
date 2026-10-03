@@ -71,6 +71,8 @@ UI에서는 앱 ID의 전용 네트워크를 준비하고, 새 RDS의 계정·�
 확인했습니다. 시험용 자원은 정리했고 보존 중인 `demo-app` DB와 스냅샷은 유지했습니다. 스냅샷 복원·읽기 전용 SQL 원장 및 데이터 표식 검사도 별도 임시 DB로 통과했습니다. 세부 절차와 비용·복구 경계는
 [AWS 데이터 경로](docs/aws-database-path.md)와 [실계정 검증 기록](docs/aws-postgres-live-runbook.md)에 있습니다.
 
+2026-10-03 데모 AWS 실행 자원을 내일 재개할 수 있게 일시 중지했다. RDS는 `stopped`, ECS 태스크는 0개이며 서비스·로드 밸런서·스토리지 등은 남아 있다. [Terraform 기록과 재개 절차](terraform/aws-live/README.md), [중지 상태 검증](docs/aws-pause-2026-10-03.md)을 참고한다.
+
 ## 작업 기록과 안전 경계
 
 OneDeploy는 업로드 원본과 수정용 복사본, 실제 빌드 시도, 상태·변경 diff·로그를 `.onedeploy/` 아래에 저장합니다. 이 디렉터리는 Git에서 제외합니다. 서버 재시작

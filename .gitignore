@@ -7,3 +7,8 @@ __pycache__/
 !.env.example
 .DS_Store
 dist/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
