@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const [serverUrl, debuggingPort, application, stage = 'create', archive] = process.argv.slice(2);
 assert.match(application, /^dbdrill-[a-f0-9]{8}$/);
-assert.ok(['create', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire'].includes(stage));
+assert.ok(['create', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover'].includes(stage));
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl);
@@ -60,7 +60,20 @@ try {
   await command('Runtime.enable');
   await command('Page.navigate', {url: serverUrl});
   await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨')"), 30000);
-  if (stage === 'retire') {
+  if (stage === 'recover') {
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('postgresOperation').click();return true;})()`);
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);return e('postgresOperationInfo').textContent.includes(' · needs_attention · ')&&!e('postgresRecovery').hidden;})()"), 30000);
+    await evaluate("document.getElementById('postgresRecoveryPlan').click();true");
+    const stackId = await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresRecoveryInfo').textContent;if(text&&!text.includes('ROLLBACK_COMPLETE'))throw Error(text);return !e('postgresRecoveryStart').hidden?text.match(/arn:aws:cloudformation:[^ ]+/)?.[0]:null;})()"), 30000);
+    assert.ok(stackId);
+    await evaluate("(() => {const e=id=>document.getElementById(id);e('postgresRecoveryConfirm').value='wrong-stack';e('postgresRecoveryStart').click();return true;})()");
+    assert.ok(await evaluate("document.getElementById('postgresRecoveryInfo').textContent.includes('정확히 입력하세요')"));
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('postgresRecoveryConfirm').value=${JSON.stringify(stackId)};e('postgresRecoveryStart').click();return true;})()`);
+    await until(() => evaluate("document.getElementById('postgresOperationInfo').textContent.includes(' · failed_cleaned · ')"), 30000);
+    await evaluate("(() => {const e=id=>document.getElementById(id);e('postgresPlanVpc').value='vpc-12345678';e('postgresPlanSubnets').value='subnet-11111111,subnet-22222222';e('postgresPlan').click();return true;})()");
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresPlanInfo').textContent;if(text&&!text.includes('생성하지 않았습니다'))throw Error(text);return text.includes('생성하지 않았습니다')&&!e('postgresCreate').hidden;})()"), 30000);
+    console.log('PASS: browser recovered failed stack and reopened same-ID RDS plan');
+  } else if (stage === 'retire') {
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('retirementPlan').click();return true;})()`);
     await until(() => evaluate(`(() => {const e=id=>document.getElementById(id);const text=e('retirementPlanInfo').textContent;if(text&&!text.includes('DB ID를 입력해야'))throw Error(text);return text.includes(${JSON.stringify('onedeploy-' + application)})&&!e('retirementStart').hidden;})()`), 120000);
     console.log('PASS: browser reviewed the owned RDS retirement plan');
