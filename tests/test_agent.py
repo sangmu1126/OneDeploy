@@ -35,6 +35,18 @@ class AgentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Configure'):
             self.tools.deploy_application()
 
+    def test_external_source_change_requires_new_plan_before_attempt(self):
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}',
+                                       '"scripts": {"start": "node server.js"}')
+        self.tools.configure_deployment('start', None, 4321, '/', [])
+        (self.tools.work / 'server.js').write_text('changed after configuration')
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            with self.assertRaisesRegex(ValueError, '배포 설정 이후 변경'):
+                self.tools.deploy_application()
+        self.assertEqual(self.tools.attempts, 0)
+        deploy.assert_not_called()
+
     def test_patch_requires_read_and_exact_match(self):
         with self.assertRaisesRegex(ValueError, 'Read'):
             self.tools.apply_project_patch('server.js', 'http', 'https')

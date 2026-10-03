@@ -264,6 +264,8 @@ class DeploymentTools:
         validate_infrastructure(inspect_infrastructure(self.work), self.target,
                                 postgres=self.postgres_request is not None)
         migrations = collect_sql_migrations(self.work) if self.postgres_request is not None else None
+        if source_digest(self.work) != self.plan.source_digest:
+            raise ValueError('작업용 소스가 배포 설정 이후 변경됐습니다. 파일을 다시 읽고 배포를 설정하세요.')
         missing = [name for name in self.plan.required_env if name not in
                    (MANAGED_POSTGRES_ENV if self.postgres_request else ())
                    and not self.environment.get(name)]
