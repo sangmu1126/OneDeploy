@@ -9,13 +9,15 @@
 | [의사결정 기록](decision-log.md) | 기능별 판단 근거, 안전 경계, 실패·복구 경험 |
 | [AWS PostgreSQL 실계정 검증 기록](aws-postgres-live-runbook.md) | 실제 생성·배포·복원·폐기 순서와 확인 결과 |
 | [AWS 데이터 경로](aws-database-path.md) | RDS·ECS·스냅샷의 동작과 운영 절차 |
+| [실패 생성 정리](aws-postgres-failed-create-recovery.md) | 롤백 스택 정리 조건, 작업 기록, 재생성 경계 |
 | [요구사항](requirements.md) · [설계](design.md) | 해커톤 원문 해석과 구현 구조 |
 
-2026-10-02까지 확인된 주요 흐름은 앱 업로드와 코드 준비, AWS ECS Express 배포,
+2026-10-03까지 확인된 주요 흐름은 앱 업로드와 코드 준비, AWS ECS Express 배포,
 기존·신규 PostgreSQL 연결, SQL 마이그레이션, HTTP 데이터 쓰기·읽기, RDS 스냅샷
 복원·검사, 임시 DB의 최종 스냅샷 선행 폐기다. 각 흐름의 검증 범위와 남은 제한은
 [현재 상태](status.md)에 구분해 적었다. 실제 AI 모델을 사용한 끝단 검증과
-브라우저의 유효 DB ID를 통한 폐기 실행은 아직 완료되지 않았다.
+브라우저의 유효 DB ID를 통한 폐기 실행은 통과했다. 실패 생성 정리 제품 경로는
+로컬 모의 응답으로 검증했으며 실계정 드릴은 아직 실행하지 않았다.
 
 로컬 `.onedeploy/`에는 임시 작업의 원본 JSON·로그·ZIP과 식별자가 들어 있다.
 이 폴더는 Git에서 제외하며 공유용 개발 기록으로 사용하지 않는다. 공유 가능한

@@ -111,6 +111,7 @@ def run(args) -> dict:
     stack_id = None
     stack_cleaned = False
     network_cleaned = False
+    product_verified = False
     try:
         created_network = network_provisioner.create()
         state.update(stage='network_created',
@@ -166,8 +167,41 @@ def run(args) -> dict:
                 or 'ROLLBACK_COMPLETE' not in result['message']):
             raise AssertionError('롤백 상태를 사용자 작업 기록에서 확인하지 못했습니다.')
         print('PASS: owned rollback and read-only user reconciliation confirmed', flush=True)
+        cleanup = manager.cleanup_plan(args.application)
+        if (cleanup['stack_id'] != stack_id
+                or cleanup['stack_status'] != 'ROLLBACK_COMPLETE'):
+            raise AssertionError('제품 정리 계획의 실패 스택이 예상과 다릅니다.')
+        state['stage'] = 'product_cleanup_planned'
+        save(journal, state)
+        started = manager.cleanup_start(args.application, cleanup['plan_id'], stack_id)
+        if started['status'] != 'recovering':
+            raise AssertionError('제품 실패 스택 정리 요청이 기록되지 않았습니다.')
+        state['stage'] = 'product_cleanup_recorded'
+        save(journal, state)
+        deadline = time.monotonic() + 1200
+        while time.monotonic() < deadline:
+            operation = manager.get(args.application)
+            if operation['status'] != 'recovering':
+                break
+            time.sleep(3)
+        operation = manager.get(args.application)
+        if operation['status'] != 'failed_cleaned':
+            raise AssertionError('제품 실패 스택 정리가 완료되지 않았습니다: '
+                                 + operation['message'])
+        stack_cleaned = True
+        state['stage'] = 'product_cleanup_verified'
+        save(journal, state)
+        if not list((manager.archive).glob(args.application + '-*.json')):
+            raise AssertionError('실패한 생성 시도의 로컬 보존 기록이 없습니다.')
+        retry = manager.plan(request)
+        if retry['stack_name'] != request.stack_name:
+            raise AssertionError('같은 앱 ID의 새 생성 계획을 확인하지 못했습니다.')
+        product_verified = True
+        state['stage'] = 'retry_plan_verified'
+        save(journal, state)
+        print('PASS: product cleanup archived the failed attempt and reopened same-ID plan', flush=True)
     finally:
-        if stack_id and created_network:
+        if stack_id and created_network and not stack_cleaned:
             try:
                 inspect_rolled_back(provisioner, stack_id)
                 provisioner.adapter.aws(['cloudformation', 'update-termination-protection',
@@ -189,13 +223,13 @@ def run(args) -> dict:
                 print('PASS: temporary network retired', flush=True)
             except Exception as exc:
                 print('시험용 네트워크 정리 확인 필요:', type(exc).__name__, str(exc), flush=True)
-        state.update(status='succeeded' if stack_cleaned and network_cleaned
-                     else 'needs_attention', stage='cleaned' if stack_cleaned and network_cleaned
+        state.update(status='succeeded' if stack_cleaned and network_cleaned and product_verified
+                     else 'needs_attention', stage='cleaned' if stack_cleaned and network_cleaned and product_verified
                      else state['stage'])
         save(journal, state)
         print('Local rollback drill:', state_dir.resolve(), flush=True)
-    if not stack_cleaned or not network_cleaned:
-        raise RuntimeError('임시 롤백 스택 또는 네트워크 정리가 완료되지 않았습니다.')
+    if not stack_cleaned or not network_cleaned or not product_verified:
+        raise RuntimeError('제품 실패 스택 정리·재계획 또는 임시 네트워크 정리가 완료되지 않았습니다.')
     return {'application_id': args.application, 'status': state['status'],
             'stage': state['stage']}
 
