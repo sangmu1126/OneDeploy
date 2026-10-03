@@ -14,10 +14,11 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_fixture import EnvironmentFixture, PythonDockerfileFixture, RepairFixture
+from agent_fixture import EnvironmentFixture, PauseAfterRepairFixture, PythonDockerfileFixture, RepairFixture
 from openai_wire_fixture import ResponsesWireFixture
 from onedeploy.agent import OpenAIDeployAgent
 from onedeploy.analysis import AISettings
+from onedeploy.core import source_digest
 from onedeploy.infrastructure import OpenAIInfrastructurePlanner
 from onedeploy.server import App, handler_for
 
@@ -57,8 +58,10 @@ def verify_node_repair(job):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--live', action='store_true', help='Use actual AI API (requires configured key/model)')
+    parser.add_argument('--live', action='store_true', help='Use actual AI API (requires OPENAI_API_KEY)')
     parser.add_argument('--environment', action='store_true', help='Exercise missing environment and resume')
+    parser.add_argument('--restart-before-resume', action='store_true',
+                        help='Repair, pause for environment, restart server, then deploy')
     parser.add_argument('--python', action='store_true', help='Use a scripted fixture for a Python Dockerfile app')
     parser.add_argument('--folder', action='store_true', help='Upload a browser-style folder instead of a ZIP')
     parser.add_argument('--auto', action='store_true', help='Exercise infrastructure target planning')
@@ -69,6 +72,9 @@ def main():
     args = parser.parse_args()
     if args.python and (args.live or args.environment):
         parser.error('--python cannot be combined with --live or --environment')
+    if args.restart_before_resume and (not args.environment or args.live or args.python or args.folder
+                                       or args.auto or args.interrupted_retire or args.wire_fixture):
+        parser.error('--restart-before-resume requires --environment with the scripted Node fixture')
     if args.live and args.auto:
         parser.error('--live --auto may select a billable cloud target; use a dedicated cloud drill')
     if args.interrupted_retire and (args.live or args.environment or args.python or args.folder or args.auto):
@@ -85,7 +91,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='onedeploy-agent-smoke-') as directory, \
             (patch('urllib.request.build_opener', return_value=wire) if wire else nullcontext()):
         app = App(Path(directory), settings, OpenAIDeployAgent if args.live or wire else
-                  (PythonDockerfileFixture if args.python else EnvironmentFixture if args.environment else RepairFixture),
+                  (PythonDockerfileFixture if args.python else
+                   PauseAfterRepairFixture if args.restart_before_resume else
+                   EnvironmentFixture if args.environment else RepairFixture),
                   infrastructure_planner_factory=InfrastructureFixture if args.auto and not args.live else OpenAIInfrastructurePlanner)
         server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(app))
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -135,6 +143,18 @@ def main():
                 job = request('/api/jobs/' + job_id)
                 if job['status'] == 'waiting_input' and args.environment:
                     assert job['missing_environment'] == ['DEMO_TOKEN']
+                    if args.restart_before_resume:
+                        verify_node_repair(job)
+                        work = app.root / job_id / 'work'
+                        assert job['work_digest'] == source_digest(work)
+                        server.shutdown()
+                        server.server_close()
+                        app = App(Path(directory), settings, PauseAfterRepairFixture)
+                        assert app.jobs[job_id]['status'] == 'waiting_input'
+                        assert app.jobs[job_id]['work_digest'] == source_digest(work)
+                        server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(app))
+                        threading.Thread(target=server.serve_forever, daemon=True).start()
+                        base = f'http://127.0.0.1:{server.server_port}'
                     request('/api/deployments/' + job_id + '/resume', json.dumps({
                         'environment': {'DEMO_TOKEN': 'synthetic-agent-runtime-value'}}).encode())
                     time.sleep(1)
@@ -159,16 +179,19 @@ def main():
                 verify_node_repair(job)
             assert 'synthetic-agent-runtime-value' not in json.dumps(job)
             if not args.live and not args.python and not wire:
-                assert job['attempts'] == 2
-                assert any(e['stage'] == 'attempt_failed' for e in job['events'])
-                containers = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{.Names}}'], text=True)
-                assert f'onedeploy-{job_id}-a1' not in containers.splitlines()
+                assert job['attempts'] == (1 if args.restart_before_resume else 2)
+                if not args.restart_before_resume:
+                    assert any(e['stage'] == 'attempt_failed' for e in job['events'])
+                    containers = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{.Names}}'], text=True)
+                    assert f'onedeploy-{job_id}-a1' not in containers.splitlines()
             print('PASS: one request -> source edits -> real Docker -> HTTP URL', flush=True)
             print('AI mode: ' + ('LIVE' if args.live else 'RESPONSES WIRE FIXTURE (not live AI)'
                                   if wire else 'SCRIPTED TEST FIXTURE (not live AI)'), flush=True)
             if wire:
                 wire.assert_complete()
                 print('PASS: Responses planner and agent requests replayed tool and reasoning items', flush=True)
+            if args.restart_before_resume:
+                print('PASS: repaired source survived server restart and environment resume', flush=True)
             print('Attempts: ' + str(job['attempts']), flush=True)
             print(json.dumps(job['result']), flush=True)
             if args.python:

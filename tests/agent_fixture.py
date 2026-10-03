@@ -46,6 +46,36 @@ class EnvironmentFixture(RepairFixture):
         return super().next(history)
 
 
+class PauseAfterRepairFixture:
+    """Repair before requesting a secret, then re-read the preserved work on resume."""
+    def __init__(self, settings=None):
+        self.index = 0
+
+    def next(self, history):
+        initial = json.loads(history[0]['content'])
+        resumed = 'DEMO_TOKEN' in initial['available_environment_names']
+        assert 'synthetic-agent-runtime-value' not in json.dumps(history)
+        config = {'start_script': 'start', 'build_script': None, 'port': 4321,
+                  'health_path': '/', 'required_env': ['DEMO_TOKEN']}
+        actions = ([
+            ('read_project_files', {'paths': ['package.json', 'server.js']}),
+            ('apply_project_patch', {'path': 'package.json', 'old_text': '"scripts": {}',
+                                     'new_text': '"scripts": {"start": "node server.js"}'}),
+            ('apply_project_patch', {'path': 'server.js',
+                                     'old_text': ").listen(4321, '127.0.0.1',",
+                                     'new_text': ").listen(Number(process.env.PORT || 4321), '0.0.0.0',"}),
+            ('configure_deployment', config),
+            ('deploy_application', {}),
+        ] if not resumed else [
+            ('read_project_files', {'paths': ['package.json', 'server.js']}),
+            ('configure_deployment', config),
+            ('deploy_application', {}),
+        ])
+        name, arguments = actions[self.index]
+        self.index += 1
+        return call(name, arguments, self.index)
+
+
 class PythonDockerfileFixture:
     def __init__(self, settings=None):
         self.index = 0
