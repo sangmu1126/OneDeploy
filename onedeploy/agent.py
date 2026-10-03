@@ -115,7 +115,7 @@ class DeploymentTools:
     def __init__(self, original: Path, work: Path, job_id: str, environment, event, checkpoint,
                  attempts=0, adapter_factory=LocalDockerAdapter, target="local-docker",
                  infrastructure_plan=None, postgres_request: PostgresRequest | None = None,
-                 cancel_check=None):
+                 cancel_check=None, require_existing_work=False):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
         self.emit, self.checkpoint = event, checkpoint
@@ -136,6 +136,10 @@ class DeploymentTools:
         self.result = None
         self.logs = []
         self.read_versions = {}
+        if work.is_symlink() or (work.exists() and not work.is_dir()):
+            raise AgentError('작업용 소스 경로가 올바른 디렉터리가 아닙니다.')
+        if require_existing_work and not work.is_dir():
+            raise AgentError('재개할 작업용 소스를 찾지 못했습니다. 원본에서 조용히 다시 시작하지 않습니다.')
         if not work.exists():
             shutil.copytree(original, work)
 

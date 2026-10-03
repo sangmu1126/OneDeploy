@@ -418,7 +418,8 @@ class App:
                                     attempts=job.get("attempts", 0), adapter_factory=adapter_factory, target=target,
                                     infrastructure_plan=job.get('infrastructure_plan'),
                                     postgres_request=postgres_request_from_job(job),
-                                    cancel_check=lambda: self.cancel_requested(job_id))
+                                    cancel_check=lambda: self.cancel_requested(job_id),
+                                    require_existing_work=bool(job.get('steps', 0)))
             self.event(job_id, "starting", "AI가 작업용 소스에서 배포를 준비합니다.")
             result = DeploymentAgent(self.agent_factory(self.ai_settings), tools,
                                      steps=job.get("steps", 0)).run()
