@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from dataclasses import asdict
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,6 +68,42 @@ class PostgresOperationsTests(unittest.TestCase):
                 self.manager.start('demo-app', plan['plan_id'])
         self.assertFalse((self.root / 'demo-app.json').exists())
         start.assert_not_called()
+
+    def test_rds_baseline_cap_rejects_expensive_plan_before_creation(self):
+        manager = PostgresOperations(self.root, self.settings, max_baseline_730h_usd='20.00')
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=self.quote), \
+                patch('onedeploy.postgres_operations.AwsPostgresProvisioner.create') as create:
+            with self.assertRaisesRegex(ValueError, '서버 상한'):
+                manager.plan(self.request)
+        self.assertFalse(manager.plans)
+        self.assertFalse((self.root / 'demo-app.json').exists())
+        create.assert_not_called()
+
+    def test_rds_cap_is_rechecked_before_journal_and_worker(self):
+        manager = PostgresOperations(self.root, self.settings, max_baseline_730h_usd='20.87')
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value=self.quote), \
+                patch('onedeploy.postgres_operations.threading.Thread.start') as worker:
+            plan = manager.plan(self.request)
+            manager.max_baseline_730h_usd = Decimal('20.00')
+            with self.assertRaisesRegex(ValueError, '서버 상한'):
+                manager.start('demo-app', plan['plan_id'])
+        self.assertFalse((self.root / 'demo-app.json').exists())
+        worker.assert_not_called()
+
+    def test_rds_cap_requires_positive_decimal_usd(self):
+        for value in ('', '0', '-1', '20.001', 'NaN', 'Infinity', '1e6', ' 20.87', 20):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'ONEDEPLOY_MAX_RDS_730H_USD'):
+                PostgresOperations(self.root, self.settings, max_baseline_730h_usd=value)
+
+    def test_rds_cap_fails_closed_when_quote_is_missing(self):
+        manager = PostgresOperations(self.root, self.settings, max_baseline_730h_usd='20.00')
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value={'account': '123456789012'}):
+            with self.assertRaisesRegex(ValueError, '견적을 확인하지 못해'):
+                manager.plan(self.request)
+        self.assertFalse(manager.plans)
 
     def test_only_current_reviewed_creation_plan_can_join_an_upload(self):
         with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',

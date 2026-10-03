@@ -10,6 +10,7 @@ import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from onedeploy.aws import AwsConfigurationError, AwsSettings
@@ -21,7 +22,17 @@ ATTEMPT_ID = re.compile(r'[a-f0-9]{16}')
 
 
 class PostgresOperations:
-    def __init__(self, root: Path, settings: AwsSettings):
+    def __init__(self, root: Path, settings: AwsSettings, max_baseline_730h_usd: str | None = None):
+        if max_baseline_730h_usd is not None:
+            if (not isinstance(max_baseline_730h_usd, str)
+                    or not re.fullmatch(r'(?:0|[1-9][0-9]*)(?:\.[0-9]{1,2})?', max_baseline_730h_usd)):
+                raise ValueError('ONEDEPLOY_MAX_RDS_730H_USD는 양수 USD 금액(소수 둘째 자리까지)이어야 합니다.')
+            cap = Decimal(max_baseline_730h_usd)
+            if cap <= 0:
+                raise ValueError('ONEDEPLOY_MAX_RDS_730H_USD는 0보다 커야 합니다.')
+        else:
+            cap = None
+        self.max_baseline_730h_usd = cap
         self.root = root
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.root.chmod(0o700)
@@ -138,6 +149,19 @@ class PostgresOperations:
                 raise
         os.replace(temporary, self.root / (operation['application_id'] + '.json'))
 
+    def _check_baseline_cap(self, result: dict) -> None:
+        if self.max_baseline_730h_usd is None:
+            return
+        try:
+            baseline = Decimal(result['pricing']['baseline_730h_usd'])
+        except (KeyError, TypeError, InvalidOperation):
+            raise ValueError('RDS 기본 용량 견적을 확인하지 못해 생성 계획을 중단합니다.') from None
+        if not baseline.is_finite() or baseline < 0:
+            raise ValueError('RDS 기본 용량 견적이 올바르지 않습니다.')
+        if baseline > self.max_baseline_730h_usd:
+            raise ValueError('RDS 730시간 기본 용량 견적이 서버 상한 '
+                             + str(self.max_baseline_730h_usd) + ' USD를 초과합니다.')
+
     def plan(self, request: PostgresRequest) -> dict:
         request.validate()
         if (request.account != self.settings.expected_account or request.region != self.settings.region
@@ -150,6 +174,7 @@ class PostgresOperations:
                 raise ValueError('이 앱에는 이미 PostgreSQL 생성 기록이 있습니다. 먼저 생성 상태를 확인하세요.')
         provisioner = AwsPostgresProvisioner(request)
         result = provisioner.preflight()
+        self._check_baseline_cap(result)
         if request.application_id in self.cleaned:
             provisioner.assert_database_absent()
             provisioner.assert_stack_available(allow_deleted=True)
@@ -188,6 +213,7 @@ class PostgresOperations:
         current = provisioner.preflight()
         if current != expected:
             raise ValueError('생성 계획이 변경됐습니다. 가격을 다시 확인하세요.')
+        self._check_baseline_cap(current)
         if application_id in self.cleaned:
             provisioner.assert_database_absent()
             provisioner.assert_stack_available(allow_deleted=True)

@@ -116,7 +116,8 @@ class App:
         self.cloud_settings = cloud_settings if cloud_settings is not None else CloudRunSettings.from_environment()
         self.aws_settings = aws_settings if aws_settings is not None else AwsSettings.from_environment()
         self.recovery_warnings = []
-        self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings)
+        self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings,
+            max_baseline_730h_usd=os.environ.get('ONEDEPLOY_MAX_RDS_730H_USD'))
         self.recovery_warnings.extend(self.postgres_operations.recovery_warnings)
         self.postgres_retirement_operations = PostgresRetirementOperations(
             self.root / 'database-retirement-operations', self.aws_settings)

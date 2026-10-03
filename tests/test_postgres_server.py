@@ -249,6 +249,30 @@ class PostgresServerTests(unittest.TestCase):
         preflight.assert_called_once_with()
         create.assert_not_called()
 
+    def test_configured_rds_quote_cap_rejects_plan_through_api(self):
+        with patch.dict('os.environ', {'ONEDEPLOY_MAX_RDS_730H_USD': '20.00'}):
+            app = App(self.root / 'bounded', AISettings('fixture-key', 'fixture-model'),
+                      aws_settings=self.settings, monitor_interval=0,
+                      agent_factory=lambda _: object())
+        handler = handler_for(app).__new__(handler_for(app))
+        handler.path = '/api/applications/demo-app/postgres/plan'
+        payload = json.dumps({'vpc_id': 'vpc-12345678',
+                              'subnet_ids': ['subnet-11111111', 'subnet-22222222']}).encode()
+        handler.headers = {'X-OneDeploy-Token': app.token,
+                           'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        handler.json_response = Mock()
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',
+                   return_value={'account': ACCOUNT,
+                                 'pricing': {'baseline_730h_usd': '20.87'}}), \
+                patch('onedeploy.postgres_operations.AwsPostgresProvisioner.create') as create:
+            handler.do_POST()
+        status, response = handler.json_response.call_args.args
+        self.assertEqual(status, 400)
+        self.assertIn('서버 상한', response['error'])
+        self.assertFalse(app.postgres_operations.plans)
+        create.assert_not_called()
+
     def test_plan_resolves_verified_application_network_without_global_group(self):
         self.app.aws_settings = AwsSettings(REGION, expected_account=ACCOUNT)
         self.app.postgres_operations.settings = self.app.aws_settings
