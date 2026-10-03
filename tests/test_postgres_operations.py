@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,6 +63,46 @@ class PostgresOperationsTests(unittest.TestCase):
                 self.manager.start('demo-app', plan['plan_id'])
         self.assertFalse((self.root / 'demo-app.json').exists())
         start.assert_not_called()
+
+    def test_corrupt_active_journal_blocks_same_app_before_aws(self):
+        (self.root / 'demo-app.json').write_text('{not-json')
+        restored = PostgresOperations(self.root, self.settings)
+        self.assertTrue(restored.recovery_warnings)
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
+            with self.assertRaisesRegex(AwsConfigurationError, '로컬 PostgreSQL'):
+                restored.plan(self.request)
+        preflight.assert_not_called()
+
+    def test_corrupt_cleaned_archive_blocks_same_app_before_aws(self):
+        archive = self.root / 'cleaned-attempts'
+        (archive / 'demo-app-0123456789abcdef.json').write_text('{not-json')
+        restored = PostgresOperations(self.root, self.settings)
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
+            with self.assertRaisesRegex(AwsConfigurationError, '로컬 PostgreSQL'):
+                restored.plan(self.request)
+        preflight.assert_not_called()
+
+    def test_unidentified_journal_blocks_all_new_rds_creation(self):
+        (self.root / '.postgres-unknown.json').write_text('{not-json')
+        restored = PostgresOperations(self.root, self.settings)
+        with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
+            with self.assertRaisesRegex(AwsConfigurationError, '로컬 PostgreSQL'):
+                restored.plan(self.request)
+        preflight.assert_not_called()
+
+    def test_invalid_cleaned_record_is_not_archived_or_trusted(self):
+        operation = {'application_id': 'demo-app', 'request': asdict(self.request),
+                     'expected_plan': self.quote, 'status': 'failed_cleaned',
+                     'created_at': '2026-10-03T00:00:00+00:00',
+                     'cleaned_at': '2026-10-03T00:01:00+00:00',
+                     'message': '정리 완료', 'attempt_id': '../wrong',
+                     'recovery_stack_id': 'untrusted'}
+        (self.root / 'demo-app.json').write_text(json.dumps(operation))
+        restored = PostgresOperations(self.root, self.settings)
+        self.assertTrue((self.root / 'demo-app.json').exists())
+        self.assertFalse(list((self.root / 'cleaned-attempts').glob('*.json')))
+        with self.assertRaisesRegex(AwsConfigurationError, '로컬 PostgreSQL'):
+            restored.plan(self.request)
 
     def test_existing_stack_blocks_plan_before_any_creation_record(self):
         with patch('onedeploy.postgres_operations.AwsPostgresProvisioner.preflight',

@@ -16,6 +16,10 @@ from onedeploy.aws import AwsConfigurationError, AwsSettings
 from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
 
 
+APP_ID = re.compile(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*')
+ATTEMPT_ID = re.compile(r'[a-f0-9]{16}')
+
+
 class PostgresOperations:
     def __init__(self, root: Path, settings: AwsSettings):
         self.root = root
@@ -29,29 +33,35 @@ class PostgresOperations:
         self.cleaned: set[str] = set()
         self.cleaned_records: dict[str, dict] = {}
         self.recovery_warnings: list[str] = []
+        self.untrusted_applications: set[str] = set()
+        self.untrusted_unknown = False
         self.archive = self.root / 'cleaned-attempts'
         self.archive.mkdir(mode=0o700, exist_ok=True)
         self.archive.chmod(0o700)
         for path in self.archive.glob('*.json'):
+            claimed_app = None
             try:
                 record = json.loads(path.read_text())
-                request = record['request']
-                if (record['status'] != 'failed_cleaned'
-                        or path.stem != request['application_id'] + '-' + record['attempt_id']
-                        or request['account'] != settings.expected_account
-                        or request['region'] != settings.region
-                        or not re.fullmatch(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*', request['application_id'])
-                        or not re.fullmatch(r'[a-f0-9]{16}', record['attempt_id'])):
+                raw_request = record.get('request') if isinstance(record, dict) else None
+                claimed_app = raw_request.get('application_id') if isinstance(raw_request, dict) else None
+                request = self._validate_cleaned_record(record)
+                if path.stem != request.application_id + '-' + record['attempt_id']:
                     raise ValueError('Unexpected archive')
-                self.cleaned.add(request['application_id'])
-                previous = self.cleaned_records.get(request['application_id'])
+                self.cleaned.add(request.application_id)
+                previous = self.cleaned_records.get(request.application_id)
                 if not previous or record.get('cleaned_at', '') > previous.get('cleaned_at', ''):
-                    self.cleaned_records[request['application_id']] = record
-            except (OSError, ValueError, KeyError, TypeError):
+                    self.cleaned_records[request.application_id] = record
+            except (OSError, ValueError, KeyError, TypeError, AwsConfigurationError):
                 self.recovery_warnings.append('PostgreSQL 정리 기록을 불러오지 못했습니다: ' + path.stem)
+                archived_name = re.fullmatch(r'(.+)-[a-f0-9]{16}', path.stem)
+                self._mark_untrusted(archived_name.group(1) if archived_name else None,
+                                     claimed_app)
         for path in self.root.glob('*.json'):
+            claimed_app = None
             try:
                 operation = json.loads(path.read_text())
+                raw_request = operation.get('request') if isinstance(operation, dict) else None
+                claimed_app = raw_request.get('application_id') if isinstance(raw_request, dict) else None
                 request = PostgresRequest(**{**operation['request'],
                     'subnet_ids': tuple(operation['request']['subnet_ids'])})
                 request.validate()
@@ -63,6 +73,7 @@ class PostgresOperations:
                         or operation['status'] not in {'running', 'recovering', 'succeeded', 'needs_attention', 'failed_cleaned'}):
                     raise ValueError('Unexpected database operation')
                 if operation['status'] == 'failed_cleaned':
+                    self._validate_cleaned_record(operation)
                     os.replace(path, self.archive / (request.application_id + '-'
                         + operation['attempt_id'] + '.json'))
                     self.cleaned.add(request.application_id)
@@ -75,6 +86,41 @@ class PostgresOperations:
                 self.operations[request.application_id] = operation
             except (OSError, ValueError, KeyError, TypeError, AwsConfigurationError):
                 self.recovery_warnings.append('PostgreSQL 생성 기록을 불러오지 못했습니다: ' + path.stem)
+                self._mark_untrusted(path.stem, claimed_app)
+
+    def _validate_cleaned_record(self, record: dict) -> PostgresRequest:
+        raw = record['request']
+        request = PostgresRequest(**{**raw, 'subnet_ids': tuple(raw['subnet_ids'])})
+        request.validate()
+        prefix = f'arn:aws:cloudformation:{request.region}:{request.account}:stack/{request.stack_name}/'
+        if (record.get('status') != 'failed_cleaned'
+                or request.account != self.settings.expected_account
+                or request.region != self.settings.region
+                or not isinstance(record.get('attempt_id'), str)
+                or not ATTEMPT_ID.fullmatch(record['attempt_id'])
+                or not isinstance(record.get('recovery_stack_id'), str)
+                or not record['recovery_stack_id'].startswith(prefix)
+                or not isinstance(record.get('created_at'), str)
+                or not isinstance(record.get('cleaned_at'), str)
+                or not isinstance(record.get('message'), str)
+                or record.get('database_id')
+                or not isinstance(record.get('expected_plan'), dict)
+                or not isinstance(record['expected_plan'].get('pricing'), dict)
+                or not isinstance(record['expected_plan']['pricing'].get('baseline_730h_usd'), str)):
+            raise ValueError('Unexpected cleaned database operation')
+        return request
+
+    def _mark_untrusted(self, named_app: str | None, claimed_app: str | None) -> None:
+        if not named_app or not APP_ID.fullmatch(named_app) or not 3 <= len(named_app) <= 31:
+            self.untrusted_unknown = True
+        else:
+            self.untrusted_applications.add(named_app)
+        if isinstance(claimed_app, str) and APP_ID.fullmatch(claimed_app) and 3 <= len(claimed_app) <= 31:
+            self.untrusted_applications.add(claimed_app)
+
+    def _assert_trusted(self, application_id: str) -> None:
+        if self.untrusted_unknown or application_id in self.untrusted_applications:
+            raise AwsConfigurationError('로컬 PostgreSQL 생성·정리 기록을 확인하지 못했습니다. 기록을 복구한 뒤 서버를 재시작하세요.')
 
     def _save(self, operation: dict) -> None:
         with tempfile.NamedTemporaryFile('w', dir=self.root, prefix='.postgres-',
@@ -96,6 +142,7 @@ class PostgresOperations:
                     request.service_security_group != self.settings.service_security_group)):
             raise AwsConfigurationError('RDS 생성 대상이 서버의 AWS 설정과 다릅니다.')
         with self.lock:
+            self._assert_trusted(request.application_id)
             if request.application_id in self.operations:
                 raise ValueError('이 앱에는 이미 PostgreSQL 생성 기록이 있습니다. 먼저 생성 상태를 확인하세요.')
         provisioner = AwsPostgresProvisioner(request)
@@ -107,6 +154,7 @@ class PostgresOperations:
             provisioner.assert_stack_available()
         token = secrets.token_urlsafe(24)
         with self.lock:
+            self._assert_trusted(request.application_id)
             if request.application_id in self.operations:
                 raise ValueError('이 앱에는 이미 PostgreSQL 생성 기록이 있습니다.')
             self.plans[request.application_id] = {'id': token, 'request': request,
@@ -115,6 +163,7 @@ class PostgresOperations:
 
     def start(self, application_id: str, plan_id: str) -> dict:
         with self.lock:
+            self._assert_trusted(application_id)
             plan = self.plans.get(application_id)
             if (not plan or plan['id'] != plan_id or time.monotonic() > plan['expires']):
                 raise ValueError('생성 계획이 없거나 만료됐습니다. 가격을 다시 확인하세요.')
@@ -136,6 +185,7 @@ class PostgresOperations:
                      'created_at': datetime.now(timezone.utc).isoformat(),
                      'message': 'RDS 스택 생성과 완료 확인을 진행 중입니다.'}
         with self.lock:
+            self._assert_trusted(application_id)
             if application_id in self.operations:
                 raise ValueError('이 앱의 PostgreSQL 생성 요청이 이미 기록돼 있습니다.')
             self._save(operation)
@@ -271,8 +321,9 @@ class PostgresOperations:
 
     def cleanup_plan(self, application_id: str) -> dict:
         with self.lock:
+            self._assert_trusted(application_id)
             operation = self.operations.get(application_id)
-            if not operation or operation['status'] != 'needs_attention':
+            if not operation or operation['status'] != 'needs_attention' or operation.get('database_id'):
                 raise ValueError('재확인이 필요한 PostgreSQL 생성 기록이 없습니다.')
             request = PostgresRequest(**{**operation['request'],
                 'subnet_ids': tuple(operation['request']['subnet_ids'])})
@@ -289,11 +340,13 @@ class PostgresOperations:
 
     def cleanup_start(self, application_id: str, plan_id: str, confirm_stack_id: str) -> dict:
         with self.lock:
+            self._assert_trusted(application_id)
             plan = self.cleanup_plans.get(application_id)
             operation = self.operations.get(application_id)
             if (not plan or plan['id'] != plan_id or time.monotonic() > plan['expires']
                     or plan['result']['stack_id'] != confirm_stack_id
-                    or not operation or operation['status'] != 'needs_attention'):
+                    or not operation or operation['status'] != 'needs_attention'
+                    or operation.get('database_id')):
                 raise ValueError('실패 스택 정리 계획이 없거나 확인 값이 다릅니다.')
             request = PostgresRequest(**{**operation['request'],
                 'subnet_ids': tuple(operation['request']['subnet_ids'])})
