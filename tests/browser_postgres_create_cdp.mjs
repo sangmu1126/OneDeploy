@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const [serverUrl, debuggingPort, application, stage = 'create', archive] = process.argv.slice(2);
 assert.match(application, /^dbdrill-[a-f0-9]{8}$/);
-assert.ok(['create', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan'].includes(stage));
+assert.ok(['create', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan', 'one-action-local'].includes(stage));
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl);
@@ -60,7 +60,19 @@ try {
   await command('Runtime.enable');
   await command('Page.navigate', {url: serverUrl});
   await until(() => evaluate("document.readyState === 'complete' && document.getElementById('setup').textContent.startsWith('AI 연결 설정됨')"), 30000);
-  if (stage === 'auto-existing-plan') {
+  if (stage === 'one-action-local') {
+    assert.ok(archive);
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('public').checked=true;e('postgresPlanVpc').value='vpc-12345678';e('postgresPlanSubnets').value='subnet-11111111,subnet-22222222';return true;})()`);
+    const document = await command('DOM.getDocument');
+    const input = await command('DOM.querySelector', {nodeId: document.root.nodeId, selector: '#file'});
+    assert.ok(input.nodeId);
+    await command('DOM.setFileInputFiles', {nodeId: input.nodeId, files: [archive]});
+    await evaluate("document.getElementById('postgresPlan').click();true");
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('postgresPlanInfo').textContent&&!e('postgresPlanInfo').textContent.includes('730시간'))throw Error(e('postgresPlanInfo').textContent);return e('postgresPlanInfo').textContent.includes('730시간')&&!e('postgresCreateDeploy').hidden;})()"), 30000);
+    await evaluate("document.getElementById('postgresCreateDeploy').click();true");
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('status').textContent==='배포 완료'&&e('infrastructure').textContent.includes('new RDS PostgreSQL');})()"), 30000);
+    console.log('PASS: browser reviewed RDS price, uploaded ZIP, and completed one local simulated creation-to-deployment job');
+  } else if (stage === 'auto-existing-plan') {
     assert.ok(archive);
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='auto';e('target').onchange();e('public').checked=true;e('postgresExisting').checked=true;e('postgresExisting').onchange();return true;})()`);
     const document = await command('DOM.getDocument');
