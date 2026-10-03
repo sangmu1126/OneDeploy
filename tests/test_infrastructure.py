@@ -155,6 +155,29 @@ class InfrastructureTests(unittest.TestCase):
             self.assertIn('sqlite', profile.requirements)
             self.assertEqual(profile.evidence, ('data/users.sqlite3',))
 
+    def test_scans_dependency_beyond_old_per_file_read_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'server.js').write_text(' ' * 25000 + '\nrequire("better-sqlite3")("app.db")')
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.requirements, ('sqlite',))
+            with self.assertRaisesRegex(ValueError, 'SQLite'):
+                validate_infrastructure(profile, 'aws-ecs-express')
+
+    def test_incomplete_source_inspection_blocks_deployment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            for number in range(1001):
+                (project / f'module{number:04d}.js').write_text('const ready = true;')
+            (project / 'z_database.js').write_text('require("better-sqlite3")("app.db")')
+            with self.assertRaisesRegex(ValueError, '끝까지 검사'):
+                inspect_infrastructure(project)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'server.js').write_text(' ' * (1024 * 1024 + 1))
+            with self.assertRaisesRegex(ValueError, '끝까지 검사'):
+                inspect_infrastructure(project)
+
     def test_detects_required_worker_and_local_file_storage(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)

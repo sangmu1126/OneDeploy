@@ -67,6 +67,9 @@ TARGET_RESOURCES = {
     'cloud-run': ['Artifact Registry repository', 'runtime service account', 'Cloud Run service'],
     'aws-ecs-express': ['CloudFormation base stack', 'ECR repository', 'ECS Express service'],
 }
+MAX_INSPECT_FILES = 1000
+MAX_INSPECT_BYTES = 8 * 1024 * 1024
+MAX_INSPECT_FILE_BYTES = 1024 * 1024
 INFRA_SCHEMA = {
     'type': 'object',
     'properties': {
@@ -109,7 +112,7 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     requirements = set()
     database_engines = set()
     scanned = 0
-    budget = 1024 * 1024
+    budget = MAX_INSPECT_BYTES
     for path in sorted(project.rglob('*')):
         if not path.is_file() or path.is_symlink():
             continue
@@ -123,12 +126,16 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
             continue
         if path.name not in MANIFESTS and path.suffix not in SOURCE_EXTENSIONS:
             continue
-        if scanned >= 200 or budget <= 0:
-            break
+        size = path.stat().st_size
+        if scanned >= MAX_INSPECT_FILES or size > MAX_INSPECT_FILE_BYTES or size > budget:
+            raise ValueError('인프라 요구를 끝까지 검사할 수 없습니다. 소스 파일 수·크기를 줄인 뒤 다시 업로드하세요.')
         scanned += 1
         with path.open('rb') as source:
-            content = source.read(min(20000, budget)).decode('utf-8', errors='replace')
-        budget -= len(content)
+            raw = source.read(size + 1)
+        if len(raw) != size:
+            raise ValueError('검사 중 소스 파일이 변경됐습니다. 다시 업로드하세요.')
+        content = raw.decode('utf-8', errors='replace')
+        budget -= len(raw)
         found = set()
         if path.name == 'package.json':
             try:

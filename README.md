@@ -55,7 +55,7 @@ Cloud Run은 기본적으로 인증이 필요한 비공개 서비스이며, 사�
 기본 지원 범위는 영속 데이터·별도 워커가 없는 단일 HTTP 컨테이너입니다. SQLite·MySQL·MongoDB·로컬 파일 저장·백그라운드 워커 의존이 감지되면 리소스를 만들기 전에
 차단합니다. AWS ECS Express에서는 사용자가 **기존 OneDeploy PostgreSQL RDS 사용**을 명시하고 소유권 검사를 통과한 앱만 PostgreSQL을 연결할 수
 있습니다. 업로드 앱에는 `migrations/`의 SQL 파일과 `PGHOST`·`PGUSER`·`PGPASSWORD`·`PGDATABASE` 방식의 연결이 필요합니다. 정적 탐지는
-모든 상태 저장·비동기 작업을 완전히 판별하지 못합니다.
+모든 상태 저장·비동기 작업을 완전히 판별하지 못합니다. 검사 대상 소스가 1000개, 총 8 MiB, 파일당 1 MiB를 넘으면 뒷부분을 무시하지 않고 배포 전에 거부합니다.
 
 ## AWS PostgreSQL 사용
 
