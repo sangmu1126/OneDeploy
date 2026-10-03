@@ -29,14 +29,44 @@ test('existing RDS opt-in sends only the server-supported headers', () => {
     'X-Postgres-Subnet-Ids': 'subnet-11111111,subnet-22222222',
   });
   assert.deepEqual({...headers({existing: false})}, {});
+  assert.deepEqual({...headers({target: 'auto'})}, {...headers()});
 });
 
 test('database opt-in rejects unsupported target, private service and malformed network', () => {
   for (const options of [
-    {target: 'auto'}, {target: 'cloud-run'}, {publicAccess: false},
+    {target: 'cloud-run'}, {publicAccess: false},
     {vpc: 'vpc-invalid'}, {subnets: 'subnet-11111111,subnet-11111111'},
     {subnets: 'subnet-11111111'}, {application: 'demo--app'},
   ]) assert.throws(() => headers(options));
+});
+
+test('automatic target keeps existing RDS binding while hiding new-DB creation', async () => {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: '', checked: false, files: [], hidden: false, disabled: false,
+      textContent: '', replaceChildren() {}, querySelectorAll() { return []; },
+    });
+    return elements.get(id);
+  };
+  const context = {
+    document: {getElementById: element, hidden: false},
+    fetch: async path => ({ok: true, json: async () => path === '/api/config'
+      ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
+      : []}),
+    setInterval() {}, setTimeout, FormData, Set, Error, Date,
+  };
+  runInNewContext(html.split('<script>', 2)[1].split('</script>', 1)[0], context);
+  await new Promise(resolve => setImmediate(resolve));
+  element('target').value = 'auto';
+  element('target').onchange();
+  assert.equal(element('postgresOptions').hidden, false);
+  assert.equal(element('postgresCreationDetails').hidden, true);
+  element('postgresExisting').checked = true;
+  element('target').value = 'aws-ecs-express';
+  element('target').onchange();
+  assert.equal(element('postgresExisting').checked, true);
+  assert.equal(element('postgresCreationDetails').hidden, false);
 });
 
 test('app network creation needs a reviewed plan and records the selected VPC', async () => {

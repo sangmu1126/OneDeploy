@@ -108,13 +108,13 @@ class PostgresServerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '폐기 기록'):
                 self.app.ensure_application_available('demo-app', 'aws-ecs-express')
 
-    def upload(self, content, *, postgres=True):
+    def upload(self, content, *, postgres=True, target='aws-ecs-express', public=True):
         handler_class = handler_for(self.app)
         handler = handler_class.__new__(handler_class)
         handler.path = '/api/deployments'
         handler.headers = {'X-OneDeploy-Token': self.app.token,
-                           'X-Deploy-Target': 'aws-ecs-express',
-                           'X-Public-Access': 'true', 'X-Application-Id': 'demo-app',
+                           'X-Deploy-Target': target,
+                           'X-Public-Access': str(public).lower(), 'X-Application-Id': 'demo-app',
                            'Content-Length': str(len(content))}
         if postgres:
             handler.headers.update({'X-Postgres-Existing': 'true',
@@ -354,6 +354,33 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(restored.recovery_warnings, [])
         self.assertEqual(postgres_request_from_job(restored.jobs[job_id]).subnet_ids,
                          ('subnet-11111111', 'subnet-22222222'))
+
+    def test_auto_target_uses_only_supported_owned_postgres_path(self):
+        database = {'database_id': 'onedeploy-demo-app'}
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value=database), \
+                patch.object(self.app, 'infrastructure_planner_factory') as planner:
+            status, payload = self.upload(archive(), target='auto')
+        self.assertEqual(status, 202)
+        planner.assert_not_called()
+        job = self.app.jobs[payload['id']]
+        self.assertEqual(job['requested_target'], 'auto')
+        self.assertEqual(job['target'], 'aws-ecs-express')
+        self.assertEqual(job['infrastructure_plan']['planner'], 'policy')
+        self.assertEqual(job['infrastructure_plan']['database']['binding'], 'existing')
+
+    def test_auto_target_without_explicit_binding_still_rejects_postgres(self):
+        status, payload = self.upload(archive(), postgres=False, target='auto')
+        self.assertEqual(status, 400)
+        self.assertIn('데이터베이스', payload['error'])
+        self.assertFalse(self.app.jobs)
+
+    def test_auto_postgres_requires_public_aws_path_before_db_inspection(self):
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect:
+            status, payload = self.upload(archive(), target='auto', public=False)
+        self.assertEqual(status, 400)
+        self.assertIn('공개 AWS', payload['error'])
+        inspect.assert_not_called()
 
     def test_missing_sql_bundle_rejects_before_db_inspection(self):
         with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current') as inspect:

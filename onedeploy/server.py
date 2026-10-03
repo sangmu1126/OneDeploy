@@ -1214,9 +1214,11 @@ def handler_for(app: App):
                     aws_settings_for_job = app.aws_settings
                     if postgres_flag == 'true':
                         settings = app.aws_settings
-                        if (target != 'aws-ecs-express' or public_flag != 'true'
+                        if (target not in {'auto', 'aws-ecs-express'} or public_flag != 'true'
                                 or not settings.expected_account):
                             raise ValueError('기존 PostgreSQL 경로에는 공개 AWS 대상과 계정 고정이 필요합니다.')
+                        if settings.unavailable_reason():
+                            raise ValueError(settings.unavailable_reason())
                         vpc_id = self.headers.get('X-Postgres-Vpc-Id', '')
                         aws_settings_for_job = postgres_settings_for_application(
                             application_id, vpc_id, settings)
@@ -1226,6 +1228,8 @@ def handler_for(app: App):
                             settings.region, vpc_id, subnet_ids,
                             aws_settings_for_job.service_security_group)
                         postgres_request.validate()
+                        if target == 'auto':
+                            target = 'aws-ecs-express'
                     directory = app.root / job_id
                     directory.mkdir()
                     try:
@@ -1261,6 +1265,12 @@ def handler_for(app: App):
                                 target, infrastructure_profile,
                                 existing_postgres_id=database['database_id']
                                 if postgres_request is not None else None)
+                            if requested_target == 'auto' and postgres_request is not None:
+                                infrastructure_plan['planner'] = 'policy'
+                                infrastructure_plan['rationale'] = (
+                                    '검증된 기존 PostgreSQL RDS 연결에는 AWS ECS Express만 지원됩니다. '
+                                    '앱의 PostgreSQL 근거와 RDS 소유권을 확인해 AWS를 선택했습니다. '
+                                    'DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.')
                         with app.lock:
                             app.ensure_application_available(application_id, target)
                             latest = None
