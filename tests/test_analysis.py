@@ -189,6 +189,32 @@ class AnalysisTests(unittest.TestCase):
             self.assertIn('401', str(raised.exception))
             self.assertNotIn('sensitive', str(raised.exception))
 
+    def test_provider_retries_temporary_rejection_before_analysis(self):
+        failure = urllib.error.HTTPError('https://api.openai.com/v1/responses', 503,
+            'unavailable', {'Retry-After': '0'},
+            io.BytesIO(b'{"error":{"code":"server_is_overloaded"}}'))
+        response = {'status': 'completed', 'output': [{'type': 'message', 'content': [
+            {'type': 'output_text', 'text': json.dumps(self.proposal)}]}]}
+        with patch('onedeploy.analysis.urllib.request.build_opener') as opener, \
+                patch('onedeploy.openai_http.time.sleep') as sleep, \
+                patch('onedeploy.openai_http.random.uniform', return_value=0):
+            opener.return_value.open.side_effect = [failure, io.BytesIO(json.dumps(response).encode())]
+            result = OpenAIAnalyzer(self.settings).propose(self.files)
+        self.assertEqual(result, self.proposal)
+        self.assertEqual(opener.return_value.open.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_provider_does_not_retry_spend_limit(self):
+        failure = urllib.error.HTTPError('https://api.openai.com/v1/responses', 429,
+            'limit', {}, io.BytesIO(b'{"error":{"code":"project_spend_limit_exceeded"}}'))
+        with patch('onedeploy.analysis.urllib.request.build_opener') as opener, \
+                patch('onedeploy.openai_http.time.sleep') as sleep:
+            opener.return_value.open.side_effect = failure
+            with self.assertRaisesRegex(AnalysisError, 'HTTP 429'):
+                OpenAIAnalyzer(self.settings).propose(self.files)
+        opener.return_value.open.assert_called_once()
+        sleep.assert_not_called()
+
     def test_changed_source_is_rejected_before_docker(self):
         plan = analyze(self.project)
         (self.project / 'server.js').write_text('changed')

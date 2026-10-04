@@ -4,12 +4,12 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from onedeploy.analysis import AISettings, AnalysisError, parse_response, redact, source_context
+from onedeploy.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 
 
 SOURCE_EXTENSIONS = {'.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.php', '.java', '.kt', '.cs', '.prisma'}
@@ -277,19 +277,15 @@ class OpenAIInfrastructurePlanner:
         request = urllib.request.Request('https://api.openai.com/v1/responses',
             data=json.dumps(request_body).encode(), headers={
                 'Authorization': 'Bearer ' + self.settings.api_key, 'Content-Type': 'application/json'})
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *args, **kwargs):
-                return None
         try:
-            with urllib.request.build_opener(NoRedirect()).open(request, timeout=60) as response:
-                raw = response.read(1024 * 1024 + 1)
-            if len(raw) > 1024 * 1024:
+            raw = read_response(request)
+            if len(raw) > MAX_RESPONSE_BYTES:
                 raise AnalysisError('AI 인프라 계획 응답 크기 제한을 초과했습니다.')
             body = json.loads(raw)
-        except urllib.error.HTTPError as exc:
-            code = exc.code
-            exc.close()
-            raise AnalysisError(f'AI 인프라 계획 API 오류 HTTP {code}.') from None
+        except OpenAIHTTPFailure as exc:
+            if exc.temporary:
+                raise AnalysisError(f'AI 인프라 계획 API 일시 오류 HTTP {exc.status}. 잠시 후 다시 시도하세요.') from None
+            raise AnalysisError(f'AI 인프라 계획 API 오류 HTTP {exc.status}.') from None
         except AnalysisError:
             raise
         except (OSError, ValueError):

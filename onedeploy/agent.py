@@ -3,59 +3,22 @@ from __future__ import annotations
 
 import difflib
 import json
-import math
-import random
 import re
 import shutil
 import time
-import urllib.error
 import urllib.request
 from dataclasses import asdict
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath
 
 from onedeploy.analysis import AISettings, redact
 from onedeploy.core import SOURCE_FILENAMES, SOURCE_SUFFIXES, LocalDockerAdapter, make_plan, source_digest, validate_environment
 from onedeploy.infrastructure import inspect_infrastructure, validate_infrastructure
 from onedeploy.migrations import collect_sql_migrations
+from onedeploy.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 from onedeploy.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
 
 MAX_AGENT_REQUEST_BYTES = 1024 * 1024
-MAX_AI_RETRY_WAIT = 8
-
-
-def retry_after_seconds(headers):
-    value = headers.get('Retry-After') if headers else None
-    if value is None:
-        return None
-    try:
-        seconds = float(value)
-        if math.isfinite(seconds) and seconds >= 0:
-            return seconds
-    except (TypeError, ValueError):
-        pass
-    try:
-        when = parsedate_to_datetime(value)
-        if when.tzinfo is not None:
-            return max(0, (when - datetime.now(timezone.utc)).total_seconds())
-    except (TypeError, ValueError, OverflowError, IndexError):
-        pass
-    return None
-
-
-def retryable_api_error(status, raw):
-    if status == 500:
-        return True
-    if status not in {429, 503}:
-        return False
-    try:
-        error = json.loads(raw).get('error', {})
-        code = error.get('code') if isinstance(error, dict) else None
-    except (ValueError, AttributeError, TypeError):
-        return False
-    return (status == 429 and code in {'rate_limit_exceeded', 'slow_down'}
-            or status == 503 and code in {'server_is_overloaded', 'slow_down'})
 
 
 def tool(name, description, properties):
@@ -133,34 +96,15 @@ class OpenAIDeployAgent:
         req = urllib.request.Request("https://api.openai.com/v1/responses",
             data=request_body, headers={"Authorization": "Bearer " + self.settings.api_key,
                                                         "Content-Type": "application/json"})
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *args, **kwargs):
-                return None
         try:
-            opener = urllib.request.build_opener(NoRedirect())
-            for attempt in range(2):
-                try:
-                    with opener.open(req, timeout=60) as response:
-                        raw = response.read(1024 * 1024 + 1)
-                    break
-                except urllib.error.HTTPError as exc:
-                    code = exc.code
-                    headers = exc.headers
-                    error_body = exc.read(4097)
-                    exc.close()
-                    temporary = retryable_api_error(code, error_body)
-                    if attempt == 0 and temporary:
-                        minimum = retry_after_seconds(headers)
-                        delay = (1 if minimum is None else minimum) + random.uniform(0, 0.25)
-                        if delay <= MAX_AI_RETRY_WAIT:
-                            time.sleep(delay)
-                            continue
-                    if temporary:
-                        raise AgentError(f"AI API 일시 오류 HTTP {code}. 잠시 후 새 배포를 시도하세요.") from None
-                    raise AgentError(f"AI API 오류 HTTP {code}. 모델 접근 권한과 사용 한도를 확인하세요.") from None
-            if len(raw) > 1024 * 1024:
+            raw = read_response(req)
+            if len(raw) > MAX_RESPONSE_BYTES:
                 raise AgentError("AI 응답 크기 제한을 초과했습니다.")
             body = json.loads(raw)
+        except OpenAIHTTPFailure as exc:
+            if exc.temporary:
+                raise AgentError(f"AI API 일시 오류 HTTP {exc.status}. 잠시 후 새 배포를 시도하세요.") from None
+            raise AgentError(f"AI API 오류 HTTP {exc.status}. 모델 접근 권한과 사용 한도를 확인하세요.") from None
         except AgentError:
             raise
         except (OSError, ValueError):

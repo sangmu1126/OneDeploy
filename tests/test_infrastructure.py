@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -54,6 +55,22 @@ class InfrastructureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '응답 크기 제한'):
                 OpenAIInfrastructurePlanner(AISettings('fixture-key', 'fixture-model')).propose(
                     {'package.json': 'start'}, ['local-docker'], False)
+
+    def test_planner_retries_temporary_rejection_once(self):
+        proposal = {'target': 'local-docker', 'workload': 'stateless-http',
+                    'rationale': '로컬 검증', 'evidence': [{'file': 'package.json', 'quote': 'start'}]}
+        response = {'status': 'completed', 'output': [{'type': 'message', 'content': [
+            {'type': 'output_text', 'text': json.dumps(proposal)}]}]}
+        failure = urllib.error.HTTPError('https://api.openai.com/v1/responses', 500,
+            'server error', {}, io.BytesIO(b'{}'))
+        with patch('onedeploy.infrastructure.urllib.request.build_opener') as opener, \
+                patch('onedeploy.openai_http.time.sleep'), \
+                patch('onedeploy.openai_http.random.uniform', return_value=0):
+            opener.return_value.open.side_effect = [failure, io.BytesIO(json.dumps(response).encode())]
+            result = OpenAIInfrastructurePlanner(AISettings('fixture-key', 'fixture-model')).propose(
+                {'package.json': 'start'}, ['local-docker'], False)
+        self.assertEqual(result, proposal)
+        self.assertEqual(opener.return_value.open.call_count, 2)
 
     def test_ai_plan_requires_real_source_evidence_and_available_target(self):
         files = {'package.json': '{"scripts":{"start":"node server.js"}}'}

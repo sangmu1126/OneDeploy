@@ -250,3 +250,11 @@ AI 요청이므로 같은 요청에서 Docker/AWS 배포를 반복하지 않는�
 안내](https://developers.openai.com/api/docs/guides/error-codes)와 [속도 제한
 안내](https://developers.openai.com/api/docs/guides/rate-limits)를 기준으로 했다.
 고정 HTTP 오류 테스트로 분기를 검증했고 실제 OpenAI 계정의 제한 상황은 재현하지 않았다.
+
+같은 Responses 전송 규칙을 업로드 분석기와 자동 인프라 계획기에도 적용했다.
+세 단계가 공유하는 전송 함수는 공식 API 엔드포인트의 리디렉션을 따르지 않고,
+응답을 최대 1 MiB까지만 읽는다. 서버가 HTTP 오류를 명시적으로 반환한 경우에만
+일시성·대기 시간을 판단해 한 번 재시도한다. 연결 실패나 HTTP 성공 뒤의 잘못된
+JSON은 재전송하지 않는다. 각 단계의 오류 메시지와 계획 결과 검증은 유지했다.
+분석기의 503·지출 한도 429, 계획기의 500 회복을 고정 응답으로 검증했다.
+실제 OpenAI 호출은 여전히 API 키 연결 후 확인해야 한다.

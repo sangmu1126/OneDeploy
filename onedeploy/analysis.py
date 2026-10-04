@@ -4,12 +4,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
 from onedeploy.core import ANALYSIS_SUFFIXES, SOURCE_FILENAMES, DeploymentPlan, analyze, make_plan, read_package
+from onedeploy.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 
 
 SCHEMA = {
@@ -142,20 +142,14 @@ class OpenAIAnalyzer:
             data=json.dumps(payload).encode(),
             headers={"Authorization": "Bearer " + self.settings.api_key, "Content-Type": "application/json"})
         try:
-            # No redirect following: keep the credential on the configured official endpoint.
-            class NoRedirect(urllib.request.HTTPRedirectHandler):
-                def redirect_request(self, *args, **kwargs):
-                    return None
-            opener = urllib.request.build_opener(NoRedirect())
-            with opener.open(req, timeout=60) as response:
-                raw = response.read(1024 * 1024 + 1)
-            if len(raw) > 1024 * 1024:
+            raw = read_response(req)
+            if len(raw) > MAX_RESPONSE_BYTES:
                 raise AnalysisError("AI response exceeded the size limit")
             body = json.loads(raw)
-        except urllib.error.HTTPError as exc:
-            code = exc.code
-            exc.close()
-            raise AnalysisError(f"AI API returned HTTP {code}; check model, access and quota") from None
+        except OpenAIHTTPFailure as exc:
+            if exc.temporary:
+                raise AnalysisError(f"AI API temporary HTTP {exc.status}; retry analysis later") from None
+            raise AnalysisError(f"AI API returned HTTP {exc.status}; check model, access and quota") from None
         except AnalysisError:
             raise
         except (OSError, ValueError):

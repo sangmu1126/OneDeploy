@@ -220,8 +220,8 @@ class AgentTests(unittest.TestCase):
         output = call('read_runtime_logs', {})
         success = io.BytesIO(json.dumps({'status': 'completed', 'output': output}).encode())
         with patch('onedeploy.agent.urllib.request.build_opener') as opener, \
-                patch('onedeploy.agent.time.sleep') as sleep, \
-                patch('onedeploy.agent.random.uniform', return_value=0.1):
+                patch('onedeploy.openai_http.time.sleep') as sleep, \
+                patch('onedeploy.openai_http.random.uniform', return_value=0.1):
             opener.return_value.open.side_effect = [failure, success]
             result = OpenAIDeployAgent(AISettings('fake', 'model')).next(
                 [{'role': 'user', 'content': 'deploy'}])
@@ -238,7 +238,7 @@ class AgentTests(unittest.TestCase):
                     status, 'unavailable', headers,
                     io.BytesIO(json.dumps({'error': {'code': code}}).encode()))
                 with patch('onedeploy.agent.urllib.request.build_opener') as opener, \
-                        patch('onedeploy.agent.time.sleep') as sleep:
+                        patch('onedeploy.openai_http.time.sleep') as sleep:
                     opener.return_value.open.side_effect = failure
                     with self.assertRaisesRegex(AgentError, f'HTTP {status}'):
                         OpenAIDeployAgent(AISettings('fake', 'model')).next(
@@ -250,7 +250,7 @@ class AgentTests(unittest.TestCase):
         failures = [urllib.error.HTTPError('https://api.openai.com/v1/responses',
                     500, 'server error', {}, io.BytesIO(b'{}')) for _ in range(2)]
         with patch('onedeploy.agent.urllib.request.build_opener') as opener, \
-                patch('onedeploy.agent.time.sleep') as sleep:
+                patch('onedeploy.openai_http.time.sleep') as sleep:
             opener.return_value.open.side_effect = failures
             with self.assertRaisesRegex(AgentError, '일시 오류 HTTP 500'):
                 OpenAIDeployAgent(AISettings('fake', 'model')).next(
