@@ -1,6 +1,7 @@
 import io
 import json
 import shutil
+import stat
 import tempfile
 import unittest
 import urllib.error
@@ -54,6 +55,39 @@ class AgentTests(unittest.TestCase):
         self.tools.read_project_files(['server.js'])
         with self.assertRaisesRegex(ValueError, 'exactly once'):
             self.tools.apply_project_patch('server.js', 'not-found', 'new')
+
+    def test_patch_write_failure_preserves_existing_file_and_plan(self):
+        target = self.tools.work / 'server.js'
+        before = target.read_bytes()
+        self.tools.read_project_files(['server.js'])
+        plan = object()
+        self.tools.plan = plan
+        with patch('onedeploy.agent.os.replace', side_effect=OSError('write failed')):
+            with self.assertRaisesRegex(OSError, 'write failed'):
+                self.tools.apply_project_patch('server.js', "'127.0.0.1'", "'0.0.0.0'")
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(self.tools.plan, plan)
+        self.assertEqual(self.tools.read_versions['server.js'], before.decode())
+        self.assertFalse(list(self.tools.work.parent.glob('.onedeploy-patch-*')))
+        self.assertFalse(any(update.get('change') for update in self.updates))
+
+    def test_patch_preserves_executable_mode(self):
+        target = self.tools.work / 'start.sh'
+        target.write_text('#!/bin/sh\necho old\n')
+        target.chmod(0o755)
+        self.tools.read_project_files(['start.sh'])
+        self.tools.apply_project_patch('start.sh', 'old', 'new')
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+        self.assertIn('new', target.read_text())
+
+    def test_patch_rejects_external_oversized_change(self):
+        target = self.tools.work / 'server.js'
+        self.tools.read_project_files(['server.js'])
+        target.write_text('x' * 40001)
+        with self.assertRaisesRegex(ValueError, '40,000 character patch limit'):
+            self.tools.apply_project_patch('server.js', 'x', 'y')
+        self.assertEqual(target.stat().st_size, 40001)
+        self.assertFalse(list(self.tools.work.parent.glob('.onedeploy-patch-*')))
 
     def test_large_source_file_is_not_returned_to_the_agent(self):
         (self.tools.work / 'large.js').write_text('x' * 30000)

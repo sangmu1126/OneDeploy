@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 import shutil
+import stat
+import tempfile
 import time
 import urllib.request
 from dataclasses import asdict
@@ -205,14 +208,19 @@ class DeploymentTools:
         target = self.file_path(path)
         if not isinstance(old_text, str) or not isinstance(new_text, str) or len(new_text) > 20000:
             raise ValueError("Patch must contain bounded text")
-        before = target.read_text() if target.exists() else ""
-        if target.exists():
+        exists = target.exists()
+        if exists:
+            with target.open(encoding='utf-8') as source:
+                before = source.read(40001)
+            if len(before) > 40000:
+                raise ValueError("File exceeds 40,000 character patch limit")
             if self.read_versions.get(path) != before:
                 raise ValueError("Read the current file before patching it")
             if not old_text or before.count(old_text) != 1:
                 raise ValueError("old_text must match exactly once")
             after = before.replace(old_text, new_text, 1)
         else:
+            before = ""
             if old_text:
                 raise ValueError("Use empty old_text only when creating a file")
             after = new_text
@@ -221,7 +229,19 @@ class DeploymentTools:
         if target.suffix == '.json':
             json.loads(after)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(after)
+        temporary = None
+        try:
+            descriptor, temporary = tempfile.mkstemp(prefix='.onedeploy-patch-', dir=self.work.parent)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+                if exists:
+                    os.fchmod(output.fileno(), stat.S_IMODE(target.stat().st_mode))
+                output.write(after)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, target)
+        finally:
+            if temporary is not None and os.path.exists(temporary):
+                os.unlink(temporary)
         self.read_versions.pop(path, None)
         self.plan = None
         diff = self.clean(''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
