@@ -5,7 +5,7 @@
 구체적인 경계와 명령은 [AWS 데이터 경로](aws-database-path.md), 결정 이유와 과거
 검증 기록은 [의사결정 기록](decision-log.md)을 따른다.
 
-2026-10-03 데모 AWS 실행 자원을 [일시 중지](aws-pause-2026-10-03.md)했다. 2026-10-04 Python API, 2026-10-05 Python 내부 어댑터와 제품 API 업데이트 실계정 검증을 위해 `demo-app` RDS를 일시 시작했고 매번 `stopped`까지 재확인했다. 임시 ECS 서비스는 `INACTIVE`, 이미지 태그는 삭제됐고 기존 데이터·스냅샷·스택은 보존했다. [Terraform 구성](../terraform/aws-live/README.md)에 기존 자원 네 개를 import했으며 실제 계정 변경에 Terraform apply는 사용하지 않았다.
+2026-10-03 데모 AWS 실행 자원을 [일시 중지](aws-pause-2026-10-03.md)했다. 2026-10-04 Python API, 2026-10-05 Python 내부 어댑터·제품 API·Chrome 업데이트 실계정 검증을 위해 `demo-app` RDS를 일시 시작했고 매번 `stopped`까지 재확인했다. 임시 ECS 서비스는 `INACTIVE`, 이미지 태그는 삭제됐고 기존 데이터·스냅샷·스택은 보존했다. [Terraform 구성](../terraform/aws-live/README.md)에 기존 자원 네 개를 import했으며 실제 계정 변경에 Terraform apply는 사용하지 않았다.
 
 ## 확인된 경로
 
@@ -44,7 +44,12 @@
   임시 서비스/이미지 종료를 통과했다. 2026-10-05에는 같은 제품 API의 Python
   v1→v2 ZIP 업로드·환경값 재개·동일 서비스/URL 업데이트, 이전 릴리스의
   `superseded` 기록과 DB 행 보존·삭제도 실계정에서 통과했다. 고정 AI 도구
-  응답을 사용했다. Chrome Python 옵션은 실계정 미검증이다.
+  응답을 사용했다. 같은 날 실제 Chrome에서도 v1·v2 Python ZIP 업로드와
+  입력 재개, 이전 릴리스 표시, 동일 서비스·URL의 v2 응답 및 DB 행 보존·삭제를
+  통과했다. 첫 브라우저 시도는 디버그 연결이 끊겼지만 제품의 AWS 업데이트
+  재확인으로 완료된 v2를 복구하고 임시 서비스를 종료했다. 재실행은 전체 드릴과
+  임시 서비스·이미지 정리를 통과했다. 첫 시도의 시험용 DB 행 1건은 ID를 잃어
+  삭제를 확인하지 못했고, 자세한 범위는 실계정 검증 기록에 남겼다.
   새 RDS 생성과 같은 작업에서 Python 소스의 잘못된 `localhost` DB 연결을
   고정 Responses 도구 호출로 수정하고 WSGI 계획·관리형 DB·SQL 마이그레이션을
   배포 어댑터까지 전달하는 흐름도 모의 AWS에서 통과했다. 실제 모델 판단이나

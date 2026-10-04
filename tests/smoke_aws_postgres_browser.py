@@ -23,7 +23,7 @@ from onedeploy.postgres import discover_existing_postgres
 from onedeploy.postgres_snapshot import inspect_snapshot, plan_snapshot
 from onedeploy.server import App, handler_for
 from tests.smoke_aws_postgres_api import PostgresFixture, archive
-from tests.smoke_aws_postgres import probe
+from tests.smoke_aws_postgres import probe, probe_version
 
 CHROME = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
 DRIVER = Path(__file__).with_name('browser_postgres_cdp.mjs')
@@ -43,7 +43,11 @@ def main(argv=None):
     parser.add_argument('--service-security-group', required=True)
     parser.add_argument('--snapshot-name', default='backup-' + datetime.now(timezone.utc).strftime('%Y%m%d'))
     parser.add_argument('--probe-runtime', choices=('node', 'python'), default='node')
+    parser.add_argument('--verify-update', action='store_true',
+                        help='Deploy a changed v2 ZIP through Chrome and verify URL/data preservation')
     args = parser.parse_args(argv)
+    if args.verify_update and not args.apply:
+        parser.error('--verify-update requires --apply')
     if args.application != 'demo-app':
         parser.error('The browser driver currently uses the demo-app fixture only')
     if not re.fullmatch(r'\d{12}', args.account):
@@ -77,7 +81,10 @@ def main(argv=None):
     thread.start()
     url = f'http://127.0.0.1:{server.server_port}/'
     archive_path = state / 'probe.zip'
-    archive_path.write_bytes(archive(args.probe_runtime))
+    archive_path.write_bytes(archive(args.probe_runtime, 'v1' if args.verify_update else None))
+    update_path = state / 'probe-v2.zip'
+    if args.verify_update:
+        update_path.write_bytes(archive(args.probe_runtime, 'v2'))
     profile = state / 'chrome-profile'
     chrome_log = (state / 'chrome.log').open('w')
     chrome = subprocess.Popen([str(CHROME), '--headless=new', '--no-first-run',
@@ -88,6 +95,9 @@ def main(argv=None):
         stdout=chrome_log, stderr=subprocess.STDOUT)
     key = secrets.token_urlsafe(32)
     record_id = uuid.uuid4().hex
+    probe_state = state / 'probe-state.json'
+    probe_state.write_text(json.dumps({'key': key, 'record_id': record_id}))
+    probe_state.chmod(0o600)
     job_id = None
     retired = False
     def api(path, data=None):
@@ -95,6 +105,17 @@ def main(argv=None):
                                          headers={'X-OneDeploy-Token': app.token})
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
+    def browser_upload(path, previous_id=None):
+        subprocess.run(['node', str(DRIVER), url, port, str(path), 'apply',
+                        'browser-read-only', previous_id or ''],
+                       check=True, timeout=40 * 60, env=environment)
+    def validate_job(job):
+        if (job['status'] != 'succeeded' or job.get('attempts') != 1
+                or job.get('result', {}).get('database', {}).get('database_id') != database['database_id']
+                or job.get('result', {}).get('migration', {}).get('cleanup_complete') is not True):
+            raise AssertionError('Browser job did not complete an owned DB deployment')
+        if not api('/api/jobs/' + job['id'] + '/health').get('healthy'):
+            raise AssertionError('Browser deployment health check failed')
     try:
         port_file = profile / 'DevToolsActivePort'
         deadline = time.monotonic() + 30
@@ -104,10 +125,13 @@ def main(argv=None):
             time.sleep(.2)
         port = port_file.read_text().splitlines()[0]
         environment = {**os.environ, 'ONEDEPLOY_BROWSER_PROBE_KEY': key}
-        subprocess.run(['node', str(DRIVER), url, port, str(archive_path),
-                        'apply' if args.apply else 'snapshot-apply' if args.snapshot_apply else 'read-only',
-                        args.snapshot_name if args.snapshot_apply else 'browser-read-only'],
-                       check=True, timeout=40 * 60, env=environment)
+        if args.apply:
+            browser_upload(archive_path)
+        else:
+            subprocess.run(['node', str(DRIVER), url, port, str(archive_path),
+                            'snapshot-apply' if args.snapshot_apply else 'read-only',
+                            args.snapshot_name if args.snapshot_apply else 'browser-read-only'],
+                           check=True, timeout=40 * 60, env=environment)
         if args.browser_read_only:
             if app.jobs:
                 raise AssertionError('Read-only browser check created a deployment job')
@@ -130,25 +154,45 @@ def main(argv=None):
         jobs = list(app.jobs.values())
         if len(jobs) != 1:
             raise AssertionError('Expected one browser deployment job')
-        job = jobs[0]
-        job_id = job['id']
-        if (job['status'] != 'succeeded' or job.get('attempts') != 1
-                or job.get('result', {}).get('database', {}).get('database_id') != database['database_id']
-                or job.get('result', {}).get('migration', {}).get('cleanup_complete') is not True):
-            raise AssertionError('Browser job did not complete an owned DB deployment')
-        if not api('/api/jobs/' + job_id + '/health').get('healthy'):
-            raise AssertionError('Browser deployment health check failed')
-        endpoint = job['result']['url']
+        first = jobs[0]
+        job_id = first['id']
+        validate_job(first)
+        endpoint = first['result']['url']
+        if args.verify_update:
+            probe_version(endpoint, 'v1')
         probe(endpoint, key, record_id, 'POST')
         probe(endpoint, key, record_id, 'GET')
+        if args.verify_update:
+            browser_upload(update_path, first['id'])
+            jobs = list(app.jobs.values())
+            if len(jobs) != 2:
+                raise AssertionError('Expected two browser deployment jobs')
+            second = next(item for item in jobs if item['id'] != first['id'])
+            job_id = second['id']
+            validate_job(second)
+            current = second['result']
+            if (second.get('replaces_job_id') != first['id']
+                    or first.get('deployment_state') != 'superseded'
+                    or current['url'] != endpoint
+                    or current['service_arn'] != first['result']['service_arn']
+                    or current['image'] == first['result']['image']):
+                raise AssertionError('Browser update did not replace the prior ECS release')
+            probe_version(endpoint, 'v2')
+            probe(endpoint, key, record_id, 'GET')
         probe(endpoint, key, record_id, 'DELETE')
         print('PASS: real browser UI -> ECS + RDS -> HTTP write/read/delete', flush=True)
     finally:
         try:
             jobs = list(app.jobs.values())
-            if len(jobs) == 1 and jobs[0].get('status') == 'succeeded' \
-                    and jobs[0].get('deployment_state', 'active') in {'active', 'delete_failed'}:
-                job_id = jobs[0]['id']
+            pending_update = any(item.get('aws_update_submitted') and item.get('status') in {
+                'running', 'failed', 'interrupted'} and not item.get('aws_reconciled')
+                for item in jobs)
+            active = [item for item in jobs if item.get('status') == 'succeeded'
+                      and item.get('deployment_state', 'active') in {'active', 'delete_failed'}]
+            if pending_update:
+                print('AWS update result is uncertain; state retained for reconciliation:', state, flush=True)
+            elif len(active) == 1:
+                job_id = active[0]['id']
                 api('/api/jobs/' + job_id + '/retire', b'')
                 deadline = time.monotonic() + 1200
                 while time.monotonic() < deadline:

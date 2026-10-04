@@ -129,8 +129,8 @@ ECS 연결 환경에 `PGSSLMODE=verify-full`을 넣어 libpq 기반 클라이언
 HTTPS 데이터 쓰기·읽기·삭제까지 통과했다. 2026-10-05에는 내부 AWS 어댑터의
 Python ECS v1→v2 업데이트에서 서로 다른 코드의 HTTP 버전과 데이터 보존도
 실계정으로 확인했다. 같은 날 제품 API의 두 Python ZIP 릴리스도 동일 서비스·URL에서
-서로 다른 HTTP 버전과 DB 행 보존을 확인했다. 실제 OpenAI 모델 판단과
-Chrome Python 옵션은 별도 검증이 필요하다. 앱이 자체 연결
+서로 다른 HTTP 버전과 DB 행 보존을 확인했다. 실제 Chrome의 두 Python ZIP
+배포도 같은 날 통과했다. 실제 OpenAI 모델 판단은 별도 검증이 필요하다. 앱이 자체 연결
 문자열에서 TLS 옵션을 덮어쓰면 별도 소스 검토가 필요하다.
 `PYTHONPATH=. python3 -m tests.smoke_python_postgres_tls`는 로컬 TLS PostgreSQL과
 Python 예제의 v1→v2 이미지·HTTP 데이터 보존 경로를 검증한다. v1이 기록한 행을
