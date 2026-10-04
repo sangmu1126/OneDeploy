@@ -461,6 +461,9 @@ class App:
                 self.save(job_id)
         try:
             job = self.jobs[job_id]
+            if (job.get('source_digest') is not None
+                    and source_digest(Path(job['project'])) != job['source_digest']):
+                raise ValueError('업로드한 앱 소스가 변경됐습니다. 새 배포를 시작하세요.')
             target = job.get("target", "local-docker")
             adapter_factory = LocalDockerAdapter
             if target == "cloud-run":
@@ -651,6 +654,58 @@ class App:
                        '앱 배포 작업을 시작하지 못했습니다: ' + redact(str(exc))[:300])
             return {'id': job_id, 'status': 'interrupted'}
         return {'id': job_id, 'status': 'running'}
+
+    def resume_unstarted_deployment(self, job_id: str) -> dict:
+        """Explicitly restart a job that never reached an AI step or deployment attempt."""
+        def eligible(job):
+            return (job and job.get('mode') == 'agent' and job.get('status') == 'interrupted'
+                    and job.get('target') in {'local-docker', 'cloud-run', 'aws-ecs-express'}
+                    and job.get('attempts') == 0 and job.get('steps') == 0
+                    and job.get('changes') == [] and job.get('plan') is None
+                    and job.get('result') is None and not job.get('cancel_requested')
+                    and not job.get('persistence_failed') and not job.get('aws_update_submitted')
+                    and isinstance(job.get('infrastructure_plan'), dict)
+                    and job['infrastructure_plan'].get('database') is None
+                    and job.get('postgres') is None and job.get('postgres_creation_id') is None
+                    and job.get('prior_result') is None
+                    and isinstance(job.get('source_digest'), str)
+                    and re.fullmatch(r'[a-f0-9]{64}', job['source_digest']))
+
+        if not self.ai_settings.available:
+            raise ValueError('AI 배포를 재개하려면 서버에 OPENAI_API_KEY를 설정하세요.')
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job):
+                raise ValueError('배포 시도 전 상태를 안전하게 재개할 수 없는 작업입니다.')
+            project = Path(job['project'])
+            expected_digest = job['source_digest']
+        work = self.root / job_id / 'work'
+        def unchanged():
+            return (source_digest(project) == expected_digest
+                    and not work.is_symlink()
+                    and (not work.exists() or
+                         (work.is_dir() and source_digest(work) == expected_digest)))
+        if not unchanged():
+            raise ValueError('업로드 또는 작업용 소스가 변경됐습니다. 새 배포를 시작하세요.')
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job) or not unchanged():
+                raise ValueError('배포 작업이나 소스 상태가 변경됐습니다. 이력을 다시 확인하세요.')
+            self.ensure_application_available(job['application_id'], job['target'])
+            if (job['target'] == 'aws-ecs-express' and any(
+                    other is not job and other.get('application_id') == job['application_id']
+                    and other.get('target') == 'aws-ecs-express'
+                    and other.get('status') == 'succeeded'
+                    and other.get('deployment_state', 'active') == 'active'
+                    for other in self.jobs.values())):
+                raise ValueError('같은 앱의 AWS 릴리스가 활성 상태입니다. 이전 작업을 재개할 수 없습니다.')
+            job['status'] = 'running'
+            job['events'].append({'time': datetime.now(timezone.utc).isoformat(),
+                                  'stage': 'manual_resume',
+                                  'message': '배포 시도 전 중단된 작업을 다시 시작했습니다.'})
+            self.save(job_id)
+        started = self.start_job_worker(job_id, self.run_agent)
+        return {'id': job_id, 'status': 'running' if started else 'interrupted'}
 
     def run(self, job_id, environment=None):
         environment = {} if environment is None else environment
@@ -1555,8 +1610,7 @@ def handler_for(app: App):
                                 "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
                                 "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
                                 "events": []}
-                            if create_plan_id is not None:
-                                app.jobs[job_id]['source_digest'] = source_digest(project)
+                            app.jobs[job_id]['source_digest'] = source_digest(project)
                             if target == "cloud-run":
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
                             elif target == "aws-ecs-express":
@@ -1644,6 +1698,12 @@ def handler_for(app: App):
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('DB 생성 후 앱 배포 재개에는 본문이 없어야 합니다.')
                     self.json_response(202, app.resume_postgres_deployment(job_id))
+                    return
+                if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/resume-unstarted", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('배포 시도 전 작업 재개에는 본문이 없어야 합니다.')
+                    self.json_response(202, app.resume_unstarted_deployment(job_id))
                     return
                 if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/cancel", self.path):
                     job_id = self.path.split('/')[3]

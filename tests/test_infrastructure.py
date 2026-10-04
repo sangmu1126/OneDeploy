@@ -294,6 +294,55 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(stored['status'], 'interrupted')
             self.assertEqual(stored['attempts'], 0)
             self.assertTrue(any(event['stage'] == 'interrupted' for event in stored['events']))
+            self.assertEqual(len(stored['source_digest']), 64)
+            restored = App(root, AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            source = Path(stored['project']) / 'server.js'
+            original = source.read_text()
+            source.write_text('changed after upload')
+            with patch('onedeploy.server.threading.Thread.start') as worker:
+                with self.assertRaisesRegex(ValueError, '소스가 변경'):
+                    restored.resume_unstarted_deployment(payload['id'])
+                worker.assert_not_called()
+                source.write_text(original)
+                self.assertEqual(restored.resume_unstarted_deployment(payload['id']),
+                                 {'id': payload['id'], 'status': 'running'})
+                worker.assert_called_once()
+            self.assertEqual(json.loads((root / payload['id'] / 'job.json').read_text())['status'], 'running')
+            with self.assertRaisesRegex(ValueError, '안전하게 재개'):
+                restored.resume_unstarted_deployment(payload['id'])
+            restored.jobs[payload['id']].update(status='interrupted', steps=1)
+            restored.save(payload['id'])
+            with patch('onedeploy.server.threading.Thread.start') as worker:
+                with self.assertRaisesRegex(ValueError, '안전하게 재개'):
+                    restored.resume_unstarted_deployment(payload['id'])
+                worker.assert_not_called()
+
+    def test_unstarted_resume_route_requires_session_and_empty_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            job_id = 'a' * 16
+            handler = handler_for(app).__new__(handler_for(app))
+            handler.path = f'/api/deployments/{job_id}/resume-unstarted'
+            handler.headers = {'Content-Length': '0'}
+            handler.rfile = io.BytesIO()
+            handler.json_response = Mock()
+            with patch.object(app, 'resume_unstarted_deployment',
+                              return_value={'id': job_id, 'status': 'running'}) as resume:
+                handler.do_POST()
+                self.assertEqual(handler.json_response.call_args.args[0], 403)
+                resume.assert_not_called()
+                handler.headers['X-OneDeploy-Token'] = app.token
+                handler.headers['Content-Length'] = '1'
+                handler.json_response.reset_mock()
+                handler.do_POST()
+                self.assertEqual(handler.json_response.call_args.args[0], 400)
+                resume.assert_not_called()
+                handler.headers['Content-Length'] = '0'
+                handler.json_response.reset_mock()
+                handler.do_POST()
+                handler.json_response.assert_called_once_with(
+                    202, {'id': job_id, 'status': 'running'})
+                resume.assert_called_once_with(job_id)
 
     def test_analyze_failure_removes_uncommitted_upload(self):
         archive = io.BytesIO()

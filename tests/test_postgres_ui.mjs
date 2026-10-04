@@ -44,6 +44,27 @@ test('interrupted local deployment shows cleanup only for recorded attempts', as
   assert.equal(element('retire').hidden, true);
   context.show({...job, target: 'aws-ecs-express'});
   assert.equal(element('retire').hidden, true);
+  context.show({...job, attempts: 0, steps: 0, changes: [],
+    infrastructure_plan: {target: 'local-docker', planner: 'user', rationale: 'test', resources: []},
+    source_digest: 'a'.repeat(64)});
+  assert.equal(element('resumeUnstarted').hidden, false);
+  context.show({...job, attempts: 0, steps: 1, changes: [],
+    infrastructure_plan: {target: 'local-docker', planner: 'user', rationale: 'test', resources: []},
+    source_digest: 'a'.repeat(64)});
+  assert.equal(element('resumeUnstarted').hidden, true);
+  const requests = [];
+  context.fetch = async path => {
+    requests.push(path);
+    const body = path.endsWith('/resume-unstarted') ? {id: job.id, status: 'running'}
+      : path === '/api/jobs/' + job.id ? {...job, status: 'waiting_input', attempts: 0, events: []}
+      : [];
+    return {ok: true, json: async () => body};
+  };
+  context.show({...job, attempts: 0, steps: 0, changes: [],
+    infrastructure_plan: {target: 'local-docker', planner: 'user', rationale: 'test', resources: []},
+    source_digest: 'a'.repeat(64)});
+  await element('resumeUnstarted').onclick();
+  assert.ok(requests.includes('/api/deployments/' + job.id + '/resume-unstarted'));
 });
 const start = html.indexOf('function postgresUploadHeaders(application)');
 const end = html.indexOf("el('deploy').onclick=", start);
