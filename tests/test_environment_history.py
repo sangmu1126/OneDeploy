@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from onedeploy.analysis import AISettings
-from onedeploy.core import LocalDockerAdapter, analyze, validate_environment
+from onedeploy.core import LocalDockerAdapter, analyze, source_digest, validate_environment
 from onedeploy.server import App, StateDirectoryLock, handler_for
 
 
@@ -41,6 +41,10 @@ class EnvironmentHistoryTests(unittest.TestCase):
         adapter = LocalDockerAdapter(lambda stage, message: events.append(message))
         temp_paths = []
         def command(args, timeout=300):
+            if args[1] == 'build':
+                context = Path(args[-1])
+                self.assertFalse(context.is_relative_to(self.project))
+                self.assertNotIn(self.secret, (context / 'Dockerfile').read_text())
             if args[1] == 'run':
                 path = Path(args[args.index('--env-file') + 1])
                 temp_paths.append(path)
@@ -58,7 +62,8 @@ class EnvironmentHistoryTests(unittest.TestCase):
         self.assertFalse(temp_paths[0].exists())
         self.assertNotIn(self.secret, '\n'.join(events))
         self.assertIn('[REDACTED]', '\n'.join(events))
-        self.assertNotIn(self.secret, (self.project / 'Dockerfile').read_text())
+        self.assertFalse((self.project / 'Dockerfile').exists())
+        self.assertEqual(source_digest(self.project), self.plan.source_digest)
 
     def test_worker_clears_values_and_masks_exceptions(self):
         app = App(self.root, AISettings())

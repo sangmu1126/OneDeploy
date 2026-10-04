@@ -24,6 +24,9 @@
   Python DB 접속 성공을 뜻하지 않는다.
   배포 완료 확인은 이번 런타임이 요청한 TLS 프로필과 ECS의 실제 설정을 대조하며,
   Python 요청이 기존 Node 프로필로 바뀐 경우 성공 처리하지 않는다.
+  공통 이미지 빌더는 검증한 소스를 임시 빌드 폴더에 복사해 Dockerfile·CA·
+  `.dockerignore`를 넣고, 원본 작업용 소스와 체크섬을 보존한다. 로컬 Docker의
+  Python WSGI·기존 Dockerfile 앱 배포와 PostgreSQL v1→v2 데이터 드릴로 확인했다.
   Python PostgreSQL 예제는 임시 로컬 TLS DB에서 서로 다른 v1·v2 이미지를
   빌드해 `verify-full` 연결·v1 쓰기·v2 읽기/삭제를 통과했다. 잘못된 호스트 이름과
   CA는 v2에서 실제 libpq 오류로 거부됐고 시험 Docker 자원 정리도 확인했다.

@@ -389,28 +389,33 @@ class ImageBuilder:
         if plan.dockerfile_source == "existing":
             if (project / "Dockerfile").read_text() != plan.dockerfile:
                 raise ValueError("Existing Dockerfile changed after analysis")
-        else:
-            (project / "Dockerfile").write_text(plan.dockerfile)
-        if extra_ca_bundle is not None:
-            ca_name = '.onedeploy-rds-ca.pem'
-            shutil.copyfile(extra_ca_bundle, project / ca_name)
-            dockerfile = project / 'Dockerfile'
-            content = dockerfile.read_text()
-            directive = (f'\nCOPY .onedeploy-rds-ca.pem {RDS_CA_CONTAINER_PATH}\n'
-                         f'ENV NODE_EXTRA_CA_CERTS={RDS_CA_CONTAINER_PATH}\n')
-            if plan.runtime in {'python', 'python-asgi', 'python-wsgi'}:
-                directive += f'ENV PGSSLROOTCERT={RDS_CA_CONTAINER_PATH}\n'
-            if directive not in content:
-                dockerfile.write_text(content.rstrip('\n') + directive)
-        ignore = project / ".dockerignore"
-        current_ignore = ignore.read_text() if ignore.exists() else ""
-        ignore.write_text(current_ignore.rstrip("\n") + "\n.git\nnode_modules\n.venv\nvenv\n__pycache__\n.env\n.env.*\n"
-                          + ("!.onedeploy-rds-ca.pem\n" if extra_ca_bundle is not None else ""))
-        self.event("building", "Building application image")
-        args = ["docker", "build", "--label", "app=onedeploy"]
-        if platform:
-            args += ["--platform", platform]
-        self.command(args + ["-t", image, str(project)])
+        with tempfile.TemporaryDirectory(prefix='onedeploy-build-') as temporary:
+            context = Path(temporary) / 'app'
+            shutil.copytree(project, context, symlinks=True)
+            if source_digest(context) != plan.source_digest:
+                raise ValueError("Source changed while preparing image; upload and analyze again")
+            if plan.dockerfile_source != "existing":
+                (context / "Dockerfile").write_text(plan.dockerfile)
+            if extra_ca_bundle is not None:
+                ca_name = '.onedeploy-rds-ca.pem'
+                shutil.copyfile(extra_ca_bundle, context / ca_name)
+                dockerfile = context / 'Dockerfile'
+                content = dockerfile.read_text()
+                directive = (f'\nCOPY .onedeploy-rds-ca.pem {RDS_CA_CONTAINER_PATH}\n'
+                             f'ENV NODE_EXTRA_CA_CERTS={RDS_CA_CONTAINER_PATH}\n')
+                if plan.runtime in {'python', 'python-asgi', 'python-wsgi'}:
+                    directive += f'ENV PGSSLROOTCERT={RDS_CA_CONTAINER_PATH}\n'
+                if directive not in content:
+                    dockerfile.write_text(content.rstrip('\n') + directive)
+            ignore = context / ".dockerignore"
+            current_ignore = ignore.read_text() if ignore.exists() else ""
+            ignore.write_text(current_ignore.rstrip("\n") + "\n.git\nnode_modules\n.venv\nvenv\n__pycache__\n.env\n.env.*\n"
+                              + ("!.onedeploy-rds-ca.pem\n" if extra_ca_bundle is not None else ""))
+            self.event("building", "Building application image")
+            args = ["docker", "build", "--label", "app=onedeploy"]
+            if platform:
+                args += ["--platform", platform]
+            self.command(args + ["-t", image, str(context)])
         return image
 
 

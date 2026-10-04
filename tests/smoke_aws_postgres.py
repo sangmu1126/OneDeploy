@@ -95,8 +95,7 @@ def main(argv=None):
                 raise AssertionError('First ECS release did not complete the checked migration')
             probe(first_result['url'], key, record_id, 'POST')
             probe(first_result['url'], key, record_id, 'GET')
-            # ImageBuilder writes generated build files into its input. A fresh copy
-            # keeps v2 on the same runtime and TLS profile as the original sample.
+            # Keep each release input immutable and re-check its runtime/TLS profile.
             plan = replace(analyze(second_project), target='aws-ecs-express', health_path='/health',
                            required_env=['PROBE_KEY'])
             if plan.runtime != expected_runtime:

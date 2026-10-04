@@ -96,26 +96,46 @@ class CoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'start_script=dockerfile'):
                 make_plan(root, 'start', None)
             commands = []
-            ImageBuilder(lambda args: commands.append(args), lambda *_: None).build(root, plan, "test:latest")
+            def inspect(args):
+                context = Path(args[-1])
+                commands.append((args, (context / 'Dockerfile').read_text(),
+                                 (context / '.dockerignore').read_text()))
+            ImageBuilder(inspect, lambda *_: None).build(root, plan, "test:latest")
             self.assertEqual((root / "Dockerfile").read_text(), dockerfile)
-            self.assertIn('coverage\n', (root / '.dockerignore').read_text())
-            self.assertIn('.env.*\n', (root / '.dockerignore').read_text())
-            self.assertEqual(commands[0][-3:], ['-t', 'test:latest', str(root)])
+            self.assertEqual((root / '.dockerignore').read_text(), 'coverage\n')
+            self.assertEqual(commands[0][1], dockerfile)
+            self.assertIn('coverage\n', commands[0][2])
+            self.assertIn('.env.*\n', commands[0][2])
+            self.assertEqual(commands[0][0][-3:-1], ['-t', 'test:latest'])
+            self.assertNotEqual(commands[0][0][-1], str(root))
+            self.assertFalse(Path(commands[0][0][-1]).exists())
+            self.assertEqual(source_digest(root), plan.source_digest)
 
     def test_postgres_build_adds_verified_ca_to_existing_dockerfile_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'Dockerfile').write_text('FROM node:22-alpine\nCMD ["node", "app.js"]\n')
             (root / '.dockerignore').write_text('*.pem\n')
-            builder = ImageBuilder(lambda *_: None, lambda *_: None)
+            contexts = []
+            def inspect(args):
+                context = Path(args[-1])
+                contexts.append(((context / 'Dockerfile').read_text(),
+                                 (context / '.onedeploy-rds-ca.pem').read_bytes(),
+                                 (context / '.dockerignore').read_text()))
+            builder = ImageBuilder(inspect, lambda *_: None)
             bundle = trusted_rds_ca_bundle()
-            builder.build(root, analyze(root), 'db:test', extra_ca_bundle=bundle)
-            dockerfile = (root / 'Dockerfile').read_text()
-            self.assertIn('NODE_EXTRA_CA_CERTS=/app/.onedeploy-rds-ca.pem', dockerfile)
-            self.assertEqual((root / '.onedeploy-rds-ca.pem').read_bytes(), bundle.read_bytes())
-            self.assertIn('!.onedeploy-rds-ca.pem', (root / '.dockerignore').read_text())
-            builder.build(root, analyze(root), 'db:second', extra_ca_bundle=bundle)
-            self.assertEqual((root / 'Dockerfile').read_text(), dockerfile)
+            plan = analyze(root)
+            builder.build(root, plan, 'db:test', extra_ca_bundle=bundle)
+            builder.build(root, plan, 'db:second', extra_ca_bundle=bundle)
+            self.assertEqual(contexts[0], contexts[1])
+            self.assertIn('NODE_EXTRA_CA_CERTS=/app/.onedeploy-rds-ca.pem', contexts[0][0])
+            self.assertEqual(contexts[0][1], bundle.read_bytes())
+            self.assertIn('!.onedeploy-rds-ca.pem', contexts[0][2])
+            self.assertEqual((root / 'Dockerfile').read_text(),
+                             'FROM node:22-alpine\nCMD ["node", "app.js"]\n')
+            self.assertEqual((root / '.dockerignore').read_text(), '*.pem\n')
+            self.assertFalse((root / '.onedeploy-rds-ca.pem').exists())
+            self.assertEqual(source_digest(root), plan.source_digest)
 
     def test_generated_python_postgres_image_sets_libpq_ca_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,11 +143,39 @@ class CoreTests(unittest.TestCase):
             (root / 'app.py').write_text('print("hello")\n')
             plan = analyze(root)
             bundle = trusted_rds_ca_bundle()
-            ImageBuilder(lambda *_: None, lambda *_: None).build(
-                root, plan, 'db:python', extra_ca_bundle=bundle)
-            dockerfile = (root / 'Dockerfile').read_text()
-            self.assertIn('ENV PGSSLROOTCERT=/app/.onedeploy-rds-ca.pem', dockerfile)
-            self.assertEqual((root / '.onedeploy-rds-ca.pem').read_bytes(), bundle.read_bytes())
+            contexts = []
+            def inspect(args):
+                context = Path(args[-1])
+                contexts.append(((context / 'Dockerfile').read_text(),
+                                 (context / '.onedeploy-rds-ca.pem').read_bytes()))
+            builder = ImageBuilder(inspect, lambda *_: None)
+            builder.build(root, plan, 'db:python', extra_ca_bundle=bundle)
+            builder.build(root, plan, 'db:second', extra_ca_bundle=bundle)
+            self.assertEqual(contexts[0], contexts[1])
+            self.assertIn('ENV PGSSLROOTCERT=/app/.onedeploy-rds-ca.pem', contexts[0][0])
+            self.assertEqual(contexts[0][1], bundle.read_bytes())
+            self.assertFalse((root / 'Dockerfile').exists())
+            self.assertFalse((root / '.onedeploy-rds-ca.pem').exists())
+            self.assertFalse((root / '.dockerignore').exists())
+            self.assertEqual(analyze(root).runtime, 'python')
+            self.assertEqual(source_digest(root), plan.source_digest)
+
+    def test_failed_build_leaves_generated_python_source_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'app.py').write_text('print("hello")\n')
+            plan = analyze(root)
+            contexts = []
+            def fail_build(args):
+                contexts.append(Path(args[-1]))
+                self.assertTrue((contexts[-1] / 'Dockerfile').is_file())
+                raise RuntimeError('docker build failed')
+            with self.assertRaisesRegex(RuntimeError, 'docker build failed'):
+                ImageBuilder(fail_build, lambda *_: None).build(root, plan, 'failed:python')
+            self.assertFalse(contexts[0].exists())
+            self.assertFalse((root / 'Dockerfile').exists())
+            self.assertFalse((root / '.dockerignore').exists())
+            self.assertEqual(source_digest(root), plan.source_digest)
 
     def test_dockerfile_only_archive_is_valid_project(self):
         with tempfile.TemporaryDirectory() as tmp:
