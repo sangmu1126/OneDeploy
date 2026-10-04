@@ -291,3 +291,12 @@ AI 패치 도구의 응답에서 전체 diff를 제거했다. 변경 이력의 d
 CI의 모의 배포 테스트와 `smoke_agent.py --wire-fixture --compact-fixture`의 실제 로컬
 Docker 빌드·HTTP 응답·종료 정리가 통과했다. 압축 결과 자체는 고정 응답이므로
 실제 OpenAI 서비스의 판단 품질 검증으로 해석하지 않는다.
+
+Dockerfile이 없는 실행형 Python 앱 경로를 추가했다. 루트의 `server.py` 또는
+`app.py` 중 존재하는 파일 이름만 실행 항목으로 허용하고, `build_script`와 임의
+명령은 거부한다. 기존 Dockerfile·Node `package.json` 경로를 우선한다. 생성
+이미지는 Python 3.13, 선택적 `requirements.txt` 설치, 일반 사용자 실행,
+설정된 `PORT`와 HTTP 확인을 사용한다. AI 안내도 Python 파일을 읽고 원본 대신
+작업용 복사본의 바인딩·포트를 수정하도록 확장했다. 업로드 식별·계획 경계와
+고정 Responses 전송의 로컬 Docker 배포·종료를 검증했다. 외부 의존성이 있는
+다양한 Python 프레임워크와 실제 모델 판단은 아직 검증하지 않았다.

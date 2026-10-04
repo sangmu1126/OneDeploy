@@ -11,7 +11,8 @@ from onedeploy.agent import COMPACT_AGENT_REQUEST_BYTES
 
 class ResponsesWireFixture:
     def __init__(self, actions=None, *, expected_target='local-docker', planner_requests=1,
-                 managed_postgres=False, expected_model='wire-fixture-model', compact_after_first=False):
+                 managed_postgres=False, expected_model='wire-fixture-model', compact_after_first=False,
+                 python_generated=False):
         self.local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.lock = threading.Lock()
         self.planner_requests = 0
@@ -22,7 +23,16 @@ class ResponsesWireFixture:
         self.expected_planner_requests = planner_requests
         self.managed_postgres = managed_postgres
         self.expected_model = expected_model
-        self.actions = actions if actions is not None else [
+        self.python_generated = python_generated
+        default_actions = ([
+            ('read_project_files', {'paths': ['server.py']}),
+            ('apply_project_patch', {'path': 'server.py',
+                'old_text': 'HTTPServer(("127.0.0.1", 4321), Handler)',
+                'new_text': 'HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler)'}),
+            ('configure_deployment', {'start_script': 'server.py', 'build_script': None,
+                                      'port': 4321, 'health_path': '/', 'required_env': []}),
+            ('deploy_application', {}),
+        ] if python_generated else [
             ('read_project_files', {'paths': ['package.json', 'server.js']}),
             ('apply_project_patch', {'path': 'package.json', 'old_text': '"scripts": {}',
                                      'new_text': '"scripts": {"start": "node server.js"}'}),
@@ -32,7 +42,8 @@ class ResponsesWireFixture:
             ('configure_deployment', {'start_script': 'start', 'build_script': None,
                                       'port': 4321, 'health_path': '/', 'required_env': []}),
             ('deploy_application', {}),
-        ]
+        ])
+        self.actions = actions if actions is not None else default_actions
 
     def open(self, request, timeout=None):
         url = request.full_url if isinstance(request, urllib.request.Request) else str(request)
@@ -69,11 +80,16 @@ class ResponsesWireFixture:
         assert payload['text']['format']['strict'] is True
         context = json.loads(payload['input'])
         assert 'local-docker' in context['available_targets']
-        assert '"scripts": {}' in context['files']['package.json']
+        if self.python_generated:
+            assert 'HTTPServer' in context['files']['server.py']
+            evidence = {'file': 'server.py', 'quote': 'HTTPServer'}
+        else:
+            assert '"scripts": {}' in context['files']['package.json']
+            evidence = {'file': 'package.json', 'quote': '"scripts": {}'}
         self.planner_requests += 1
         proposal = {'target': 'local-docker', 'workload': 'stateless-http',
                     'rationale': '로컬 Docker 배포 경로를 검증합니다.',
-                    'evidence': [{'file': 'package.json', 'quote': '"scripts": {}'}]}
+                    'evidence': [evidence]}
         return {'status': 'completed', 'output': [{'type': 'message', 'status': 'completed',
                 'content': [{'type': 'output_text', 'text': json.dumps(proposal)}]}]}
 

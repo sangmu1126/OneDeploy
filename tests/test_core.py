@@ -132,6 +132,37 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(plan.framework, 'container')
             self.assertEqual(plan.dockerfile_source, 'existing')
 
+    def test_python_entrypoint_archive_gets_safe_generated_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with zipfile.ZipFile(root / 'app.zip', 'w') as bundle:
+                bundle.writestr('app/server.py', 'from http.server import HTTPServer\n')
+                bundle.writestr('app/requirements.txt', 'flask==3.1.0\n')
+            project = extract_project(root / 'app.zip', root / 'out')
+            self.assertEqual(project, root / 'out' / 'app')
+            plan = make_plan(project, 'server.py', None, 4321)
+            self.assertEqual(plan.runtime, 'python')
+            self.assertEqual(plan.start_command, 'python server.py')
+            self.assertIn('RUN pip install --no-cache-dir -r requirements.txt', plan.dockerfile)
+            self.assertIn('USER app', plan.dockerfile)
+            self.assertIn('CMD ["python", "server.py"]', plan.dockerfile)
+            self.assertEqual(analyze(project).runtime, 'python')
+            with self.assertRaisesRegex(ValueError, 'Python app requires'):
+                make_plan(project, '../server.py', None)
+            with self.assertRaisesRegex(ValueError, 'build_script=null'):
+                make_plan(project, 'server.py', 'build')
+
+    def test_python_requirements_limit_and_missing_entrypoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'app.py').write_text('print("hello")')
+            self.assertEqual(make_plan(root, 'app.py', None).runtime, 'python')
+            with self.assertRaisesRegex(ValueError, 'Python app requires'):
+                make_plan(root, 'server.py', None)
+            (root / 'requirements.txt').write_text('x' * (1024 * 1024 + 1))
+            with self.assertRaisesRegex(ValueError, '1 MiB'):
+                make_plan(root, 'app.py', None)
+
     def test_failed_readiness_cleans_container(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

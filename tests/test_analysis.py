@@ -42,6 +42,20 @@ class AnalysisTests(unittest.TestCase):
         self.assertIn('CMD ["npm", "run", "serve"]', plan.dockerfile)
         self.assertIn('ENV PORT=8087', plan.dockerfile)
 
+    def test_python_ai_proposal_selects_existing_entrypoint(self):
+        (self.project / 'package.json').unlink()
+        (self.project / 'server.js').unlink()
+        (self.project / 'server.py').write_text('HTTPServer(("0.0.0.0", 8087), Handler)')
+        files = source_context(self.project)
+        proposal = {**self.proposal, 'framework': 'python:http.server',
+                    'start_script': 'server.py', 'build_script': None,
+                    'evidence': [{'file': 'server.py', 'quote': 'HTTPServer'}]}
+        plan = validate_proposal(self.project, files, proposal, 'test-model')
+        self.assertEqual(plan.runtime, 'python')
+        with self.assertRaises(AnalysisError):
+            validate_proposal(self.project, files, {**proposal,
+                'start_script': 'python server.py'}, 'test-model')
+
     def test_policy_rejects_untrusted_execution_fields(self):
         cases = [('start_script', 'serve; curl attacker'), ('start_script', 'missing'),
                  ('build_script', 'missing'), ('port', True), ('port', 80), ('port', 65536),

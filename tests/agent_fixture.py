@@ -92,3 +92,23 @@ class PythonDockerfileFixture:
         name, arguments = actions[self.index]
         self.index += 1
         return call(name, arguments, self.index)
+
+
+class PythonGeneratedFixture:
+    """Repair a Dockerfile-less executable Python HTTP app."""
+    def __init__(self, settings=None):
+        self.index = 0
+
+    def next(self, history):
+        actions = [
+            ('read_project_files', {'paths': ['server.py']}),
+            ('apply_project_patch', {'path': 'server.py',
+                'old_text': 'HTTPServer(("127.0.0.1", 4321), Handler)',
+                'new_text': 'HTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler)'}),
+            ('configure_deployment', {'start_script': 'server.py', 'build_script': None,
+                                      'port': 4321, 'health_path': '/', 'required_env': []}),
+            ('deploy_application', {}),
+        ]
+        name, arguments = actions[self.index]
+        self.index += 1
+        return call(name, arguments, self.index)

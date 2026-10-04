@@ -14,7 +14,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_fixture import EnvironmentFixture, PauseAfterRepairFixture, PythonDockerfileFixture, RepairFixture
+from agent_fixture import EnvironmentFixture, PauseAfterRepairFixture, PythonDockerfileFixture, PythonGeneratedFixture, RepairFixture
 from openai_wire_fixture import ResponsesWireFixture
 from onedeploy.agent import OpenAIDeployAgent
 from onedeploy.analysis import AISettings
@@ -63,6 +63,8 @@ def main():
     parser.add_argument('--restart-before-resume', action='store_true',
                         help='Repair, pause for environment, restart server, then deploy')
     parser.add_argument('--python', action='store_true', help='Use a scripted fixture for a Python Dockerfile app')
+    parser.add_argument('--python-generated', action='store_true',
+                        help='Repair and deploy a Python app without an uploaded Dockerfile')
     parser.add_argument('--folder', action='store_true', help='Upload a browser-style folder instead of a ZIP')
     parser.add_argument('--auto', action='store_true', help='Exercise infrastructure target planning')
     parser.add_argument('--interrupted-retire', action='store_true',
@@ -74,8 +76,11 @@ def main():
     parser.add_argument('--resume-unstarted', action='store_true',
                         help='Interrupt worker startup, restart the server, then resume the same upload')
     args = parser.parse_args()
-    if args.python and (args.live or args.environment):
+    if args.python and (args.live or args.environment or args.python_generated):
         parser.error('--python cannot be combined with --live or --environment')
+    if args.python_generated and (args.live or args.environment or args.folder or args.auto
+                                  or args.interrupted_retire or args.resume_unstarted):
+        parser.error('--python-generated uses the scripted local Python deployment only')
     if args.restart_before_resume and (not args.environment or args.live or args.python or args.folder
                                        or args.auto or args.interrupted_retire or args.wire_fixture):
         parser.error('--restart-before-resume requires --environment with the scripted Node fixture')
@@ -85,7 +90,7 @@ def main():
         parser.error('--interrupted-retire uses the default scripted Node deployment only')
     if args.wire_fixture and (args.live or args.environment or args.python or args.folder
                               or args.auto or args.interrupted_retire):
-        parser.error('--wire-fixture uses the default Node app and local automatic target only')
+        parser.error('--wire-fixture uses a Node or generated Python app with local automatic target only')
     if args.resume_unstarted and not args.wire_fixture:
         parser.error('--resume-unstarted requires --wire-fixture')
     if args.compact_fixture and (not args.wire_fixture or args.resume_unstarted):
@@ -95,11 +100,13 @@ def main():
                 AISettings('test-fixture', 'fixture-model'))
     if args.live and not settings.available:
         raise RuntimeError('Set OPENAI_API_KEY for live testing')
-    wire = ResponsesWireFixture(compact_after_first=args.compact_fixture) if args.wire_fixture else None
+    wire = ResponsesWireFixture(compact_after_first=args.compact_fixture,
+                               python_generated=args.python_generated) if args.wire_fixture else None
     with tempfile.TemporaryDirectory(prefix='onedeploy-agent-smoke-') as directory, \
             (patch('urllib.request.build_opener', return_value=wire) if wire else nullcontext()):
         app = App(Path(directory), settings, OpenAIDeployAgent if args.live or wire else
-                  (PythonDockerfileFixture if args.python else
+                  (PythonGeneratedFixture if args.python_generated else
+                   PythonDockerfileFixture if args.python else
                    PauseAfterRepairFixture if args.restart_before_resume else
                    EnvironmentFixture if args.environment else RepairFixture),
                   infrastructure_planner_factory=InfrastructureFixture if args.auto and not args.live else OpenAIInfrastructurePlanner)
@@ -119,7 +126,9 @@ def main():
                 return json.load(response)
         try:
             files = []
-            if args.python:
+            if args.python_generated:
+                files.append(('server.py', Path('examples/unready-python/server.py').read_bytes()))
+            elif args.python:
                 files.append(('Dockerfile', b'FROM python:3.13-alpine\nWORKDIR /app\nCOPY server.py ./\nCMD ["python", "server.py"]\n'))
                 files.append(('server.py', b"from http.server import BaseHTTPRequestHandler, HTTPServer\nimport os\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200)\n        self.send_header('Content-Type', 'application/json')\n        self.end_headers()\n        self.wfile.write(b'{\"message\":\"Python app is running\"}')\nHTTPServer(('127.0.0.1', int(os.environ['PORT'])), Handler).serve_forever()\n"))
             else:
@@ -196,9 +205,17 @@ def main():
                 assert job['target'] == 'local-docker'
                 assert job['infrastructure_plan']['planner'] == 'openai'
             with opener.open(job['result']['url'], timeout=5) as response:
-                assert json.load(response)['message'] == ('Python app is running' if args.python else 'Original application is running')
+                expected_message = ('Original Python application is running' if args.python_generated else
+                                    'Python app is running' if args.python else 'Original application is running')
+                assert json.load(response)['message'] == expected_message
             original = Path(job['project'])
-            if args.python:
+            if args.python_generated:
+                assert job['plan']['runtime'] == 'python'
+                assert not (original / 'Dockerfile').exists()
+                assert '127.0.0.1' in (original / 'server.py').read_text()
+                assert '0.0.0.0' in (app.root / job_id / 'work' / 'server.py').read_text()
+                assert any(change['path'] == 'server.py' for change in job['changes'])
+            elif args.python:
                 assert not (original / 'package.json').exists()
                 assert "'127.0.0.1'" in (original / 'server.py').read_text()
                 assert (original / 'Dockerfile').exists()
@@ -207,8 +224,8 @@ def main():
                 verify_node_repair(job)
             assert 'synthetic-agent-runtime-value' not in json.dumps(job)
             if not args.live and not args.python and not wire:
-                assert job['attempts'] == (1 if args.restart_before_resume else 2)
-                if not args.restart_before_resume:
+                assert job['attempts'] == (1 if args.restart_before_resume or args.python_generated else 2)
+                if not args.restart_before_resume and not args.python_generated:
                     assert any(e['stage'] == 'attempt_failed' for e in job['events'])
                     containers = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{.Names}}'], text=True)
                     assert f'onedeploy-{job_id}-a1' not in containers.splitlines()

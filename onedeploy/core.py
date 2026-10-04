@@ -127,12 +127,13 @@ def extract_project(archive: Path, destination: Path) -> Path:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with bundle.open(item) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
-    if (destination / "package.json").is_file() or (destination / "Dockerfile").is_file():
+    entrypoints = ("package.json", "Dockerfile", "server.py", "app.py")
+    if any((destination / name).is_file() for name in entrypoints):
         return destination
-    candidates = {path.parent for name in ("package.json", "Dockerfile")
+    candidates = {path.parent for name in entrypoints
                   for path in destination.glob(f"*/{name}")}
     if len(candidates) != 1:
-        raise ValueError("Include package.json or Dockerfile at ZIP root or in one top-level folder")
+        raise ValueError("Include package.json, Dockerfile, server.py or app.py at ZIP root or in one top-level folder")
     return candidates.pop()
 
 
@@ -194,9 +195,17 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
               port: int = 3000, health_path: str = "/", **metadata) -> DeploymentPlan:
     existing_dockerfile = project / "Dockerfile"
     custom = existing_dockerfile.is_file()
+    python = not custom and not (project / "package.json").is_file()
     if custom:
         if start_script != "dockerfile" or build_script is not None:
             raise ValueError("Existing Dockerfile requires start_script=dockerfile and build_script=null")
+    elif python:
+        if (start_script not in {"server.py", "app.py"} or build_script is not None
+                or not (project / start_script).is_file()):
+            raise ValueError("Python app requires an existing server.py or app.py and build_script=null")
+        requirements = project / "requirements.txt"
+        if requirements.is_file() and requirements.stat().st_size > MAX_PACKAGE_BYTES:
+            raise ValueError("requirements.txt exceeds the 1 MiB analysis limit")
     else:
         scripts = read_package(project).get("scripts", {})
         if not isinstance(start_script, str):
@@ -222,6 +231,21 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
                               dockerfile, health_path=health_path,
                               source_digest=source_digest(project),
                               dockerfile_source="existing", **metadata)
+    if python:
+        install = (("RUN pip install --no-cache-dir -r requirements.txt\n")
+                   if (project / "requirements.txt").is_file() else "")
+        dockerfile = (
+            "FROM python:3.13-slim-bookworm\nWORKDIR /app\n"
+            "RUN useradd --uid 10001 --create-home app\n"
+            "COPY --chown=app:app . .\n"
+            + install
+            + f"ENV PYTHONUNBUFFERED=1 PORT={port}\nEXPOSE {port}\n"
+            + "USER app\n"
+            + f"CMD {json.dumps(['python', start_script])}\n"
+        )
+        metadata.setdefault("framework", "python")
+        return DeploymentPlan("python", f"python {start_script}", None, port, dockerfile,
+                              health_path=health_path, source_digest=source_digest(project), **metadata)
     install = "npm ci" if (project / "package-lock.json").exists() else "npm install"
     build = f"npm run {build_script}" if build_script else None
     start_args = ["npm", "start"] if start_script == "start" else ["npm", "run", start_script]
@@ -241,6 +265,12 @@ def analyze(project: Path) -> DeploymentPlan:
     if (project / "Dockerfile").is_file():
         return make_plan(project, "dockerfile", None,
                          warnings=["정적 분석은 PORT=3000, HTTP 검사 경로=/를 가정합니다. 기존 Dockerfile의 실행 설정을 확인하세요."])
+    if not (project / "package.json").is_file():
+        entry = next((name for name in ("server.py", "app.py") if (project / name).is_file()), None)
+        if entry is None:
+            raise ValueError("Python app requires server.py or app.py at project root")
+        return make_plan(project, entry, None,
+                         warnings=["정적 분석은 PORT=3000, HTTP 검사 경로=/를 가정합니다. Python 서버 실행 설정을 확인하세요."])
     package = read_package(project)
     scripts = package.get("scripts", {})
     if not isinstance(scripts, dict) or not isinstance(scripts.get("start"), str):
