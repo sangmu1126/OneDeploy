@@ -18,6 +18,8 @@ from onedeploy.infrastructure import inspect_infrastructure, validate_infrastruc
 from onedeploy.migrations import collect_sql_migrations
 from onedeploy.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
 
+MAX_AGENT_REQUEST_BYTES = 1024 * 1024
+
 
 def tool(name, description, properties):
     return {"type": "function", "name": name, "description": description, "strict": True,
@@ -88,8 +90,11 @@ class OpenAIDeployAgent:
                    "input": history, "tools": TOOLS, "tool_choice": "required",
                    "parallel_tool_calls": False, "include": ["reasoning.encrypted_content"],
                    "max_output_tokens": 6000}
+        request_body = json.dumps(payload).encode()
+        if len(request_body) > MAX_AGENT_REQUEST_BYTES:
+            raise AgentError('AI 작업 이력이 1 MiB를 넘어 요청을 중단했습니다. 더 작은 앱으로 새 배포를 시작하세요.')
         req = urllib.request.Request("https://api.openai.com/v1/responses",
-            data=json.dumps(payload).encode(), headers={"Authorization": "Bearer " + self.settings.api_key,
+            data=request_body, headers={"Authorization": "Bearer " + self.settings.api_key,
                                                         "Content-Type": "application/json"})
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *args, **kwargs):
@@ -189,7 +194,8 @@ class DeploymentTools:
             if not path.is_file():
                 output[name] = {"error": "File does not exist"}
                 continue
-            text = path.read_text()
+            with path.open(encoding='utf-8') as source:
+                text = source.read(20001)
             if len(text) > 20000:
                 output[name] = {"error": "File exceeds 20,000 character read limit"}
                 continue

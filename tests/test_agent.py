@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_fixture import RepairFixture, call
-from onedeploy.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
+from onedeploy.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent, MAX_AGENT_REQUEST_BYTES
 from onedeploy.analysis import AISettings
 from onedeploy.core import LocalDockerAdapter
 from onedeploy.server import App
@@ -53,6 +53,20 @@ class AgentTests(unittest.TestCase):
         self.tools.read_project_files(['server.js'])
         with self.assertRaisesRegex(ValueError, 'exactly once'):
             self.tools.apply_project_patch('server.js', 'not-found', 'new')
+
+    def test_large_source_file_is_not_returned_to_the_agent(self):
+        (self.tools.work / 'large.js').write_text('x' * 30000)
+        result = self.tools.read_project_files(['large.js'])
+        self.assertEqual(result['files']['large.js'],
+                         {'error': 'File exceeds 20,000 character read limit'})
+        self.assertNotIn('large.js', self.tools.read_versions)
+
+    def test_oversized_agent_history_is_rejected_before_api_call(self):
+        with patch('onedeploy.agent.urllib.request.build_opener') as opener:
+            with self.assertRaisesRegex(AgentError, '1 MiB'):
+                OpenAIDeployAgent(AISettings('fake', 'model')).next([
+                    {'role': 'user', 'content': 'x' * MAX_AGENT_REQUEST_BYTES}])
+            opener.assert_not_called()
 
     def test_paths_cannot_escape_working_directory(self):
         for name in ('../secret.js', '/tmp/secret.js', '.env', '.git/config.json', 'Dockerfile', 'package-lock.json', 'node_modules/x.js'):
