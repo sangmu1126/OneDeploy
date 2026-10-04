@@ -7,7 +7,7 @@
 </style>
 <h1>OneDeploy</h1><p>앱을 올리세요. AI가 배포에 필요한 설정과 코드를 준비하고, 실제 실행까지 진행합니다.</p>
 <section><h2>앱 배포</h2>
-<label for="folder">웹 앱 폴더</label><input id="folder" type="file" webkitdirectory multiple><p>폴더를 바로 선택하거나 아래에서 ZIP을 선택하세요. Node.js 앱은 package.json, 실행형 Python 앱은 루트의 server.py 또는 app.py, 그 외 런타임 앱은 Dockerfile이 필요합니다. .env, .git, node_modules 등은 업로드하지 않습니다.</p>
+<label for="folder">웹 앱 폴더</label><input id="folder" type="file" webkitdirectory multiple><p>폴더를 바로 선택하거나 아래에서 ZIP을 선택하세요. Node.js 앱은 package.json, Python 앱은 루트의 server.py·app.py·main.py(ASGI는 app 객체와 requirements.txt의 uvicorn), 그 외 런타임 앱은 Dockerfile이 필요합니다. .env, .git, node_modules 등은 업로드하지 않습니다.</p>
 <label for="file">웹 앱 ZIP (대안)</label><input id="file" type="file" accept=".zip">
 <label for="application">앱 ID</label><input id="application" placeholder="예: my-web-app" maxlength="31"><p>같은 앱 ID의 배포 이력을 묶습니다. AWS 배포는 기존 서비스를 업데이트해 URL을 유지합니다. Local Docker와 Cloud Run은 릴리스마다 별도 URL을 만듭니다.</p>
 <label for="target">배포 대상</label><select id="target"><option value="auto">AI 자동 선택</option><option value="local-docker">Local Docker</option><option value="cloud-run" disabled>Google Cloud Run — 서버 설정 필요</option><option value="aws-ecs-express" disabled>AWS ECS Express Mode — 서버 설정 필요</option></select>

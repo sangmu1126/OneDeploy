@@ -300,3 +300,12 @@ Dockerfile이 없는 실행형 Python 앱 경로를 추가했다. 루트의 `ser
 작업용 복사본의 바인딩·포트를 수정하도록 확장했다. 업로드 식별·계획 경계와
 고정 Responses 전송의 로컬 Docker 배포·종료를 검증했다. 외부 의존성이 있는
 다양한 Python 프레임워크와 실제 모델 판단은 아직 검증하지 않았다.
+
+Dockerfile 없는 Python 배포에 루트 ASGI 진입점을 추가했다. `server.py`·`app.py`·
+`main.py`의 `app` 객체를 선택하면 생성 이미지가 Uvicorn의 `module:app` 형식으로
+실행한다. `requirements.txt`에 Uvicorn이 명시된 경우만 허용하고 실행 파일 이름과
+이미지 명령 인자를 고정해 업로드에서 임의 실행 명령이 들어오지 않게 했다. FastAPI
+예제를 ZIP으로 올린 고정 Responses 응답 드릴에서 계획·실제 Docker 빌드·HTTP
+응답·종료 후 컨테이너와 이미지 태그 정리가 통과했다. CI용 모의 배포 테스트도
+ASGI 도구 순서와 단일 배포 시도를 확인한다. 실제 모델 판단과 AWS ASGI 배포는
+아직 검증하지 않았다.

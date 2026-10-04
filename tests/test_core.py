@@ -163,6 +163,25 @@ class CoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '1 MiB'):
                 make_plan(root, 'app.py', None)
 
+    def test_asgi_entrypoint_requires_existing_module_and_uvicorn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with zipfile.ZipFile(root / 'app.zip', 'w') as bundle:
+                bundle.writestr('site/main.py', 'app = object()\n')
+                bundle.writestr('site/requirements.txt', 'uvicorn==0.38.0\n')
+            project = extract_project(root / 'app.zip', root / 'out')
+            plan = make_plan(project, 'asgi:main.py', None, 4321)
+            self.assertEqual(plan.runtime, 'python-asgi')
+            self.assertIn('CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "4321"]',
+                          plan.dockerfile)
+            self.assertEqual(analyze(project).runtime, 'python-asgi')
+            for invalid in ('asgi:../main.py', 'asgi:other.py', 'asgi:main.py;echo bad'):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    make_plan(project, invalid, None)
+            (project / 'requirements.txt').write_text('fastapi==0.119.0\n')
+            with self.assertRaisesRegex(ValueError, 'uvicorn'):
+                make_plan(project, 'asgi:main.py', None)
+
     def test_failed_readiness_cleans_container(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

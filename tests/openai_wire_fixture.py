@@ -12,7 +12,7 @@ from onedeploy.agent import COMPACT_AGENT_REQUEST_BYTES
 class ResponsesWireFixture:
     def __init__(self, actions=None, *, expected_target='local-docker', planner_requests=1,
                  managed_postgres=False, expected_model='wire-fixture-model', compact_after_first=False,
-                 python_generated=False):
+                 python_generated=False, asgi_generated=False):
         self.local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.lock = threading.Lock()
         self.planner_requests = 0
@@ -24,7 +24,13 @@ class ResponsesWireFixture:
         self.managed_postgres = managed_postgres
         self.expected_model = expected_model
         self.python_generated = python_generated
+        self.asgi_generated = asgi_generated
         default_actions = ([
+            ('read_project_files', {'paths': ['main.py', 'requirements.txt']}),
+            ('configure_deployment', {'start_script': 'asgi:main.py', 'build_script': None,
+                                      'port': 4321, 'health_path': '/', 'required_env': []}),
+            ('deploy_application', {}),
+        ] if asgi_generated else [
             ('read_project_files', {'paths': ['server.py']}),
             ('apply_project_patch', {'path': 'server.py',
                 'old_text': 'HTTPServer(("127.0.0.1", 4321), Handler)',
@@ -80,7 +86,10 @@ class ResponsesWireFixture:
         assert payload['text']['format']['strict'] is True
         context = json.loads(payload['input'])
         assert 'local-docker' in context['available_targets']
-        if self.python_generated:
+        if self.asgi_generated:
+            assert 'FastAPI' in context['files']['main.py']
+            evidence = {'file': 'main.py', 'quote': 'FastAPI'}
+        elif self.python_generated:
             assert 'HTTPServer' in context['files']['server.py']
             evidence = {'file': 'server.py', 'quote': 'HTTPServer'}
         else:

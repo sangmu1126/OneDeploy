@@ -65,6 +65,8 @@ def main():
     parser.add_argument('--python', action='store_true', help='Use a scripted fixture for a Python Dockerfile app')
     parser.add_argument('--python-generated', action='store_true',
                         help='Repair and deploy a Python app without an uploaded Dockerfile')
+    parser.add_argument('--asgi-generated', action='store_true',
+                        help='With --wire-fixture, deploy a root FastAPI ASGI app without a Dockerfile')
     parser.add_argument('--folder', action='store_true', help='Upload a browser-style folder instead of a ZIP')
     parser.add_argument('--auto', action='store_true', help='Exercise infrastructure target planning')
     parser.add_argument('--interrupted-retire', action='store_true',
@@ -76,11 +78,13 @@ def main():
     parser.add_argument('--resume-unstarted', action='store_true',
                         help='Interrupt worker startup, restart the server, then resume the same upload')
     args = parser.parse_args()
-    if args.python and (args.live or args.environment or args.python_generated):
+    if args.python and (args.live or args.environment or args.python_generated or args.asgi_generated):
         parser.error('--python cannot be combined with --live or --environment')
     if args.python_generated and (args.live or args.environment or args.folder or args.auto
-                                  or args.interrupted_retire or args.resume_unstarted):
+                                  or args.interrupted_retire or args.resume_unstarted or args.asgi_generated):
         parser.error('--python-generated uses the scripted local Python deployment only')
+    if args.asgi_generated and (not args.wire_fixture or args.compact_fixture or args.resume_unstarted):
+        parser.error('--asgi-generated requires --wire-fixture without resume or compaction')
     if args.restart_before_resume and (not args.environment or args.live or args.python or args.folder
                                        or args.auto or args.interrupted_retire or args.wire_fixture):
         parser.error('--restart-before-resume requires --environment with the scripted Node fixture')
@@ -101,7 +105,8 @@ def main():
     if args.live and not settings.available:
         raise RuntimeError('Set OPENAI_API_KEY for live testing')
     wire = ResponsesWireFixture(compact_after_first=args.compact_fixture,
-                               python_generated=args.python_generated) if args.wire_fixture else None
+                               python_generated=args.python_generated,
+                               asgi_generated=args.asgi_generated) if args.wire_fixture else None
     with tempfile.TemporaryDirectory(prefix='onedeploy-agent-smoke-') as directory, \
             (patch('urllib.request.build_opener', return_value=wire) if wire else nullcontext()):
         app = App(Path(directory), settings, OpenAIDeployAgent if args.live or wire else
@@ -126,7 +131,10 @@ def main():
                 return json.load(response)
         try:
             files = []
-            if args.python_generated:
+            if args.asgi_generated:
+                for file in Path('examples/fastapi-asgi').iterdir():
+                    files.append((file.name, file.read_bytes()))
+            elif args.python_generated:
                 files.append(('server.py', Path('examples/unready-python/server.py').read_bytes()))
             elif args.python:
                 files.append(('Dockerfile', b'FROM python:3.13-alpine\nWORKDIR /app\nCOPY server.py ./\nCMD ["python", "server.py"]\n'))
@@ -205,11 +213,18 @@ def main():
                 assert job['target'] == 'local-docker'
                 assert job['infrastructure_plan']['planner'] == 'openai'
             with opener.open(job['result']['url'], timeout=5) as response:
-                expected_message = ('Original Python application is running' if args.python_generated else
+                expected_message = ('FastAPI application is running' if args.asgi_generated else
+                                    'Original Python application is running' if args.python_generated else
                                     'Python app is running' if args.python else 'Original application is running')
                 assert json.load(response)['message'] == expected_message
             original = Path(job['project'])
-            if args.python_generated:
+            if args.asgi_generated:
+                assert job['plan']['runtime'] == 'python-asgi'
+                assert job['plan']['start_command'].startswith('python -m uvicorn main:app')
+                assert not (original / 'Dockerfile').exists()
+                assert (original / 'main.py').is_file()
+                assert job['attempts'] == 1
+            elif args.python_generated:
                 assert job['plan']['runtime'] == 'python'
                 assert not (original / 'Dockerfile').exists()
                 assert '127.0.0.1' in (original / 'server.py').read_text()

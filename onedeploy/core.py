@@ -127,13 +127,13 @@ def extract_project(archive: Path, destination: Path) -> Path:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with bundle.open(item) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
-    entrypoints = ("package.json", "Dockerfile", "server.py", "app.py")
+    entrypoints = ("package.json", "Dockerfile", "server.py", "app.py", "main.py")
     if any((destination / name).is_file() for name in entrypoints):
         return destination
     candidates = {path.parent for name in entrypoints
                   for path in destination.glob(f"*/{name}")}
     if len(candidates) != 1:
-        raise ValueError("Include package.json, Dockerfile, server.py or app.py at ZIP root or in one top-level folder")
+        raise ValueError("Include package.json, Dockerfile, server.py, app.py or main.py at ZIP root or in one top-level folder")
     return candidates.pop()
 
 
@@ -191,21 +191,43 @@ def read_package(project: Path) -> dict:
     return package
 
 
+def read_requirements(project: Path) -> str | None:
+    requirements = project / "requirements.txt"
+    if not requirements.is_file():
+        return None
+    with requirements.open("rb") as source:
+        content = source.read(MAX_PACKAGE_BYTES + 1)
+    if len(content) > MAX_PACKAGE_BYTES:
+        raise ValueError("requirements.txt exceeds the 1 MiB analysis limit")
+    return content.decode('utf-8')
+
+
+def has_uvicorn_requirement(project: Path) -> bool:
+    content = read_requirements(project)
+    if content is None:
+        return False
+    return bool(re.search(r"(?im)^[ \t]*uvicorn(?:\[[a-z0-9_,.-]+\])?(?:[<>=!~][^\r\n]*)?[ \t]*(?:#.*)?$",
+                          content))
+
+
 def make_plan(project: Path, start_script: str, build_script: str | None,
               port: int = 3000, health_path: str = "/", **metadata) -> DeploymentPlan:
     existing_dockerfile = project / "Dockerfile"
     custom = existing_dockerfile.is_file()
     python = not custom and not (project / "package.json").is_file()
+    asgi = python and isinstance(start_script, str) and start_script.startswith("asgi:")
     if custom:
         if start_script != "dockerfile" or build_script is not None:
             raise ValueError("Existing Dockerfile requires start_script=dockerfile and build_script=null")
     elif python:
-        if (start_script not in {"server.py", "app.py"} or build_script is not None
-                or not (project / start_script).is_file()):
-            raise ValueError("Python app requires an existing server.py or app.py and build_script=null")
-        requirements = project / "requirements.txt"
-        if requirements.is_file() and requirements.stat().st_size > MAX_PACKAGE_BYTES:
-            raise ValueError("requirements.txt exceeds the 1 MiB analysis limit")
+        entry = start_script[5:] if asgi else start_script
+        if (entry not in {"server.py", "app.py", "main.py"} or build_script is not None
+                or not (project / entry).is_file()):
+            raise ValueError("Python app requires an existing server.py, app.py or main.py and build_script=null")
+        if asgi and not has_uvicorn_requirement(project):
+            raise ValueError("ASGI app requires uvicorn in requirements.txt")
+        if not asgi:
+            read_requirements(project)
     else:
         scripts = read_package(project).get("scripts", {})
         if not isinstance(start_script, str):
@@ -234,6 +256,8 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
     if python:
         install = (("RUN pip install --no-cache-dir -r requirements.txt\n")
                    if (project / "requirements.txt").is_file() else "")
+        start_args = (["python", "-m", "uvicorn", f"{entry[:-3]}:app", "--host", "0.0.0.0", "--port", str(port)]
+                      if asgi else ["python", entry])
         dockerfile = (
             "FROM python:3.13-slim-bookworm\nWORKDIR /app\n"
             "RUN useradd --uid 10001 --create-home app\n"
@@ -241,10 +265,10 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
             + install
             + f"ENV PYTHONUNBUFFERED=1 PORT={port}\nEXPOSE {port}\n"
             + "USER app\n"
-            + f"CMD {json.dumps(['python', start_script])}\n"
+            + f"CMD {json.dumps(start_args)}\n"
         )
-        metadata.setdefault("framework", "python")
-        return DeploymentPlan("python", f"python {start_script}", None, port, dockerfile,
+        metadata.setdefault("framework", "python-asgi" if asgi else "python")
+        return DeploymentPlan("python-asgi" if asgi else "python", " ".join(start_args), None, port, dockerfile,
                               health_path=health_path, source_digest=source_digest(project), **metadata)
     install = "npm ci" if (project / "package-lock.json").exists() else "npm install"
     build = f"npm run {build_script}" if build_script else None
@@ -266,10 +290,14 @@ def analyze(project: Path) -> DeploymentPlan:
         return make_plan(project, "dockerfile", None,
                          warnings=["정적 분석은 PORT=3000, HTTP 검사 경로=/를 가정합니다. 기존 Dockerfile의 실행 설정을 확인하세요."])
     if not (project / "package.json").is_file():
-        entry = next((name for name in ("server.py", "app.py") if (project / name).is_file()), None)
+        entry = next((name for name in ("server.py", "app.py", "main.py") if (project / name).is_file()), None)
         if entry is None:
-            raise ValueError("Python app requires server.py or app.py at project root")
-        return make_plan(project, entry, None,
+            raise ValueError("Python app requires server.py, app.py or main.py at project root")
+        with (project / entry).open(encoding='utf-8', errors='replace') as source:
+            preview = source.read(20001)
+        start = ('asgi:' + entry if re.search(r'(?m)^\s*app\s*=', preview)
+                 and has_uvicorn_requirement(project) else entry)
+        return make_plan(project, start, None,
                          warnings=["정적 분석은 PORT=3000, HTTP 검사 경로=/를 가정합니다. Python 서버 실행 설정을 확인하세요."])
     package = read_package(project)
     scripts = package.get("scripts", {})

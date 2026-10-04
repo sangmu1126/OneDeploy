@@ -55,6 +55,27 @@ class OpenAIWireTests(unittest.TestCase):
             self.assertIn('127.0.0.1', (original / 'server.py').read_text())
             self.assertIn('0.0.0.0', (tools.work / 'server.py').read_text())
 
+    def test_asgi_without_dockerfile_uses_wire_agent_and_generated_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            original = Path('examples/fastapi-asgi')
+            tools = DeploymentTools(original, state / 'work', 'c' * 16, {},
+                lambda *_: None, lambda **_: None)
+            fixture = ResponsesWireFixture(planner_requests=0, asgi_generated=True)
+            with patch('urllib.request.build_opener', return_value=fixture), \
+                    patch.object(LocalDockerAdapter, 'deploy', return_value={
+                        'url': 'http://127.0.0.1:12345'}) as deploy:
+                result = DeploymentAgent(OpenAIDeployAgent(AISettings(
+                    'wire-fixture-key', 'wire-fixture-model')), tools).run()
+            fixture.assert_complete()
+            self.assertEqual(result['url'], 'http://127.0.0.1:12345')
+            self.assertEqual(tools.plan.runtime, 'python-asgi')
+            self.assertIn('main:app', tools.plan.start_command)
+            self.assertEqual(deploy.call_count, 1)
+            self.assertEqual(tools.attempts, 1)
+            self.assertEqual((tools.work / 'main.py').read_bytes(),
+                             (original / 'main.py').read_bytes())
+
     def test_auto_plan_and_source_repair_use_responses_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
