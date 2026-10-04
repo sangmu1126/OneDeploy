@@ -337,8 +337,22 @@ smoke가 성공하면 임시 ECS 서비스와 ECR 이미지 태그를 정리한�
   실계정에서 통과했다. AI 도구 호출은 고정 테스트 응답이었다. 임시 ECS 서비스·
   앱 이미지 태그는 정리했으며 RDS와 비밀은 유지한다.
   API 드릴과 아래 Chrome 드릴은 `--probe-runtime python`으로 Flask·Psycopg
-  예제를 선택할 수 있다. Python 선택은 로컬 모의 AWS 테스트까지만 확인했고
-  실계정 실행은 아직 하지 않았다.
+  예제를 선택할 수 있다. API의 Python 선택은 아래 2026-10-04 실계정 검증을
+  통과했고 Chrome의 Python 선택은 아직 실계정에서 실행하지 않았다.
+
+## 2026-10-04 Python API와 실제 RDS·ECS 검증
+
+사용자 승인 후 보존된 `onedeploy-demo-app` RDS를 `stopped`에서 시작했다.
+처음 `available` 직후 `configuring-enhanced-monitoring`으로 바뀌어 제품의
+읽기 전용 소유권 검사가 배포를 막았다. 다시 안정된 `available` 상태에서
+사전 점검을 통과한 뒤 `tests.smoke_aws_postgres_api --apply --probe-runtime python`
+을 실행했다. API 작업 `799fe546b61d4be8`은 Python ZIP 업로드 → `PROBE_KEY`
+입력·재개 → SQL 마이그레이션 → Flask·Gunicorn·Psycopg 이미지의 ECS Express
+배포 → 공개 HTTPS에서 PostgreSQL 행 쓰기·읽기·삭제와 상태 API를 통과했다.
+AI 도구 응답은 **고정 테스트 값**이며 실제 OpenAI 모델 호출은 API 키가 없어
+실행하지 않았다. 제품 종료 API 뒤 임시 ECS 서비스는 `INACTIVE`, 검증용 ECR
+이미지 태그 조회는 빈 목록이었다. RDS는 다시 `stopped`까지 확인했다. 기존 스택·
+비밀·스냅샷과 데이터는 보존하며 저장소 비용은 계속 발생할 수 있다.
 
 ## 2026-10-01 실제 Chrome UI 경로
 

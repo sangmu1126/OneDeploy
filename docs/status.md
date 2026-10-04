@@ -5,7 +5,7 @@
 구체적인 경계와 명령은 [AWS 데이터 경로](aws-database-path.md), 결정 이유와 과거
 검증 기록은 [의사결정 기록](decision-log.md)을 따른다.
 
-2026-10-03 현재 데모 AWS 실행 자원은 [일시 중지](aws-pause-2026-10-03.md)했다. `demo-app` RDS는 `stopped`, ECS 목표·실행 태스크는 0개다. 데이터·스냅샷·스택과 ECS Express 서비스는 보존했다. [Terraform 구성](../terraform/aws-live/README.md)에 기존 자원 네 개를 import했으며 실제 계정 변경에 Terraform apply는 사용하지 않았다.
+2026-10-03 데모 AWS 실행 자원을 [일시 중지](aws-pause-2026-10-03.md)했다. 2026-10-04 Python 실계정 검증을 위해 `demo-app` RDS를 잠시 시작한 뒤 다시 `stopped`까지 확인했다. 임시 ECS 서비스는 `INACTIVE`, 이미지 태그는 삭제됐고 기존 데이터·스냅샷·스택은 보존했다. [Terraform 구성](../terraform/aws-live/README.md)에 기존 자원 네 개를 import했으며 실제 계정 변경에 Terraform apply는 사용하지 않았다.
 
 ## 확인된 경로
 
@@ -17,11 +17,11 @@
   경로를 지원한다. `server.py` 샘플의 자동 대상 선택·소스 수정과 FastAPI·Flask
   샘플의 서버 설정은 고정 AI 응답을 거쳐 실제 로컬 Docker HTTP 확인·종료까지
   통과했다. ASGI·WSGI 경로는 각각 `requirements.txt`에 Uvicorn·Gunicorn 명시가
-  필요하다. 실제 OpenAI 모델과 AWS Python
-  경로는 아직 검증하지 않았다.
+  필요하다. 실제 OpenAI 모델과 AWS의 ASGI·직접 실행형 Python 경로는 아직
+  검증하지 않았다. WSGI PostgreSQL 경로는 아래 실계정 검증을 통과했다.
   Python 생성 이미지의 AWS PostgreSQL 연결 계획에는 RDS CA 경로와
-  `PGSSLMODE=verify-full`을 추가했다. 이는 로컬 단위 검증 결과이며 실계정
-  Python DB 접속 성공을 뜻하지 않는다.
+  `PGSSLMODE=verify-full`을 추가했다. 이 설정을 쓰는 Flask·Psycopg 앱의
+  실계정 RDS 연결과 HTTPS 데이터 경로는 2026-10-04 통과했다.
   배포 완료 확인은 이번 런타임이 요청한 TLS 프로필과 ECS의 실제 설정을 대조하며,
   Python 요청이 기존 Node 프로필로 바뀐 경우 성공 처리하지 않는다.
   공통 이미지 빌더는 검증한 소스를 임시 빌드 폴더에 복사해 Dockerfile·CA·
@@ -33,10 +33,13 @@
   이 드릴은 AWS 네트워크·RDS·ECS 접속을 검증하지 않는다.
   실계정용 PostgreSQL 업데이트 smoke는 `--probe-runtime python` 선택과
   릴리스별 깨끗한 소스 사본을 지원한다. 두 런타임의 배포·마이그레이션·HTTP
-  순서는 모의 어댑터로 검증했으며 Python 실계정 실행은 아직 하지 않았다.
+  순서는 모의 어댑터로 검증했다. v1→v2 업데이트의 Python 실계정 실행은
+  아직 하지 않았다.
   서버 API와 Chrome 배포 드릴도 Python ZIP을 선택할 수 있다. Python ZIP의
   업로드·기존 RDS 바인딩과 고정 AI 도구 호출의 WSGI 설정·마이그레이션 전달은
-  로컬 모의 AWS에서 통과했으며 이 API/UI 옵션의 실계정 실행은 남아 있다.
+  로컬 모의 AWS에서 통과했다. Python API 옵션은 2026-10-04 서울 리전에서
+  ZIP 업로드·환경값 재개·SQL 마이그레이션·ECS·HTTPS 데이터 쓰기/읽기/삭제·
+  임시 서비스/이미지 종료를 통과했다. Chrome Python 옵션은 실계정 미검증이다.
   새 RDS 생성과 같은 작업에서 Python 소스의 잘못된 `localhost` DB 연결을
   고정 Responses 도구 호출로 수정하고 WSGI 계획·관리형 DB·SQL 마이그레이션을
   배포 어댑터까지 전달하는 흐름도 모의 AWS에서 통과했다. 실제 모델 판단이나

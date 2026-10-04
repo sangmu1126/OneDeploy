@@ -125,7 +125,9 @@ Dockerfile 없이 생성한 Python 앱 이미지는 같은 번들을 `PGSSLROOTC
 ECS 연결 환경에 `PGSSLMODE=verify-full`을 넣어 libpq 기반 클라이언트가 인증서
 체인과 RDS 엔드포인트 이름을 함께 검사하도록 한다. 기존 Node 배포 설정은 유지한다.
 이 Python AWS 배포 경로는 이미지·ECS 구성 단위 테스트와 로컬 Docker 데이터
-드릴까지 확인했고 실제 AWS DB 접속은 아직 검증하지 않았다. 앱이 자체 연결
+드릴에 이어 2026-10-04 실계정 API 업로드의 Flask·Psycopg 앱이 RDS에 연결해
+HTTPS 데이터 쓰기·읽기·삭제까지 통과했다. 실제 OpenAI 모델 판단과 Python
+ECS 업데이트 v1→v2, Chrome Python 옵션은 별도 검증이 필요하다. 앱이 자체 연결
 문자열에서 TLS 옵션을 덮어쓰면 별도 소스 검토가 필요하다.
 `PYTHONPATH=. python3 -m tests.smoke_python_postgres_tls`는 로컬 TLS PostgreSQL과
 Python 예제의 v1→v2 이미지·HTTP 데이터 보존 경로를 검증한다. v1이 기록한 행을

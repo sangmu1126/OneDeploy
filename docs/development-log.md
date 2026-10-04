@@ -391,3 +391,11 @@ Python 앱의 한 번 DB 생성·배포 경로에서 코드 자동 수정까지 
 유지됐으며 WSGI 생성 이미지 계획, 관리형 DB 연결 요청, SQL 마이그레이션이
 모의 AWS 어댑터에 전달됐다. 실제 모델 판단과 실계정 Python HTTP 경로는 아직
 검증하지 않았다.
+
+사용자 승인으로 실제 AWS Python 데이터 경로를 실행했다. 보존된 RDS를 시작하고
+안정된 `available` 뒤 Python ZIP을 서버 API에 업로드했다. 고정 도구 응답으로
+WSGI 배포를 설정하고 `PROBE_KEY` 입력·재개, SQL 마이그레이션, ECS Express,
+공개 HTTPS의 PostgreSQL 쓰기·읽기·삭제를 통과했다. 작업 ID는
+`799fe546b61d4be8`이다. 종료 API 후 임시 서비스는 `INACTIVE`, ECR 시험
+태그는 없음을 확인했다. 기존 RDS도 `stopped`까지 확인했다. 실제 OpenAI
+모델은 `OPENAI_API_KEY`가 없어 실행하지 않았다.
