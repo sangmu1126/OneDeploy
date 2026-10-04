@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_fixture import RepairFixture, call
-from onedeploy.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent, MAX_AGENT_REQUEST_BYTES
+from onedeploy.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent, MAX_AGENT_REQUEST_BYTES, COMPACT_AGENT_REQUEST_BYTES
 from onedeploy.analysis import AISettings
 from onedeploy.core import LocalDockerAdapter
 from onedeploy.server import App
@@ -112,6 +112,54 @@ class AgentTests(unittest.TestCase):
                 OpenAIDeployAgent(AISettings('fake', 'model')).next([
                     {'role': 'user', 'content': 'x' * MAX_AGENT_REQUEST_BYTES}])
             opener.assert_not_called()
+
+    def test_agent_compacts_long_stateless_history_before_next_tool_call(self):
+        history = [{'role': 'user', 'content': 'x' * COMPACT_AGENT_REQUEST_BYTES}]
+        compacted = [{'type': 'compaction', 'id': 'cmp_1', 'encrypted_content': 'opaque-state'}]
+        completion = {'status': 'completed', 'output': call('read_runtime_logs', {})}
+        with patch('onedeploy.agent.urllib.request.build_opener') as opener:
+            opener.return_value.open.side_effect = [
+                io.BytesIO(json.dumps({'object': 'response.compaction', 'output': compacted}).encode()),
+                io.BytesIO(json.dumps(completion).encode()),
+            ]
+            result = OpenAIDeployAgent(AISettings('fake', 'model')).next(history)
+        self.assertEqual(result, completion['output'])
+        self.assertEqual(history, compacted)
+        requests = [entry.args[0] for entry in opener.return_value.open.call_args_list]
+        self.assertEqual([request.full_url for request in requests], [
+            'https://api.openai.com/v1/responses/compact',
+            'https://api.openai.com/v1/responses'])
+        self.assertEqual(json.loads(requests[0].data)['input'][0]['content'], 'x' * COMPACT_AGENT_REQUEST_BYTES)
+        self.assertEqual(json.loads(requests[1].data)['input'], compacted)
+        self.assertFalse(json.loads(requests[1].data)['store'])
+
+    def test_invalid_compaction_keeps_history_and_stops_before_next_model_call(self):
+        history = [{'role': 'user', 'content': 'x' * COMPACT_AGENT_REQUEST_BYTES}]
+        with patch('onedeploy.agent.urllib.request.build_opener') as opener:
+            opener.return_value.open.return_value = io.BytesIO(b'{"output": []}')
+            with self.assertRaisesRegex(AgentError, '압축 응답 형식'):
+                OpenAIDeployAgent(AISettings('fake', 'model')).next(history)
+        self.assertEqual(len(history), 1)
+        opener.return_value.open.assert_called_once()
+
+    def test_unsupported_compaction_uses_original_bounded_request_once(self):
+        history = [{'role': 'user', 'content': 'x' * COMPACT_AGENT_REQUEST_BYTES}]
+        unsupported = urllib.error.HTTPError('https://api.openai.com/v1/responses/compact',
+            400, 'unsupported', {}, io.BytesIO(b'{}'))
+        completion = {'status': 'completed', 'output': call('read_runtime_logs', {})}
+        with patch('onedeploy.agent.urllib.request.build_opener') as opener:
+            opener.return_value.open.side_effect = [
+                unsupported, io.BytesIO(json.dumps(completion).encode()),
+                io.BytesIO(json.dumps(completion).encode())]
+            agent = OpenAIDeployAgent(AISettings('fake', 'model'))
+            agent.next(history)
+            agent.next(history)
+        requests = [entry.args[0] for entry in opener.return_value.open.call_args_list]
+        self.assertEqual([request.full_url for request in requests], [
+            'https://api.openai.com/v1/responses/compact',
+            'https://api.openai.com/v1/responses',
+            'https://api.openai.com/v1/responses'])
+        self.assertEqual(json.loads(requests[1].data)['input'], history)
 
     def test_paths_cannot_escape_working_directory(self):
         for name in ('../secret.js', '/tmp/secret.js', '.env', '.git/config.json', 'Dockerfile', 'package-lock.json', 'node_modules/x.js'):

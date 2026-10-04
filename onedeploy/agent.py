@@ -23,6 +23,7 @@ from onedeploy.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_re
 from onedeploy.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
 
 MAX_AGENT_REQUEST_BYTES = 1024 * 1024
+COMPACT_AGENT_REQUEST_BYTES = 768 * 1024
 
 
 def tool(name, description, properties):
@@ -86,6 +87,32 @@ class DeploymentCancelled(Exception):
 class OpenAIDeployAgent:
     def __init__(self, settings: AISettings):
         self.settings = settings
+        self.compact_at = COMPACT_AGENT_REQUEST_BYTES
+
+    def compact_history(self, history):
+        payload = {"model": self.settings.model, "instructions": INSTRUCTIONS, "input": history}
+        request_body = json.dumps(payload).encode()
+        if len(request_body) > MAX_AGENT_REQUEST_BYTES:
+            raise AgentError('AI 작업 이력이 1 MiB를 넘어 압축 요청을 중단했습니다.')
+        req = urllib.request.Request("https://api.openai.com/v1/responses/compact",
+            data=request_body, headers={"Authorization": "Bearer " + self.settings.api_key,
+                                        "Content-Type": "application/json"})
+        try:
+            raw = read_response(req)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise AgentError('AI 이력 압축 응답 크기 제한을 초과했습니다.')
+            body = json.loads(raw)
+        except AgentError:
+            raise
+        except (OSError, ValueError):
+            raise AgentError('AI 이력 압축 연결 또는 응답 처리에 실패했습니다.') from None
+        output = body.get('output') if isinstance(body, dict) else None
+        if (not isinstance(body, dict) or body.get('object') != 'response.compaction'
+                or not isinstance(output, list) or not output
+                or any(not isinstance(item, dict) for item in output)
+                or not any(item.get('type') == 'compaction' for item in output)):
+            raise AgentError('AI 이력 압축 응답 형식이 올바르지 않습니다.')
+        return output
 
     def next(self, history):
         if not self.settings.available:
@@ -95,6 +122,22 @@ class OpenAIDeployAgent:
                    "parallel_tool_calls": False, "include": ["reasoning.encrypted_content"],
                    "max_output_tokens": 6000}
         request_body = json.dumps(payload).encode()
+        if len(request_body) >= self.compact_at:
+            try:
+                compacted = self.compact_history(history)
+            except OpenAIHTTPFailure as exc:
+                if exc.status not in {400, 404} or len(request_body) > MAX_AGENT_REQUEST_BYTES:
+                    raise AgentError(f'AI 이력 압축 API 오류 HTTP {exc.status}.') from None
+                self.compact_at = float('inf')
+            else:
+                payload['input'] = compacted
+                smaller_body = json.dumps(payload).encode()
+                if len(smaller_body) >= len(request_body) or len(smaller_body) > MAX_AGENT_REQUEST_BYTES:
+                    raise AgentError('AI 이력 압축 후에도 요청 크기를 줄이지 못했습니다.')
+                history[:] = compacted
+                request_body = smaller_body
+                self.compact_at = min(MAX_AGENT_REQUEST_BYTES - 64 * 1024,
+                                      max(COMPACT_AGENT_REQUEST_BYTES, len(request_body) + 128 * 1024))
         if len(request_body) > MAX_AGENT_REQUEST_BYTES:
             raise AgentError('AI 작업 이력이 1 MiB를 넘어 요청을 중단했습니다. 더 작은 앱으로 새 배포를 시작하세요.')
         req = urllib.request.Request("https://api.openai.com/v1/responses",
