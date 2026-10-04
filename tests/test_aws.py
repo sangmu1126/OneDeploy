@@ -270,13 +270,13 @@ class AwsTests(unittest.TestCase):
                                  {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
                                  {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}]}}
         self.assertTrue(database_configuration_matches(configuration, database))
+        self.assertFalse(database_configuration_matches(
+            configuration, database, postgres_ssl_environment('nodejs')))
+        self.assertTrue(database_configuration_matches(configuration, database, ssl))
         configuration['primaryContainer']['environment'][-1]['value'] = '/tmp/untrusted.pem'
         self.assertFalse(database_configuration_matches(configuration, database))
 
-    def test_python_postgres_deployment_submits_verified_tls_environment(self):
-        class Submitted(Exception):
-            pass
-
+    def test_python_postgres_deployment_requires_exact_ecs_tls_profile(self):
         request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
                                   ('subnet-12345678', 'subnet-87654321'), SERVICE_GROUP)
         database = {'endpoint': 'db.example', 'port': 5432, 'secret_arn':
@@ -286,13 +286,32 @@ class AwsTests(unittest.TestCase):
                                     AwsSettings(REGION, expected_account=ACCOUNT,
                                                 service_security_group=SERVICE_GROUP))
         submitted = []
+        downgrade = [False]
+        image = REPOSITORY + ':' + ATTEMPT
+        host = f'on-853b928a17804449916e1acb4141349b.ecs.{REGION}.on.aws'
         def aws(args, **_kwargs):
             if args[:2] == ['ecr', 'get-login-password']:
                 return 'synthetic-password'
             if args[:2] == ['ecs', 'create-express-gateway-service']:
                 spec = Path(args[args.index('--cli-input-json') + 1].removeprefix('file://'))
                 submitted.append(json.loads(spec.read_text()))
-                raise Submitted()
+                return json.dumps({'service': {'serviceArn': ARN,
+                                                'currentDeployment': 'deployment-1'}})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                environment = list(submitted[-1]['primaryContainer']['environment'])
+                if downgrade[0]:
+                    environment = [item for item in environment
+                                   if item['name'] not in {'PGSSLMODE', 'PGSSLROOTCERT'}]
+                    environment.append({'name': 'PGSSLMODE', 'value': 'require'})
+                return json.dumps({'service': {'status': {'statusCode': 'ACTIVE'},
+                    'activeConfigurations': [{'executionRoleArn': database['execution_role_arn'],
+                        'primaryContainer': {'image': image, 'environment': environment,
+                            'secrets': submitted[-1]['primaryContainer']['secrets']},
+                        'networkConfiguration': {'securityGroups': [SERVICE_GROUP]},
+                        'taskDefinitionArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:1',
+                        'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': host}]}]}})
+            if args[:2] == ['ecs', 'describe-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'status': 'SUCCESSFUL'}]})
             raise AssertionError(args)
 
         with patch('onedeploy.postgres.AwsPostgresProvisioner.inspect_current', return_value=database), \
@@ -301,11 +320,15 @@ class AwsTests(unittest.TestCase):
                              return_value=(ACCOUNT, REPOSITORY, 'base-execution', 'infra')), \
                 patch('onedeploy.aws.ImageBuilder.build'), \
                 patch.object(adapter, 'command', return_value='unix:///var/run/docker.sock'), \
-                patch.object(adapter, 'aws', side_effect=aws):
-            with self.assertRaises(Submitted):
+                patch.object(adapter, 'aws', side_effect=aws), \
+                patch.object(adapter, 'verify'):
+            adapter.deploy(self.project, replace(self.plan, runtime='python-asgi'), ATTEMPT,
+                           postgres=request)
+            downgrade[0] = True
+            with self.assertRaisesRegex(AwsConfigurationError, 'PostgreSQL 역할'):
                 adapter.deploy(self.project, replace(self.plan, runtime='python-asgi'), ATTEMPT,
                                postgres=request)
-        self.assertEqual(len(submitted), 1)
+        self.assertEqual(len(submitted), 2)
         self.assertIn({'name': 'PGSSLMODE', 'value': 'verify-full'},
                       submitted[0]['primaryContainer']['environment'])
         self.assertIn({'name': 'PGSSLROOTCERT', 'value': '/app/.onedeploy-rds-ca.pem'},

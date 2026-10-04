@@ -52,7 +52,7 @@ def service_group_ingress_is_restricted(group: dict) -> bool:
             and pair.get('VpcId', group.get('VpcId')) == group.get('VpcId'))
 
 
-def database_configuration_matches(configuration, database):
+def database_configuration_matches(configuration, database, expected_ssl_environment=None):
     if database is None:
         return True
     container = configuration.get('primaryContainer', {})
@@ -60,9 +60,9 @@ def database_configuration_matches(configuration, database):
         {'name': 'PGHOST', 'value': database['endpoint']},
         {'name': 'PGPORT', 'value': str(database['port'])},
         {'name': 'PGDATABASE', 'value': 'appdb'}]
-    ssl_profiles = [
+    ssl_profiles = ([expected_ssl_environment] if expected_ssl_environment is not None else [
         [{'name': 'PGSSLMODE', 'value': 'require'}],
-        postgres_ssl_environment('python')]
+        postgres_ssl_environment('python')])
     expected_secrets = [
         {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
         {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}]
@@ -422,7 +422,8 @@ class AwsExpressAdapter:
                     and self.settings.service_security_group not in
                     active[0].get('networkConfiguration', {}).get('securityGroups', [])):
                 raise AwsConfigurationError('ECS 서비스에 추가 보안 그룹이 적용되지 않았습니다.')
-            if settled and not database_configuration_matches(active[0], database):
+            if settled and not database_configuration_matches(
+                    active[0], database, postgres_ssl_environment(plan.runtime) if database else None):
                 raise AwsConfigurationError('ECS 서비스의 PostgreSQL 역할·비밀·접속 설정이 예상과 다릅니다.')
             if state == 'ACTIVE' and paths and deployment_ready and settled:
                 break
