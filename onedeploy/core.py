@@ -92,13 +92,31 @@ def extract_project(archive: Path, destination: Path) -> Path:
         entries = bundle.infolist()
         if len(entries) > 5000 or sum(i.file_size for i in entries) > MAX_EXTRACTED:
             raise ValueError("ZIP exceeds the extracted size or file count limit")
+        seen = set()
+        files = set()
+        directories = set()
         for item in entries:
             path = PurePosixPath(item.filename)
-            if path.is_absolute() or ".." in path.parts or "\\" in item.filename:
+            if (not path.parts or path.is_absolute() or ".." in path.parts
+                    or "\\" in item.filename):
                 raise ValueError("Unsafe ZIP path")
             mode = item.external_attr >> 16
             if stat.S_ISLNK(mode):
                 raise ValueError("ZIP symbolic links are not supported")
+            if ignored_source_path(path):
+                continue
+            name = path.as_posix()
+            parents = {parent.as_posix() for parent in path.parents if parent.as_posix() != '.'}
+            if name in seen or parents.intersection(files) or (not item.is_dir() and name in directories):
+                raise ValueError("ZIP contains duplicate or conflicting paths")
+            seen.add(name)
+            directories.update(parents)
+            if item.is_dir():
+                directories.add(name)
+            else:
+                files.add(name)
+        for item in entries:
+            path = PurePosixPath(item.filename)
             if ignored_source_path(path):
                 continue
             target = destination.joinpath(*path.parts)

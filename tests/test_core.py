@@ -32,6 +32,22 @@ class CoreTests(unittest.TestCase):
                 extract_project(root / "app.zip", root / "out")
             self.assertFalse((root / "escape").exists())
 
+    def test_ambiguous_zip_paths_are_rejected_before_extraction(self):
+        cases = [
+            [('package.json', '{}'), ('./package.json', '{"scripts":{}}')],
+            [('app', 'file'), ('app/package.json', '{"scripts":{}}')],
+            [('app/package.json', '{"scripts":{}}'), ('app', 'file')],
+        ]
+        for entries in cases:
+            with self.subTest(entries=entries), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                with zipfile.ZipFile(root / 'app.zip', 'w') as bundle:
+                    for name, data in entries:
+                        bundle.writestr(name, data)
+                with self.assertRaisesRegex(ValueError, 'duplicate or conflicting'):
+                    extract_project(root / 'app.zip', root / 'out')
+                self.assertFalse((root / 'out').exists())
+
     def test_start_required_and_lockfile_respected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
