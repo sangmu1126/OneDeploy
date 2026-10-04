@@ -150,6 +150,43 @@ class AgentResumeTests(unittest.TestCase):
             self.assertEqual(app.jobs[job_id].get('attempts', 0), 0)
             deploy.assert_not_called()
 
+    def test_resume_worker_start_failure_clears_secret_and_interrupts_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_id = 'd' * 16
+            source = root / job_id / 'source'
+            work = root / job_id / 'work'
+            shutil.copytree('examples/unready-node', source)
+            shutil.copytree(source, work)
+            app = App(root, AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            app.jobs[job_id] = {'id': job_id, 'mode': 'agent', 'status': 'waiting_input',
+                                'target': 'local-docker', 'project': str(source),
+                                'plan': None, 'events': [], 'steps': 2, 'attempts': 0,
+                                'missing_environment': ['APP_SECRET'],
+                                'work_digest': source_digest(work)}
+            app.save(job_id)
+            secret = 'synthetic-secret-for-start-failure'
+            payload = json.dumps({'environment': {'APP_SECRET': secret}}).encode()
+            handler = handler_for(app).__new__(handler_for(app))
+            handler.path = f'/api/deployments/{job_id}/resume'
+            handler.headers = {'X-OneDeploy-Token': app.token,
+                               'Content-Length': str(len(payload))}
+            handler.rfile = io.BytesIO(payload)
+            handler.json_response = Mock()
+            captured = []
+            def fail_start(thread):
+                captured.append(thread._args[1])
+                raise RuntimeError('no thread')
+            with patch('onedeploy.server.threading.Thread.start', autospec=True,
+                       side_effect=fail_start):
+                handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args,
+                             (202, {'id': job_id, 'status': 'interrupted'}))
+            self.assertEqual(captured, [{}])
+            stored = (root / job_id / 'job.json').read_text()
+            self.assertEqual(json.loads(stored)['status'], 'interrupted')
+            self.assertNotIn(secret, stored)
+
 
 if __name__ == '__main__':
     unittest.main()

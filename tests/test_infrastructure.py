@@ -272,6 +272,29 @@ class InfrastructureTests(unittest.TestCase):
             self.assertFalse((root / ('b' * 16)).exists())
             worker.assert_not_called()
 
+    def test_worker_start_failure_persists_interrupted_upload(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('package.json', '{"scripts":{"start":"node server.js"}}')
+            bundle.writestr('server.js', 'console.log("ready")')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = App(root, AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            handler = handler_for(app).__new__(handler_for(app))
+            handler.path = '/api/deployments'
+            handler.headers = {'X-OneDeploy-Token': app.token,
+                               'Content-Length': str(len(archive.getvalue()))}
+            handler.rfile = io.BytesIO(archive.getvalue())
+            handler.json_response = Mock()
+            with patch('onedeploy.server.threading.Thread.start', side_effect=RuntimeError('no thread')):
+                handler.do_POST()
+            status, payload = handler.json_response.call_args.args
+            self.assertEqual((status, payload['status']), (202, 'interrupted'))
+            stored = json.loads((root / payload['id'] / 'job.json').read_text())
+            self.assertEqual(stored['status'], 'interrupted')
+            self.assertEqual(stored['attempts'], 0)
+            self.assertTrue(any(event['stage'] == 'interrupted' for event in stored['events']))
+
     def test_analyze_failure_removes_uncommitted_upload(self):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, 'w') as bundle:

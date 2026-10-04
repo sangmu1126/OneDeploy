@@ -330,6 +330,24 @@ class App:
                                   "stage": stage, "message": message})
             self.save(job_id)
 
+    def start_job_worker(self, job_id, worker, environment=None):
+        args = (job_id,) if environment is None else (job_id, environment)
+        try:
+            threading.Thread(target=worker, args=args, daemon=True).start()
+        except Exception:
+            if environment is not None:
+                environment.clear()
+            with self.lock:
+                job = self.jobs[job_id]
+                job['status'] = 'interrupted'
+                job['events'].append({
+                    'time': datetime.now(timezone.utc).isoformat(),
+                    'stage': 'interrupted',
+                    'message': '배포 작업을 시작하지 못했습니다. 실행 결과를 확인하고 새 배포를 시작하세요.'})
+                self.save(job_id)
+            return False
+        return True
+
     def check_and_record_health(self, job_id: str, source: str = 'manual') -> dict:
         if source not in {'automatic', 'manual'}:
             raise ValueError('Invalid health check source')
@@ -1589,8 +1607,8 @@ def handler_for(app: App):
                             return
                         self.json_response(202, {"id": job_id, "status": "provisioning"})
                     else:
-                        threading.Thread(target=app.run_agent, args=(job_id,), daemon=True).start()
-                        self.json_response(202, {"id": job_id, "status": "running"})
+                        started = app.start_job_worker(job_id, app.run_agent)
+                        self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
                     return
                 if self.path.startswith("/api/deployments/") and self.path.endswith("/resume"):
                     job_id = self.path.split('/')[-2]
@@ -1618,8 +1636,8 @@ def handler_for(app: App):
                         environment = validate_environment(payload['environment'], job['missing_environment'])
                         job.update(status="running", environment_names=sorted(environment), missing_environment=[])
                         app.save(job_id)
-                    threading.Thread(target=app.run_agent, args=(job_id, environment), daemon=True).start()
-                    self.json_response(202, {"id": job_id, "status": "running"})
+                    started = app.start_job_worker(job_id, app.run_agent, environment)
+                    self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
                     return
                 if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/resume-postgres", self.path):
                     job_id = self.path.split('/')[3]
@@ -1709,8 +1727,8 @@ def handler_for(app: App):
                         job["status"] = "running"
                         job["environment_names"] = sorted(environment)
                         app.save(job_id)
-                    threading.Thread(target=app.run, args=(job_id, environment), daemon=True).start()
-                    self.json_response(202, {"id": job_id, "status": "running"})
+                    started = app.start_job_worker(job_id, app.run, environment)
+                    self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
                     return
                 self.json_response(404, {"error": "Not found"})
             except Exception as exc:
