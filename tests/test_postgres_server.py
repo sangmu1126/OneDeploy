@@ -515,6 +515,65 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(calls[0][4], self.app.postgres_operations.plans['demo-app']['request'])
         self.assertEqual(calls[0][5].migrations[0].name, '0001_init.sql')
 
+    def test_one_action_repairs_python_database_connection_before_deployment(self):
+        original = ('from flask import Flask\nimport psycopg\napp = Flask(__name__)\n'
+                    '@app.get("/health")\ndef health():\n    with psycopg.connect(host="localhost"):\n'
+                    '        return {"ok": True}\n')
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, 'w') as bundle:
+            bundle.writestr('app.py', original)
+            bundle.writestr('requirements.txt', 'flask==3.1.1\ngunicorn==23.0.0\npsycopg[binary]==3.3.6\n')
+            bundle.writestr('migrations/0001_init.sql', 'CREATE TABLE demo (id int);')
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}):
+            status, payload = self.upload(content.getvalue(), postgres=False, create_plan_id=token)
+        self.assertEqual(status, 202)
+        job_id = payload['id']
+        self.app.postgres_operations.operations['demo-app'] = self.created_operation(
+            'succeeded', 'onedeploy-demo-app')
+        actions = [
+            ('read_project_files', {'paths': ['app.py', 'requirements.txt']}),
+            ('apply_project_patch', {'path': 'app.py', 'old_text': 'host="localhost"',
+                                     'new_text': 'connect_timeout=5'}),
+            ('configure_deployment', {'start_script': 'wsgi:app.py', 'build_script': None,
+                                      'port': 3000, 'health_path': '/health',
+                                      'required_env': ['PGHOST', 'PGPASSWORD']}),
+            ('deploy_application', {}),
+        ]
+        wire = ResponsesWireFixture(actions, expected_target='aws-ecs-express',
+                                    planner_requests=0, managed_postgres=True)
+        self.app.ai_settings = AISettings('wire-fixture-key', 'wire-fixture-model')
+        self.app.agent_factory = OpenAIDeployAgent
+        calls = []
+        class Adapter:
+            def __init__(self, event, settings, existing=None, checkpoint=None):
+                pass
+            def deploy(self, project, plan, attempt_id, environment,
+                       postgres=None, migrations=None):
+                calls.append((project, plan, environment, postgres, migrations))
+                assert 'psycopg.connect(connect_timeout=5)' in (project / 'app.py').read_text()
+                assert plan.runtime == 'python-wsgi'
+                assert 'gunicorn' in plan.dockerfile
+                return {'url': 'https://example.test', 'target': 'aws-ecs-express',
+                        'database': {'database_id': 'onedeploy-demo-app'}}
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}), \
+                patch('urllib.request.build_opener', return_value=wire), \
+                patch('onedeploy.server.AwsExpressAdapter', Adapter):
+            self.app.run_postgres_then_agent(job_id)
+        wire.assert_complete()
+        job = self.app.jobs[job_id]
+        self.assertEqual(job['status'], 'succeeded', job['events'][-1])
+        self.assertEqual(job['steps'], 4)
+        self.assertEqual(job['attempts'], 1)
+        self.assertEqual(job['changes'][0]['path'], 'app.py')
+        self.assertEqual((Path(job['project']) / 'app.py').read_text(), original)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], {})
+        self.assertEqual(calls[0][3], self.app.postgres_operations.plans['demo-app']['request'])
+        self.assertEqual(calls[0][4].migrations[0].name, '0001_init.sql')
+
     def test_provisioning_waits_for_confirmed_database_before_agent(self):
         token = self.reviewed_create_plan()
         with patch.object(self.app.postgres_operations, 'start',

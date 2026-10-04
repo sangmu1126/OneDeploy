@@ -384,3 +384,10 @@ CA 주입의 재빌드 단위 테스트, 실제 로컬 PostgreSQL TLS v1→v2 �
 WSGI 시작 설정을 선택한다. Python ZIP 업로드의 DB 바인딩·의존 탐지와 고정
 도구 호출의 관리형 환경값·SQL 마이그레이션·AWS 어댑터 전달은 모의 AWS
 테스트로 검증했다. Python API/UI의 실제 AWS 배포는 실행하지 않았다.
+
+Python 앱의 한 번 DB 생성·배포 경로에서 코드 자동 수정까지 연결했다. 잘못된
+`localhost` PostgreSQL 접속을 가진 Flask 소스 ZIP을 업로드하고, 고정 Responses
+도구 응답이 소스를 읽어 작업용 복사본에서 연결 설정을 수정했다. 원본 ZIP 소스는
+유지됐으며 WSGI 생성 이미지 계획, 관리형 DB 연결 요청, SQL 마이그레이션이
+모의 AWS 어댑터에 전달됐다. 실제 모델 판단과 실계정 Python HTTP 경로는 아직
+검증하지 않았다.
