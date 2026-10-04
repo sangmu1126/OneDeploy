@@ -97,9 +97,11 @@ def source_context(project: Path) -> dict[str, str]:
         budget -= len(package_text)
     dockerfile = project / "Dockerfile"
     if dockerfile.is_file():
-        dockerfile_text = redact(dockerfile.read_text(encoding="utf-8", errors="replace"))
+        with dockerfile.open(encoding="utf-8", errors="replace") as source:
+            dockerfile_text = source.read(20001)
         if len(dockerfile_text) > 20000:
             raise AnalysisError("Dockerfile is too large for AI analysis")
+        dockerfile_text = redact(dockerfile_text)
         files["Dockerfile"] = dockerfile_text
         budget -= len(dockerfile_text)
     candidates = sorted(project.rglob("*"), key=lambda p: (len(p.relative_to(project).parts), str(p)))

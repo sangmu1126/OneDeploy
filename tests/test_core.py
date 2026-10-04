@@ -1,11 +1,12 @@
 import json
+import hashlib
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from onedeploy.core import ImageBuilder, LocalDockerAdapter, analyze, extract_project, make_plan
+from onedeploy.core import ImageBuilder, LocalDockerAdapter, analyze, extract_project, make_plan, read_package, source_digest
 from onedeploy.migrations import trusted_rds_ca_bundle
 
 
@@ -59,6 +60,28 @@ class CoreTests(unittest.TestCase):
             plan = analyze(root)
             self.assertIn("RUN npm ci", plan.dockerfile)
             self.assertIn("RUN npm run build", plan.dockerfile)
+
+    def test_large_manifest_is_rejected_and_large_source_digest_is_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'package.json').write_text('{"scripts":{},"padding":"' + 'x' * (1024 * 1024) + '"}')
+            with self.assertRaisesRegex(ValueError, '1 MiB'):
+                read_package(root)
+            (root / 'package.json').unlink()
+            content = b'z' * (2 * 1024 * 1024 + 17)
+            (root / 'large.bin').write_bytes(content)
+            expected = hashlib.sha256()
+            name = b'large.bin'
+            expected.update(len(name).to_bytes(8, 'big') + name)
+            expected.update(len(content).to_bytes(8, 'big') + content)
+            self.assertEqual(source_digest(root), expected.hexdigest())
+
+    def test_large_dockerfile_is_rejected_before_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'Dockerfile').write_text('FROM node:22\n' + '#' * 40000)
+            with self.assertRaisesRegex(ValueError, '40,000'):
+                make_plan(root, 'dockerfile', None)
 
     def test_existing_dockerfile_is_built_without_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 
 MAX_UPLOAD = 20 * 1024 * 1024
 MAX_EXTRACTED = 100 * 1024 * 1024
+MAX_PACKAGE_BYTES = 1024 * 1024
 IGNORED = {"node_modules", ".venv", "venv", "__pycache__", ".git", ".env", ".onedeploy", "__MACOSX"}
 SOURCE_SUFFIXES = {".js", ".cjs", ".mjs", ".ts", ".tsx", ".jsx", ".json",
                    ".py", ".rb", ".go", ".php", ".java", ".kt", ".cs", ".rs",
@@ -162,14 +163,28 @@ def source_digest(project: Path) -> str:
             raise ValueError("Project symbolic links are not supported")
         if path.is_file():
             relative = path.relative_to(project).as_posix().encode()
-            content = path.read_bytes()
             digest.update(len(relative).to_bytes(8, "big") + relative)
-            digest.update(len(content).to_bytes(8, "big") + content)
+            size = path.stat().st_size
+            digest.update(size.to_bytes(8, "big"))
+            with path.open('rb') as source:
+                remaining = size
+                while remaining:
+                    chunk = source.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("Project source changed while hashing")
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if source.read(1):
+                    raise ValueError("Project source changed while hashing")
     return digest.hexdigest()
 
 
 def read_package(project: Path) -> dict:
-    package = json.loads((project / "package.json").read_text())
+    with (project / "package.json").open('rb') as source:
+        content = source.read(MAX_PACKAGE_BYTES + 1)
+    if len(content) > MAX_PACKAGE_BYTES:
+        raise ValueError("package.json exceeds the 1 MiB analysis limit")
+    package = json.loads(content.decode('utf-8'))
     if not isinstance(package, dict) or not isinstance(package.get("scripts", {}), dict):
         raise ValueError("package.json must contain a scripts object")
     return package
@@ -197,7 +212,8 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
             or "//" in health_path or ".." in health_path):
         raise ValueError("Health path must be an absolute local HTTP path")
     if custom:
-        dockerfile = existing_dockerfile.read_text()
+        with existing_dockerfile.open(encoding='utf-8') as source:
+            dockerfile = source.read(40001)
         if not dockerfile.strip() or len(dockerfile) > 40000:
             raise ValueError("Existing Dockerfile must contain 1 to 40,000 characters")
         metadata.setdefault("framework", "container")

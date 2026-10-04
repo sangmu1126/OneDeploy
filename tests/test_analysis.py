@@ -120,6 +120,11 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(plan.dockerfile_source, 'existing')
         self.assertEqual(plan.port, 8087)
 
+    def test_ai_context_rejects_oversized_dockerfile(self):
+        (self.project / 'Dockerfile').write_text('FROM node:22\n' + '#' * 20000)
+        with self.assertRaisesRegex(AnalysisError, 'Dockerfile is too large'):
+            source_context(self.project)
+
     def test_python_dockerfile_analysis_without_package(self):
         (self.project / 'package.json').unlink()
         (self.project / 'server.js').unlink()
