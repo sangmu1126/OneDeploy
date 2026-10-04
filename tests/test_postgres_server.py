@@ -14,6 +14,7 @@ from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsSettings
 from onedeploy.postgres import PostgresRequest
 from onedeploy.server import App, handler_for, postgres_request_from_job
+from tests.smoke_aws_postgres_api import archive as probe_archive
 
 
 ACCOUNT = '123456789012'
@@ -738,6 +739,20 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(restored.recovery_warnings, [])
         self.assertEqual(postgres_request_from_job(restored.jobs[job_id]).subnet_ids,
                          ('subnet-11111111', 'subnet-22222222'))
+
+    def test_python_postgres_zip_upload_records_existing_database_binding(self):
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}):
+            status, payload = self.upload(probe_archive('python'))
+        self.assertEqual(status, 202)
+        job = self.app.jobs[payload['id']]
+        self.assertEqual(job['target'], 'aws-ecs-express')
+        self.assertEqual(job['infrastructure_plan']['workload'], 'postgresql-http')
+        self.assertIn('app.py', job['infrastructure_plan']['detected_files'])
+        self.assertEqual(job['infrastructure_plan']['database'],
+                         {'binding': 'existing', 'database_id': 'onedeploy-demo-app'})
+        self.assertTrue((Path(job['project']) / 'app.py').is_file())
+        self.assertFalse((Path(job['project']) / 'Dockerfile').exists())
 
     def test_auto_target_uses_only_supported_owned_postgres_path(self):
         database = {'database_id': 'onedeploy-demo-app'}

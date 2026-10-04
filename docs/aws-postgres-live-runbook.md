@@ -336,6 +336,9 @@ smoke가 성공하면 임시 ECS 서비스와 ECR 이미지 태그를 정리한�
   환경값 요청·재개, ECS 배포, HTTP 데이터 쓰기/읽기, `/health`, 종료 API까지
   실계정에서 통과했다. AI 도구 호출은 고정 테스트 응답이었다. 임시 ECS 서비스·
   앱 이미지 태그는 정리했으며 RDS와 비밀은 유지한다.
+  API 드릴과 아래 Chrome 드릴은 `--probe-runtime python`으로 Flask·Psycopg
+  예제를 선택할 수 있다. Python 선택은 로컬 모의 AWS 테스트까지만 확인했고
+  실계정 실행은 아직 하지 않았다.
 
 ## 2026-10-01 실제 Chrome UI 경로
 
@@ -348,6 +351,7 @@ PYTHONPATH=. python3 tests/smoke_aws_postgres_browser.py \
   --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
   --service-security-group <APP_OWNED_SERVICE_GROUP_ID>
 # 실제 Chrome에서 조회만 확인하려면 --browser-read-only 추가
+# Python ZIP을 시험하려면 --probe-runtime python 추가
 # 실제 ECS 서비스와 이미지 빌드를 실행할 때만 --apply 추가
 ```
 ## 사용자 DB 폐기 경로의 읽기 전용 검증

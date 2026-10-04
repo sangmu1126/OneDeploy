@@ -42,6 +42,7 @@ def main(argv=None):
     parser.add_argument('--region', required=True)
     parser.add_argument('--service-security-group', required=True)
     parser.add_argument('--snapshot-name', default='backup-' + datetime.now(timezone.utc).strftime('%Y%m%d'))
+    parser.add_argument('--probe-runtime', choices=('node', 'python'), default='node')
     args = parser.parse_args(argv)
     if args.application != 'demo-app':
         parser.error('The browser driver currently uses the demo-app fixture only')
@@ -65,7 +66,8 @@ def main(argv=None):
         subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
                        check=True, capture_output=True, text=True, timeout=20)
     state = Path(tempfile.mkdtemp(prefix='onedeploy-postgres-browser-smoke-'))
-    app = App(state, AISettings('fixture-only', 'scripted'), PostgresFixture,
+    app = App(state, AISettings('fixture-only', 'scripted'),
+              lambda settings: PostgresFixture(settings, args.probe_runtime),
               aws_settings=settings, monitor_interval=0)
     class QuietHandler(handler_for(app)):
         def log_message(self, *_args):
@@ -75,7 +77,7 @@ def main(argv=None):
     thread.start()
     url = f'http://127.0.0.1:{server.server_port}/'
     archive_path = state / 'probe.zip'
-    archive_path.write_bytes(archive())
+    archive_path.write_bytes(archive(args.probe_runtime))
     profile = state / 'chrome-profile'
     chrome_log = (state / 'chrome.log').open('w')
     chrome = subprocess.Popen([str(CHROME), '--headless=new', '--no-first-run',

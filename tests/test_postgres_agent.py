@@ -1,13 +1,48 @@
 import json
+import io
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from onedeploy.agent import AgentError, DeploymentAgent, DeploymentTools
 from onedeploy.postgres import PostgresRequest
+from tests.smoke_aws_postgres_api import PostgresFixture, archive
 
 
 class PostgresAgentTests(unittest.TestCase):
+    def test_python_api_fixture_uploads_and_deploys_managed_postgres_app(self):
+        with zipfile.ZipFile(io.BytesIO(archive('python'))) as bundle:
+            names = set(bundle.namelist())
+        self.assertIn('app.py', names)
+        self.assertIn('requirements.txt', names)
+        self.assertIn('migrations/9000_onedeploy_probe.sql', names)
+        self.assertNotIn('Dockerfile', names)
+        request = PostgresRequest('demo-app', '123456789012', 'ap-northeast-2', 'vpc-12345678',
+                                  ('subnet-11111111', 'subnet-22222222'), 'sg-33333333')
+        calls = []
+        class Adapter:
+            def deploy(self, project, plan, attempt_id, environment, postgres=None, migrations=None):
+                calls.append((project, plan, attempt_id, environment, postgres, migrations))
+                return {'url': 'https://example.test', 'target': 'aws-ecs-express'}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = DeploymentTools(Path('examples/postgres-probe-python'), root / 'work',
+                                    'a' * 16, {'PROBE_KEY': 'p' * 32}, lambda *_: None,
+                                    lambda **_: None, target='aws-ecs-express',
+                                    adapter_factory=lambda _event: Adapter(), postgres_request=request)
+            result = DeploymentAgent(PostgresFixture(None, 'python'), tools).run()
+            self.assertEqual(result['url'], 'https://example.test')
+            self.assertEqual(len(calls), 1)
+            project, plan, attempt, environment, postgres, migrations = calls[0]
+            self.assertEqual(plan.runtime, 'python-wsgi')
+            self.assertEqual(plan.health_path, '/health')
+            self.assertFalse((project / 'Dockerfile').exists())
+            self.assertEqual(attempt, 'a' * 16 + '-a1')
+            self.assertEqual(environment, {'PROBE_KEY': 'p' * 32})
+            self.assertEqual(postgres, request)
+            self.assertEqual(migrations.migrations[0].name, '9000_onedeploy_probe.sql')
+
     def test_explicit_postgres_agent_path_supplies_managed_environment(self):
         request = PostgresRequest('demo-app', '123456789012', 'ap-northeast-2', 'vpc-12345678',
                                   ('subnet-11111111', 'subnet-22222222'), 'sg-33333333')

@@ -378,3 +378,9 @@ AWS PostgreSQL 스모크의 성공 판정을 임시 ECS 정리 이후로 옮겼�
 폴더가 정리되고 원본의 체크섬과 Python 런타임 분석은 유지된다. 기존 Dockerfile과
 CA 주입의 재빌드 단위 테스트, 실제 로컬 PostgreSQL TLS v1→v2 드릴, WSGI
 서버 업로드→Docker HTTP·종료 드릴, 기존 Dockerfile HTTP 드릴을 통과했다.
+
+기존 RDS를 쓰는 API·Chrome 실계정 드릴에 Python ZIP 선택 옵션을 추가했다.
+기본 Node 예제는 유지하고 `--probe-runtime python`에서 Flask·Psycopg 소스와
+WSGI 시작 설정을 선택한다. Python ZIP 업로드의 DB 바인딩·의존 탐지와 고정
+도구 호출의 관리형 환경값·SQL 마이그레이션·AWS 어댑터 전달은 모의 AWS
+테스트로 검증했다. Python API/UI의 실제 AWS 배포는 실행하지 않았다.

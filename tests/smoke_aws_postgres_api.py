@@ -25,17 +25,20 @@ from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
 from onedeploy.server import App, handler_for
 
 
-SOURCE = Path(__file__).resolve().parents[1] / 'examples' / 'postgres-probe-node'
+SOURCES = {runtime: Path(__file__).resolve().parents[1] / 'examples' / f'postgres-probe-{runtime}'
+           for runtime in ('node', 'python')}
+START_SCRIPTS = {'node': 'dockerfile', 'python': 'wsgi:app.py'}
 
 
 class PostgresFixture:
     """Exercise the real deployment engine without claiming live AI judgment."""
-    def __init__(self, _settings):
+    def __init__(self, _settings, runtime='node'):
         self.index = 0
+        self.runtime = runtime
 
     def next(self, _history):
         actions = [
-            ('configure_deployment', {'start_script': 'dockerfile', 'build_script': None,
+            ('configure_deployment', {'start_script': START_SCRIPTS[self.runtime], 'build_script': None,
                                       'port': 3000, 'health_path': '/health',
                                       'required_env': ['PROBE_KEY', 'PGHOST', 'PGPORT',
                                                        'PGDATABASE', 'PGUSER', 'PGPASSWORD']}),
@@ -46,12 +49,13 @@ class PostgresFixture:
         return call(name, arguments, self.index)
 
 
-def archive() -> bytes:
+def archive(runtime='node') -> bytes:
+    source = SOURCES[runtime]
     content = io.BytesIO()
     with zipfile.ZipFile(content, 'w') as bundle:
-        for path in sorted(SOURCE.rglob('*')):
+        for path in sorted(source.rglob('*')):
             if path.is_file():
-                bundle.write(path, path.relative_to(SOURCE).as_posix())
+                bundle.write(path, path.relative_to(source).as_posix())
     return content.getvalue()
 
 
@@ -64,6 +68,7 @@ def main(argv=None):
     parser.add_argument('--vpc-id', required=True)
     parser.add_argument('--subnet-id', action='append', required=True)
     parser.add_argument('--service-security-group', required=True)
+    parser.add_argument('--probe-runtime', choices=('node', 'python'), default='node')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'\d{12}', args.account):
         parser.error('--account must be a 12-digit AWS account ID')
@@ -86,7 +91,8 @@ def main(argv=None):
                    check=True, capture_output=True, text=True, timeout=20)
 
     state = Path(tempfile.mkdtemp(prefix='onedeploy-postgres-api-smoke-'))
-    app = App(state, AISettings('fixture-only', 'scripted'), PostgresFixture,
+    app = App(state, AISettings('fixture-only', 'scripted'),
+              lambda settings: PostgresFixture(settings, args.probe_runtime),
               aws_settings=settings, monitor_interval=0)
     class QuietHandler(handler_for(app)):
         def log_message(self, *_args):
@@ -108,7 +114,7 @@ def main(argv=None):
             return json.load(response)
 
     try:
-        job_id = api('/api/deployments', archive(), {
+        job_id = api('/api/deployments', archive(args.probe_runtime), {
             'X-Deploy-Target': 'aws-ecs-express', 'X-Public-Access': 'true',
             'X-Application-Id': args.application, 'X-Postgres-Existing': 'true',
             'X-Postgres-Vpc-Id': args.vpc_id,
