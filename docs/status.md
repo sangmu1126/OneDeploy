@@ -24,8 +24,9 @@
   Python DB 접속 성공을 뜻하지 않는다.
   배포 완료 확인은 이번 런타임이 요청한 TLS 프로필과 ECS의 실제 설정을 대조하며,
   Python 요청이 기존 Node 프로필로 바뀐 경우 성공 처리하지 않는다.
-  Python PostgreSQL 예제는 임시 로컬 TLS DB에서 `verify-full` 연결·HTTP 데이터
-  쓰기/읽기/삭제를 통과했다. 잘못된 호스트 이름과 CA는 실제 libpq 오류로 거부됐다.
+  Python PostgreSQL 예제는 임시 로컬 TLS DB에서 서로 다른 v1·v2 이미지를
+  빌드해 `verify-full` 연결·v1 쓰기·v2 읽기/삭제를 통과했다. 잘못된 호스트 이름과
+  CA는 v2에서 실제 libpq 오류로 거부됐고 시험 Docker 자원 정리도 확인했다.
   이 드릴은 AWS 네트워크·RDS·ECS 접속을 검증하지 않는다.
   실계정용 PostgreSQL 업데이트 smoke는 `--probe-runtime python` 선택과
   릴리스별 깨끗한 소스 사본을 지원한다. 두 런타임의 배포·마이그레이션·HTTP

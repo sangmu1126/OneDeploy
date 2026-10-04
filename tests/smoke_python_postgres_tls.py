@@ -6,6 +6,7 @@ import json
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -17,9 +18,9 @@ from onedeploy.core import ImageBuilder, make_plan
 from onedeploy.migrations import collect_sql_migrations
 
 
-def command(args, *, check=True):
+def command(args):
     result = subprocess.run(args, capture_output=True, text=True, timeout=600)
-    if check and result.returncode:
+    if result.returncode:
         raise RuntimeError(f'{args[0]} {args[1]} failed: {result.stderr[-3000:]}')
     return result.stdout.strip()
 
@@ -73,8 +74,11 @@ def main(argv=None):
     network = f'onedeploy-tls-{run_id}'
     database = f'onedeploy-tls-db-{run_id}'
     image_db = f'onedeploy/tls-db-{run_id}:local'
-    image_app = f'onedeploy/tls-app-{run_id}:local'
+    image_app_v1 = f'onedeploy/tls-app-{run_id}:v1'
+    image_app_v2 = f'onedeploy/tls-app-{run_id}:v2'
     containers = []
+    images = []
+    network_created = False
     with tempfile.TemporaryDirectory(prefix='onedeploy-python-tls-') as directory:
         root = Path(directory)
         try:
@@ -97,12 +101,14 @@ def main(argv=None):
                 '"ssl_key_file=/etc/postgresql/certs/server.key"]\n')
             command(['docker', 'build', '--build-arg', f'BASE_IMAGE={args.postgres_image}',
                      '-t', image_db, str(db_context)])
+            images.append(image_db)
             command(['docker', 'network', 'create', network])
+            network_created = True
             password = secrets.token_urlsafe(24)
-            containers.append(database)
             command(['docker', 'run', '-d', '--name', database, '--network', network,
                      '--network-alias', 'db', '--network-alias', 'wrong-db',
                      '-e', f'POSTGRES_PASSWORD={password}', image_db])
+            containers.append(database)
             for _ in range(120):
                 ready = subprocess.run(['docker', 'exec', database, 'pg_isready', '-U', 'postgres',
                                         '-d', 'postgres'], capture_output=True, timeout=10)
@@ -114,27 +120,32 @@ def main(argv=None):
             assert command(['docker', 'exec', database, 'psql', '-U', 'postgres', '-Atc',
                             'SHOW ssl']) == 'on'
 
-            project = root / 'app'
-            shutil.copytree('examples/postgres-probe-python', project)
-            shutil.copyfile(root / 'wrong-ca.crt', project / '.onedeploy-wrong-ca.pem')
-            plan = make_plan(project, 'wsgi:app.py', None, 4321, '/health',
-                             required_env=['PROBE_KEY'])
-            assert plan.runtime == 'python-wsgi'
-            assert collect_sql_migrations(project).migrations
-            ImageBuilder(command, lambda *_: None).build(
-                project, plan, image_app, extra_ca_bundle=root / 'ca.crt')
+            def build_app(release, image):
+                project = root / f'app-{release}'
+                shutil.copytree('examples/postgres-probe-python', project)
+                shutil.copyfile(root / 'wrong-ca.crt', project / '.onedeploy-wrong-ca.pem')
+                (project / 'release.txt').write_text(release + '\n')
+                plan = make_plan(project, 'wsgi:app.py', None, 4321, '/health',
+                                 required_env=['PROBE_KEY'])
+                assert plan.runtime == 'python-wsgi'
+                assert collect_sql_migrations(project).migrations
+                ImageBuilder(command, lambda *_: None).build(
+                    project, plan, image, extra_ca_bundle=root / 'ca.crt')
+                images.append(image)
+
+            build_app('v1', image_app_v1)
             probe_key = secrets.token_urlsafe(32)
             common_env = ['-e', 'PORT=4321', '-e', 'PGPORT=5432', '-e', 'PGDATABASE=postgres',
                           '-e', 'PGUSER=postgres', '-e', f'PGPASSWORD={password}',
                           '-e', 'PGSSLMODE=verify-full', '-e', f'PROBE_KEY={probe_key}']
 
-            def start_app(label, host, ca_override=None):
+            def start_app(label, host, image, ca_override=None):
                 name = f'onedeploy-tls-{label}-{run_id}'
                 extra = ['-e', f'PGSSLROOTCERT={ca_override}'] if ca_override else []
-                containers.append(name)
                 command(['docker', 'run', '-d', '--name', name, '--network', network,
                          '-p', '127.0.0.1::4321', *common_env, '-e', f'PGHOST={host}',
-                         *extra, image_app])
+                         *extra, image])
+                containers.append(name)
                 port = command(['docker', 'port', name, '4321/tcp']).rsplit(':', 1)[1]
                 base = f'http://127.0.0.1:{port}'
                 wait_for_http(base)
@@ -146,26 +157,50 @@ def main(argv=None):
                                         capture_output=True, text=True, timeout=20)
                 assert result.returncode != 0 and expected in result.stderr.lower()
 
-            good, _ = start_app('good', 'db')
+            good, _ = start_app('v1', 'db', image_app_v1)
             record_id = uuid.uuid4().hex
             path = '/records/' + record_id
             assert http(good, path, 'POST', probe_key) == (200, {'value': record_id})
             assert http(good, path, 'GET', probe_key) == (200, {'value': record_id})
-            assert http(good, path, 'DELETE', probe_key) == (200, {'deleted': True})
-            wrong_host, wrong_host_name = start_app('wrong-host', 'wrong-db')
+            build_app('v2', image_app_v2)
+            assert command(['docker', 'image', 'inspect', '--format', '{{.Id}}', image_app_v1]) != \
+                command(['docker', 'image', 'inspect', '--format', '{{.Id}}', image_app_v2])
+            updated, _ = start_app('v2', 'db', image_app_v2)
+            assert http(updated, path, 'GET', probe_key) == (200, {'value': record_id})
+            assert http(updated, path, 'DELETE', probe_key) == (200, {'deleted': True})
+            wrong_host, wrong_host_name = start_app('wrong-host', 'wrong-db', image_app_v2)
             assert http(wrong_host, path, 'GET', probe_key) == (503, {'error': 'database unavailable'})
             assert_tls_failure(wrong_host_name, 'does not match host name')
-            wrong_ca, wrong_ca_name = start_app('wrong-ca', 'db', '/app/.onedeploy-wrong-ca.pem')
+            wrong_ca, wrong_ca_name = start_app(
+                'wrong-ca', 'db', image_app_v2, '/app/.onedeploy-wrong-ca.pem')
             assert http(wrong_ca, path, 'GET', probe_key) == (503, {'error': 'database unavailable'})
             assert_tls_failure(wrong_ca_name, 'certificate verify failed')
-            print('PASS: Python WSGI image connected to TLS PostgreSQL with verify-full')
-            print('PASS: write/read/delete and wrong host/CA rejection')
         finally:
+            original_error = sys.exc_info()[1]
+            cleanup_errors = []
             for name in reversed(containers):
-                command(['docker', 'rm', '-f', name], check=False)
-            command(['docker', 'network', 'rm', network], check=False)
-            for image in (image_app, image_db):
-                command(['docker', 'image', 'rm', image], check=False)
+                try:
+                    command(['docker', 'rm', '-f', name])
+                except RuntimeError as exc:
+                    cleanup_errors.append(str(exc))
+            if network_created:
+                try:
+                    command(['docker', 'network', 'rm', network])
+                except RuntimeError as exc:
+                    cleanup_errors.append(str(exc))
+            for image in reversed(images):
+                try:
+                    command(['docker', 'image', 'rm', image])
+                except RuntimeError as exc:
+                    cleanup_errors.append(str(exc))
+            if cleanup_errors:
+                message = 'Local Docker cleanup failed: ' + '; '.join(cleanup_errors)
+                if original_error is not None:
+                    original_error.add_note(message)
+                else:
+                    raise RuntimeError(message)
+        print('PASS: Python WSGI images connected to TLS PostgreSQL with verify-full')
+        print('PASS: v1 write, v2 read/delete, v2 wrong host/CA rejection, and cleanup')
 
 
 if __name__ == '__main__':

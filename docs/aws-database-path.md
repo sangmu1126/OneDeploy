@@ -124,13 +124,14 @@ SHA-256 digest를 재조회하고 태스크 정의에는 변경 불가능한 dig
 Dockerfile 없이 생성한 Python 앱 이미지는 같은 번들을 `PGSSLROOTCERT`로 지정하고,
 ECS 연결 환경에 `PGSSLMODE=verify-full`을 넣어 libpq 기반 클라이언트가 인증서
 체인과 RDS 엔드포인트 이름을 함께 검사하도록 한다. 기존 Node 배포 설정은 유지한다.
-이 Python AWS 배포 경로는 이미지·ECS 구성 단위 테스트까지만 확인했고 실제 AWS DB 접속은
-아직 검증하지 않았다. 앱이 자체 연결 문자열에서 TLS 옵션을 덮어쓰면 별도 소스
-검토가 필요하다.
+이 Python AWS 배포 경로는 이미지·ECS 구성 단위 테스트와 로컬 Docker 데이터
+드릴까지 확인했고 실제 AWS DB 접속은 아직 검증하지 않았다. 앱이 자체 연결
+문자열에서 TLS 옵션을 덮어쓰면 별도 소스 검토가 필요하다.
 `PYTHONPATH=. python3 -m tests.smoke_python_postgres_tls`는 로컬 TLS PostgreSQL과
-Python 예제의 이미지·HTTP 데이터 경로를 검증한다. 올바른 CA/호스트 이름은
-연결하고 둘 중 하나가 틀리면 libpq 오류로 거부한다. Docker·OpenSSL이 필요하며
-시험용 Docker 자원을 정리한다. 이 검증은 AWS ECS·RDS 연결 성공의 증거가 아니다.
+Python 예제의 v1→v2 이미지·HTTP 데이터 보존 경로를 검증한다. v1이 기록한 행을
+v2가 읽고 삭제하며, v2에서 올바른 CA/호스트 이름은 연결하고 둘 중 하나가
+틀리면 libpq 오류로 거부한다. Docker·OpenSSL이 필요하며 시험용 Docker 자원
+정리 실패도 드릴 실패로 처리한다. 이 검증은 AWS ECS·RDS 연결 성공의 증거가 아니다.
 태스크 종료 코드가 0일 때만 웹 서비스 배포를 계속하며,
 성공 후 마이그레이션 태스크 정의와 임시 ECR 이미지 태그를 정리한다.
 태스크 정의·태스크 ARN·이미지·SQL 묶음 체크섬과 성공 결과를 작업 기록에 저장한다.
