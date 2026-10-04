@@ -391,9 +391,23 @@ v1 작업 `ae75ab12d2da48a7`의 HTTP·DB 쓰기
 v1 `superseded`를 복구했고, 원래 URL의 v2 응답을 확인했다. 복구된 최신 작업의
 종료 경로로 임시 서비스를 `INACTIVE`로 만들고 두 ECR 태그도 삭제했다. 이 첫
 시도는 브라우저의 완료 화면과 v1 테스트 행의 v2 삭제를 확인하지 못했다.
-행 ID가 첫 시도의 휘발성 메모리에만 있어, 시험용 `onedeploy_probe_migrated`
-테이블에 임시 행 1건이 남아 있을 수 있다. 다른 앱 테이블이나 스냅샷은 변경하지
-않았다.
+후속 조사에서 첫 v1 ECS 태스크의 CloudWatch 접근 로그에 시험용 행
+`26131f2d06d645348c876fe9b45ca6dd`의 POST·GET만 있고 DELETE가 없음을
+확인했다. 2026-10-05에 보존 RDS를 일시 시작하고 아래의 ID 지정 정리 모드로
+이 행을 조회·삭제했다. 정리 모드는 새 행을 쓰거나 SQL 마이그레이션을 실행하지
+않는다. 실행 결과는 `PASS`였고 임시 서비스
+`onedeploy-e462f985d92e439d-a1`은 `INACTIVE`, 해당 ECR 태그는 `[]`였다.
+다른 앱 테이블이나 스냅샷은 변경하지 않았다. 이후 RDS는 `stopped`까지
+확인했고 삭제 보호와 스토리지 암호화는 유지됐다.
+
+```sh
+PYTHONPATH=. python3 -m tests.smoke_aws_postgres \
+  --application demo-app --account <AWS_ACCOUNT_ID> --region ap-northeast-2 \
+  --vpc-id <VPC_ID> --subnet-id <SUBNET_A> --subnet-id <SUBNET_B> \
+  --service-security-group <APP_SERVICE_GROUP_ID> --probe-runtime python \
+  --cleanup-record-id <EXACT_32_HEX_PROBE_ID>
+# 기존 RDS 소유권·상태만 읽는다. 정확한 시험용 ID를 확인한 뒤에만 --apply 사용.
+```
 
 드라이버에 디버그 연결 종료 감지·재접속, 접수된 작업 다시 열기, 임시 인증값과
 행 ID의 권한 제한 로컬 기록, 업데이트 결과가 불확실할 때 자동 종료 보류를

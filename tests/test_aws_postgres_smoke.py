@@ -1,5 +1,7 @@
+import io
 import json
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,6 +10,53 @@ from tests.smoke_aws_postgres import main
 
 
 class AwsPostgresSmokeTests(unittest.TestCase):
+    def test_cleanup_mode_deletes_only_the_named_record_without_migration(self):
+        record_id = 'a' * 32
+        arguments = ['--apply', '--application', 'demo-app', '--account', '123456789012',
+                     '--region', 'ap-northeast-2', '--vpc-id', 'vpc-12345678',
+                     '--subnet-id', 'subnet-11111111', '--subnet-id', 'subnet-22222222',
+                     '--service-security-group', 'sg-33333333', '--probe-runtime', 'python',
+                     '--cleanup-record-id', record_id]
+        calls = []
+        class Adapter:
+            image = 'v1'
+            image_pushed = True
+            def deploy(self, project, plan, attempt, environment, postgres=None, migrations=None):
+                assert plan.runtime == 'python-wsgi'
+                assert migrations is None
+                assert postgres.application_id == 'demo-app'
+                calls.append(('deploy', attempt))
+                return {'url': 'https://example.test', 'service_arn': 'service-arn', 'image': 'v1'}
+            def aws(self, *_args, **_kwargs):
+                return json.dumps({'service': {'currentDeployment': None,
+                    'activeConfigurations': [{'primaryContainer': {'image': 'v1'}}]}})
+            def retire(self, result, attempt):
+                calls.append(('retire', result['images'], attempt))
+        with patch('tests.smoke_aws_postgres.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app',
+                                 'stack_id': 'owned-stack', 'status': 'available'}), \
+                patch('tests.smoke_aws_postgres.AwsExpressAdapter', return_value=Adapter()), \
+                patch('tests.smoke_aws_postgres.probe_version') as version, \
+                patch('tests.smoke_aws_postgres.probe',
+                      side_effect=lambda _url, _key, actual, method: calls.append((method, actual))):
+            main(arguments)
+        version.assert_called_once_with('https://example.test', 'v1')
+        self.assertEqual([item[0] for item in calls], ['deploy', 'GET', 'DELETE', 'retire'])
+        self.assertEqual(calls[1][1], record_id)
+        self.assertEqual(calls[2][1], record_id)
+        self.assertEqual(calls[3][1], ['v1'])
+
+    def test_cleanup_mode_rejects_invalid_id_before_aws_lookup(self):
+        arguments = ['--application', 'demo-app', '--account', '123456789012',
+                     '--region', 'ap-northeast-2', '--vpc-id', 'vpc-12345678',
+                     '--subnet-id', 'subnet-11111111', '--subnet-id', 'subnet-22222222',
+                     '--service-security-group', 'sg-33333333', '--probe-runtime', 'python',
+                     '--cleanup-record-id', 'not-a-record']
+        with patch('tests.smoke_aws_postgres.AwsPostgresProvisioner.inspect_current') as inspect, \
+                redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            main(arguments)
+        inspect.assert_not_called()
+
     def test_default_mode_only_inspects_existing_database(self):
         arguments = ['--application', 'demo-app', '--account', '123456789012',
                      '--region', 'ap-northeast-2', '--vpc-id', 'vpc-12345678',

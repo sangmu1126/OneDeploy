@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import shutil
 import sys
@@ -83,7 +84,12 @@ def main(argv=None):
     parser.add_argument('--service-security-group', required=True)
     parser.add_argument('--probe-runtime', choices=('node', 'python'), default='node',
                         help='Sample app runtime for the ECS data-path drill (default: node)')
+    parser.add_argument('--cleanup-record-id',
+                        help='Only read and delete this exact smoke record; requires --probe-runtime python')
     args = parser.parse_args(argv)
+    if args.cleanup_record_id and (args.probe_runtime != 'python'
+                                   or not re.fullmatch(r'[a-f0-9]{32}', args.cleanup_record_id)):
+        parser.error('--cleanup-record-id requires a 32-character hex ID and --probe-runtime python')
     request = PostgresRequest(args.application, args.account, args.region, args.vpc_id,
                               tuple(args.subnet_id), args.service_security_group)
     request.validate()
@@ -100,7 +106,7 @@ def main(argv=None):
               / f'postgres-probe-{args.probe_runtime}')
     expected_runtime = {'node': 'custom-dockerfile', 'python': 'python-wsgi'}[args.probe_runtime]
     key = secrets.token_urlsafe(32)
-    record_id = uuid.uuid4().hex
+    record_id = args.cleanup_record_id or uuid.uuid4().hex
     first_attempt = uuid.uuid4().hex[:16] + '-a1'
     second_attempt = uuid.uuid4().hex[:16] + '-a1'
     first = AwsExpressAdapter(lambda stage, message: print(f'[v1:{stage}] {message}', flush=True), settings)
@@ -121,35 +127,40 @@ def main(argv=None):
         migrations = collect_sql_migrations(first_project)
         try:
             first_result = first.deploy(first_project, plan, first_attempt, {'PROBE_KEY': key},
-                                        postgres=request, migrations=migrations)
-            if (first_result.get('migration', {}).get('bundle_digest') != migrations.digest
-                    or first_result['migration'].get('cleanup_complete') is not True):
-                raise AssertionError('First ECS release did not complete the checked migration')
+                                        postgres=request,
+                                        migrations=None if args.cleanup_record_id else migrations)
             probe_version(first_result['url'], 'v1')
-            probe(first_result['url'], key, record_id, 'POST')
-            probe(first_result['url'], key, record_id, 'GET')
-            # Keep each release input immutable and re-check its runtime/TLS profile.
-            plan = replace(analyze(second_project), target='aws-ecs-express', health_path='/health',
-                           required_env=['PROBE_KEY'])
-            if plan.runtime != expected_runtime:
-                raise AssertionError(f'Unexpected v2 probe runtime: {plan.runtime}')
-            second_migrations = collect_sql_migrations(second_project)
-            if second_migrations.digest != migrations.digest:
-                raise AssertionError('Probe migration changed between ECS releases')
-            second = AwsExpressAdapter(lambda stage, message: print(f'[v2:{stage}] {message}', flush=True),
-                                       settings, existing=first_result)
-            second_result = second.deploy(second_project, plan, second_attempt, {'PROBE_KEY': key},
-                                          postgres=request, migrations=second_migrations)
-            if (second_result.get('migration', {}).get('bundle_digest') != second_migrations.digest
-                    or second_result['migration'].get('cleanup_complete') is not True):
-                raise AssertionError('Updated ECS release did not confirm migration idempotency')
-            if (second_result['url'] != first_result['url']
-                    or second_result['service_arn'] != first_result['service_arn']
-                    or second_result['image'] == first_result['image']):
-                raise AssertionError('ECS service update did not preserve the URL and replace the image')
-            probe_version(second_result['url'], 'v2')
-            probe(second_result['url'], key, record_id, 'GET')
-            probe(second_result['url'], key, record_id, 'DELETE')
+            if args.cleanup_record_id:
+                probe(first_result['url'], key, record_id, 'GET')
+                probe(first_result['url'], key, record_id, 'DELETE')
+            else:
+                if (first_result.get('migration', {}).get('bundle_digest') != migrations.digest
+                        or first_result['migration'].get('cleanup_complete') is not True):
+                    raise AssertionError('First ECS release did not complete the checked migration')
+                probe(first_result['url'], key, record_id, 'POST')
+                probe(first_result['url'], key, record_id, 'GET')
+                # Keep each release input immutable and re-check its runtime/TLS profile.
+                plan = replace(analyze(second_project), target='aws-ecs-express', health_path='/health',
+                               required_env=['PROBE_KEY'])
+                if plan.runtime != expected_runtime:
+                    raise AssertionError(f'Unexpected v2 probe runtime: {plan.runtime}')
+                second_migrations = collect_sql_migrations(second_project)
+                if second_migrations.digest != migrations.digest:
+                    raise AssertionError('Probe migration changed between ECS releases')
+                second = AwsExpressAdapter(lambda stage, message: print(f'[v2:{stage}] {message}', flush=True),
+                                           settings, existing=first_result)
+                second_result = second.deploy(second_project, plan, second_attempt, {'PROBE_KEY': key},
+                                              postgres=request, migrations=second_migrations)
+                if (second_result.get('migration', {}).get('bundle_digest') != second_migrations.digest
+                        or second_result['migration'].get('cleanup_complete') is not True):
+                    raise AssertionError('Updated ECS release did not confirm migration idempotency')
+                if (second_result['url'] != first_result['url']
+                        or second_result['service_arn'] != first_result['service_arn']
+                        or second_result['image'] == first_result['image']):
+                    raise AssertionError('ECS service update did not preserve the URL and replace the image')
+                probe_version(second_result['url'], 'v2')
+                probe(second_result['url'], key, record_id, 'GET')
+                probe(second_result['url'], key, record_id, 'DELETE')
         finally:
             original_error = sys.exc_info()[1]
             try:
@@ -179,7 +190,10 @@ def main(argv=None):
                     original_error.add_note(f'ECS cleanup also failed: {exc}')
                 else:
                     raise
-        print('PASS: PostgreSQL migration and write/read survived an ECS service revision update.', flush=True)
+        if args.cleanup_record_id:
+            print('PASS: exact PostgreSQL probe record read and deleted; temporary ECS resources retired.', flush=True)
+        else:
+            print('PASS: PostgreSQL migration and write/read survived an ECS service revision update.', flush=True)
 
 
 if __name__ == '__main__':
