@@ -69,6 +69,8 @@ def main():
                         help='Restart a completed scripted local job as interrupted, then retire its owned Docker attempts')
     parser.add_argument('--wire-fixture', action='store_true',
                         help='Use mocked Responses HTTP with the real OpenAI planner and agent code')
+    parser.add_argument('--resume-unstarted', action='store_true',
+                        help='Interrupt worker startup, restart the server, then resume the same upload')
     args = parser.parse_args()
     if args.python and (args.live or args.environment):
         parser.error('--python cannot be combined with --live or --environment')
@@ -82,6 +84,8 @@ def main():
     if args.wire_fixture and (args.live or args.environment or args.python or args.folder
                               or args.auto or args.interrupted_retire):
         parser.error('--wire-fixture uses the default Node app and local automatic target only')
+    if args.resume_unstarted and not args.wire_fixture:
+        parser.error('--resume-unstarted requires --wire-fixture')
     settings = (AISettings.from_environment() if args.live else
                 AISettings('wire-fixture-key', 'wire-fixture-model') if args.wire_fixture else
                 AISettings('test-fixture', 'fixture-model'))
@@ -138,7 +142,27 @@ def main():
                         bundle.writestr(name, data)
                 upload, content_type = archive.getvalue(), None
             # One upload request starts editing and deployment; there is no analyze/approve step.
-            job_id = request('/api/deployments', upload, content_type)['id']
+            if args.resume_unstarted:
+                start_worker = app.start_job_worker
+                def fail_worker_start(job_id, worker, environment=None):
+                    with patch('onedeploy.server.threading.Thread.start',
+                               side_effect=RuntimeError('simulated worker start failure')):
+                        return start_worker(job_id, worker, environment)
+                app.start_job_worker = fail_worker_start
+            uploaded = request('/api/deployments', upload, content_type)
+            job_id = uploaded['id']
+            if args.resume_unstarted:
+                assert uploaded['status'] == 'interrupted'
+                assert request('/api/jobs/' + job_id)['attempts'] == 0
+                server.shutdown()
+                server.server_close()
+                app = App(Path(directory), settings, OpenAIDeployAgent)
+                assert app.jobs[job_id]['status'] == 'interrupted'
+                server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(app))
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                base = f'http://127.0.0.1:{server.server_port}'
+                resumed = request('/api/deployments/' + job_id + '/resume-unstarted', b'')
+                assert resumed['status'] == 'running'
             for _ in range(950):
                 job = request('/api/jobs/' + job_id)
                 if job['status'] == 'waiting_input' and args.environment:
@@ -192,6 +216,8 @@ def main():
                 print('PASS: Responses planner and agent requests replayed tool and reasoning items', flush=True)
             if args.restart_before_resume:
                 print('PASS: repaired source survived server restart and environment resume', flush=True)
+            if args.resume_unstarted:
+                print('PASS: unstarted upload resumed after worker failure and server restart', flush=True)
             print('Attempts: ' + str(job['attempts']), flush=True)
             print(json.dumps(job['result']), flush=True)
             if args.python:
