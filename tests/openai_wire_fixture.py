@@ -6,14 +6,18 @@ import json
 import threading
 import urllib.request
 
+from onedeploy.agent import COMPACT_AGENT_REQUEST_BYTES
+
 
 class ResponsesWireFixture:
     def __init__(self, actions=None, *, expected_target='local-docker', planner_requests=1,
-                 managed_postgres=False, expected_model='wire-fixture-model'):
+                 managed_postgres=False, expected_model='wire-fixture-model', compact_after_first=False):
         self.local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.lock = threading.Lock()
         self.planner_requests = 0
         self.agent_requests = 0
+        self.compact_requests = 0
+        self.compact_after_first = compact_after_first
         self.expected_target = expected_target
         self.expected_planner_requests = planner_requests
         self.managed_postgres = managed_postgres
@@ -34,6 +38,22 @@ class ResponsesWireFixture:
         url = request.full_url if isinstance(request, urllib.request.Request) else str(request)
         if url.startswith('http://127.0.0.1:'):
             return self.local_opener.open(request, timeout=timeout)
+        if url == 'https://api.openai.com/v1/responses/compact':
+            assert self.compact_after_first and self.agent_requests == 1 and self.compact_requests == 0
+            assert request.get_header('Authorization') == 'Bearer wire-fixture-key'
+            payload = json.loads(request.data)
+            assert payload['model'] == self.expected_model
+            history = payload['input']
+            assert history[-3]['type'] == 'reasoning'
+            assert len(history[-3]['encrypted_content']) > COMPACT_AGENT_REQUEST_BYTES
+            assert history[-2]['type'] == 'function_call'
+            assert history[-1]['type'] == 'function_call_output'
+            self.compact_requests += 1
+            compacted = [
+                {'type': 'compaction', 'id': 'cmp_1', 'encrypted_content': 'opaque-compact'},
+                {**history[-3], 'encrypted_content': 'opaque-1'}, history[-2], history[-1],
+            ]
+            return io.BytesIO(json.dumps({'object': 'response.compaction', 'output': compacted}).encode())
         if url != 'https://api.openai.com/v1/responses':
             raise AssertionError('Unexpected network request: ' + url)
         assert request.get_header('Authorization') == 'Bearer wire-fixture-key'
@@ -64,6 +84,8 @@ class ResponsesWireFixture:
         assert payload['include'] == ['reasoning.encrypted_content']
         assert all(tool['strict'] is True for tool in payload['tools'])
         history = payload['input']
+        if self.compact_after_first and index > 0:
+            assert history[0]['type'] == 'compaction'
         if index == 0:
             assert len(history) == 1 and history[0]['role'] == 'user'
             initial = json.loads(history[0]['content'])
@@ -88,9 +110,12 @@ class ResponsesWireFixture:
                 assert result['ready'] is True
         name, arguments = self.actions[index]
         self.agent_requests += 1
+        reasoning = f'opaque-{index + 1}'
+        if self.compact_after_first and index == 0:
+            reasoning += 'x' * COMPACT_AGENT_REQUEST_BYTES
         return {'status': 'completed', 'output': [
             {'type': 'reasoning', 'id': f'rs_{index + 1}',
-             'encrypted_content': f'opaque-{index + 1}', 'summary': []},
+             'encrypted_content': reasoning, 'summary': []},
             {'type': 'function_call', 'id': f'fc_{index + 1}',
              'call_id': f'call_{index + 1}', 'name': name,
              'arguments': json.dumps(arguments), 'status': 'completed'},
@@ -99,3 +124,4 @@ class ResponsesWireFixture:
     def assert_complete(self):
         assert self.planner_requests == self.expected_planner_requests, self.planner_requests
         assert self.agent_requests == len(self.actions), self.agent_requests
+        assert self.compact_requests == int(self.compact_after_first), self.compact_requests

@@ -69,6 +69,8 @@ def main():
                         help='Restart a completed scripted local job as interrupted, then retire its owned Docker attempts')
     parser.add_argument('--wire-fixture', action='store_true',
                         help='Use mocked Responses HTTP with the real OpenAI planner and agent code')
+    parser.add_argument('--compact-fixture', action='store_true',
+                        help='With --wire-fixture, compact a long stateless agent history before Docker deployment')
     parser.add_argument('--resume-unstarted', action='store_true',
                         help='Interrupt worker startup, restart the server, then resume the same upload')
     args = parser.parse_args()
@@ -86,12 +88,14 @@ def main():
         parser.error('--wire-fixture uses the default Node app and local automatic target only')
     if args.resume_unstarted and not args.wire_fixture:
         parser.error('--resume-unstarted requires --wire-fixture')
+    if args.compact_fixture and (not args.wire_fixture or args.resume_unstarted):
+        parser.error('--compact-fixture requires --wire-fixture without --resume-unstarted')
     settings = (AISettings.from_environment() if args.live else
                 AISettings('wire-fixture-key', 'wire-fixture-model') if args.wire_fixture else
                 AISettings('test-fixture', 'fixture-model'))
     if args.live and not settings.available:
         raise RuntimeError('Set OPENAI_API_KEY for live testing')
-    wire = ResponsesWireFixture() if args.wire_fixture else None
+    wire = ResponsesWireFixture(compact_after_first=args.compact_fixture) if args.wire_fixture else None
     with tempfile.TemporaryDirectory(prefix='onedeploy-agent-smoke-') as directory, \
             (patch('urllib.request.build_opener', return_value=wire) if wire else nullcontext()):
         app = App(Path(directory), settings, OpenAIDeployAgent if args.live or wire else
@@ -214,6 +218,8 @@ def main():
             if wire:
                 wire.assert_complete()
                 print('PASS: Responses planner and agent requests replayed tool and reasoning items', flush=True)
+                if args.compact_fixture:
+                    print('PASS: compacted agent history continued through one Docker deployment', flush=True)
             if args.restart_before_resume:
                 print('PASS: repaired source survived server restart and environment resume', flush=True)
             if args.resume_unstarted:

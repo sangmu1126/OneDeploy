@@ -8,12 +8,34 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from openai_wire_fixture import ResponsesWireFixture
+from onedeploy.agent import DeploymentAgent, DeploymentTools, OpenAIDeployAgent
 from onedeploy.analysis import AISettings, DEFAULT_AI_MODEL
 from onedeploy.core import LocalDockerAdapter
 from onedeploy.server import App, handler_for
 
 
 class OpenAIWireTests(unittest.TestCase):
+    def test_compacted_history_continues_repair_and_deploys_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            original = Path('examples/unready-node')
+            changes = []
+            tools = DeploymentTools(original, state / 'work', 'a' * 16, {},
+                lambda *_: None, lambda **update: changes.append(update))
+            fixture = ResponsesWireFixture(planner_requests=0, compact_after_first=True)
+            with patch('urllib.request.build_opener', return_value=fixture), \
+                    patch.object(LocalDockerAdapter, 'deploy', return_value={
+                        'url': 'http://127.0.0.1:12345'}) as deploy:
+                result = DeploymentAgent(OpenAIDeployAgent(AISettings(
+                    'wire-fixture-key', 'wire-fixture-model')), tools).run()
+            fixture.assert_complete()
+            self.assertEqual(result['url'], 'http://127.0.0.1:12345')
+            self.assertEqual(deploy.call_count, 1)
+            self.assertEqual(tools.attempts, 1)
+            self.assertEqual({update['change']['path'] for update in changes if 'change' in update},
+                             {'package.json', 'server.js'})
+            self.assertIn('process.env.PORT', (tools.work / 'server.js').read_text())
+
     def test_auto_plan_and_source_repair_use_responses_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
