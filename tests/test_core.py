@@ -182,6 +182,23 @@ class CoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'uvicorn'):
                 make_plan(project, 'asgi:main.py', None)
 
+    def test_wsgi_entrypoint_requires_existing_module_and_gunicorn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'app.py').write_text('from flask import Flask\napp = Flask(__name__)\n')
+            (root / 'requirements.txt').write_text('flask==3.1.1\ngunicorn==23.0.0\n')
+            plan = make_plan(root, 'wsgi:app.py', None, 4321)
+            self.assertEqual(plan.runtime, 'python-wsgi')
+            self.assertIn('CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:4321",',
+                          plan.dockerfile)
+            self.assertEqual(analyze(root).runtime, 'python-wsgi')
+            for invalid in ('wsgi:../app.py', 'wsgi:other.py', 'wsgi:app.py;echo bad'):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    make_plan(root, invalid, None)
+            (root / 'requirements.txt').write_text('flask==3.1.1\n')
+            with self.assertRaisesRegex(ValueError, 'gunicorn'):
+                make_plan(root, 'wsgi:app.py', None)
+
     def test_failed_readiness_cleans_container(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

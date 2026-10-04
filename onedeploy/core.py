@@ -202,12 +202,12 @@ def read_requirements(project: Path) -> str | None:
     return content.decode('utf-8')
 
 
-def has_uvicorn_requirement(project: Path) -> bool:
+def has_python_requirement(project: Path, package: str) -> bool:
     content = read_requirements(project)
     if content is None:
         return False
-    return bool(re.search(r"(?im)^[ \t]*uvicorn(?:\[[a-z0-9_,.-]+\])?(?:[<>=!~][^\r\n]*)?[ \t]*(?:#.*)?$",
-                          content))
+    return bool(re.search(rf"(?im)^[ \t]*{re.escape(package)}(?:\[[a-z0-9_,.-]+\])?"
+                          r"(?:[<>=!~][^\r\n]*)?[ \t]*(?:#.*)?$", content))
 
 
 def make_plan(project: Path, start_script: str, build_script: str | None,
@@ -216,17 +216,20 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
     custom = existing_dockerfile.is_file()
     python = not custom and not (project / "package.json").is_file()
     asgi = python and isinstance(start_script, str) and start_script.startswith("asgi:")
+    wsgi = python and isinstance(start_script, str) and start_script.startswith("wsgi:")
     if custom:
         if start_script != "dockerfile" or build_script is not None:
             raise ValueError("Existing Dockerfile requires start_script=dockerfile and build_script=null")
     elif python:
-        entry = start_script[5:] if asgi else start_script
+        entry = start_script[5:] if asgi or wsgi else start_script
         if (entry not in {"server.py", "app.py", "main.py"} or build_script is not None
                 or not (project / entry).is_file()):
             raise ValueError("Python app requires an existing server.py, app.py or main.py and build_script=null")
-        if asgi and not has_uvicorn_requirement(project):
+        if asgi and not has_python_requirement(project, "uvicorn"):
             raise ValueError("ASGI app requires uvicorn in requirements.txt")
-        if not asgi:
+        if wsgi and not has_python_requirement(project, "gunicorn"):
+            raise ValueError("WSGI app requires gunicorn in requirements.txt")
+        if not asgi and not wsgi:
             read_requirements(project)
     else:
         scripts = read_package(project).get("scripts", {})
@@ -256,8 +259,14 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
     if python:
         install = (("RUN pip install --no-cache-dir -r requirements.txt\n")
                    if (project / "requirements.txt").is_file() else "")
-        start_args = (["python", "-m", "uvicorn", f"{entry[:-3]}:app", "--host", "0.0.0.0", "--port", str(port)]
-                      if asgi else ["python", entry])
+        if asgi:
+            start_args = ["python", "-m", "uvicorn", f"{entry[:-3]}:app",
+                          "--host", "0.0.0.0", "--port", str(port)]
+        elif wsgi:
+            start_args = ["python", "-m", "gunicorn", "--bind", f"0.0.0.0:{port}",
+                          "--workers", "1", "--access-logfile", "-", f"{entry[:-3]}:app"]
+        else:
+            start_args = ["python", entry]
         dockerfile = (
             "FROM python:3.13-slim-bookworm\nWORKDIR /app\n"
             "RUN useradd --uid 10001 --create-home app\n"
@@ -267,8 +276,9 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
             + "USER app\n"
             + f"CMD {json.dumps(start_args)}\n"
         )
-        metadata.setdefault("framework", "python-asgi" if asgi else "python")
-        return DeploymentPlan("python-asgi" if asgi else "python", " ".join(start_args), None, port, dockerfile,
+        runtime = "python-asgi" if asgi else "python-wsgi" if wsgi else "python"
+        metadata.setdefault("framework", runtime)
+        return DeploymentPlan(runtime, " ".join(start_args), None, port, dockerfile,
                               health_path=health_path, source_digest=source_digest(project), **metadata)
     install = "npm ci" if (project / "package-lock.json").exists() else "npm install"
     build = f"npm run {build_script}" if build_script else None
@@ -295,8 +305,12 @@ def analyze(project: Path) -> DeploymentPlan:
             raise ValueError("Python app requires server.py, app.py or main.py at project root")
         with (project / entry).open(encoding='utf-8', errors='replace') as source:
             preview = source.read(20001)
-        start = ('asgi:' + entry if re.search(r'(?m)^\s*app\s*=', preview)
-                 and has_uvicorn_requirement(project) else entry)
+        if re.search(r'(?m)^\s*app\s*=', preview) and has_python_requirement(project, "uvicorn"):
+            start = 'asgi:' + entry
+        elif re.search(r'(?m)^\s*app\s*=\s*Flask\s*\(', preview) and has_python_requirement(project, "gunicorn"):
+            start = 'wsgi:' + entry
+        else:
+            start = entry
         return make_plan(project, start, None,
                          warnings=["정적 분석은 PORT=3000, HTTP 검사 경로=/를 가정합니다. Python 서버 실행 설정을 확인하세요."])
     package = read_package(project)

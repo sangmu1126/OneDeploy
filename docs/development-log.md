@@ -309,3 +309,11 @@ Dockerfile 없는 Python 배포에 루트 ASGI 진입점을 추가했다. `serve
 응답·종료 후 컨테이너와 이미지 태그 정리가 통과했다. CI용 모의 배포 테스트도
 ASGI 도구 순서와 단일 배포 시도를 확인한다. 실제 모델 판단과 AWS ASGI 배포는
 아직 검증하지 않았다.
+
+Dockerfile 없는 Python 배포에 루트 WSGI 진입점을 추가했다. `server.py`·`app.py`·
+`main.py`의 `app` 객체를 선택하면 생성 이미지가 Gunicorn의 `module:app` 형식으로
+실행한다. `requirements.txt`에 Gunicorn이 명시된 경우만 허용하고 진입 파일과
+명령 인자를 제한한다. Flask 예제의 고정 Responses 응답 드릴에서 실제 로컬
+Docker 빌드·HTTP 응답·종료 후 컨테이너와 이미지 태그 정리를 확인했다.
+CI용 모의 배포 테스트는 WSGI 도구 호출과 단일 배포 시도를 확인한다. 실제 모델
+판단과 AWS WSGI 배포는 아직 검증하지 않았다.

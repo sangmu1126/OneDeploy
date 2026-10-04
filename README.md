@@ -44,7 +44,7 @@ Cloud Run은 기본적으로 인증이 필요한 비공개 서비스이며, 사�
 
 ## 배포 흐름과 지원 범위
 
-1. 앱 폴더 또는 ZIP을 올립니다. `package.json`이 있는 Node.js 앱, 루트의 `server.py`·`app.py`·`main.py`를 직접 실행하는 Python 웹 앱, 루트 파일에 `app` ASGI 객체를 노출하는 Python 웹 앱, 기존 `Dockerfile`이 있는 웹 앱을 받습니다. ASGI 경로에는 `requirements.txt`에 `uvicorn`을 명시해야 합니다. 다른 Python 외부 의존성도 같은 파일에 포함해야 합니다. 폴더는 최대 5000개 파일,
+1. 앱 폴더 또는 ZIP을 올립니다. `package.json`이 있는 Node.js 앱, 루트의 `server.py`·`app.py`·`main.py`를 직접 실행하는 Python 웹 앱, 루트 파일에 `app` ASGI·WSGI 객체를 노출하는 Python 웹 앱, 기존 `Dockerfile`이 있는 웹 앱을 받습니다. ASGI는 `requirements.txt`에 `uvicorn`, WSGI는 `gunicorn`을 명시해야 합니다. 다른 Python 외부 의존성도 같은 파일에 포함해야 합니다. 폴더는 최대 5000개 파일,
    내용은 20 MiB까지 허용합니다.
 2. AI가 소스 근거를 읽고 실행 설정·Dockerfile·필요한 코드 변경을 작업용 복사본에 적용합니다. 자동 대상 선택을 고르면 서버가 사용 가능한 대상, 공개 허용 범위, 지원
    인프라를 다시 검증합니다.
@@ -131,11 +131,12 @@ PYTHONPATH=. python3 tests/smoke_agent.py --interrupted-retire
 PYTHONPATH=. python3 tests/smoke_agent.py --wire-fixture
 PYTHONPATH=. python3 tests/smoke_agent.py --python-generated --wire-fixture
 PYTHONPATH=. python3 tests/smoke_agent.py --asgi-generated --wire-fixture
+PYTHONPATH=. python3 tests/smoke_agent.py --wsgi-generated --wire-fixture
 PYTHONPATH=. python3 tests/smoke_agent.py --wire-fixture --resume-unstarted
 PYTHONPATH=. python3 tests/smoke_agent.py --environment --restart-before-resume
 ```
 
-첫 로컬 Chrome 드릴은 기존 RDS 자동 연결 계획을 검사합니다. 두 번째 드릴은 새 RDS 가격 계획부터 ZIP 업로드, 동일 작업의 DB 생성·배포 완료 표시, 생성 실패 후 이력 재진입 시 복구 버튼, 계획 변경 시 재계획 안내, 필수 환경값 입력·재개까지 모의 AWS·배포 응답으로 검사합니다. 둘 다 실제 AWS 호출이나 배포를 실행하지 않습니다. `smoke_agent.py` 명령은 Docker를 사용합니다. `--interrupted-retire`는 실제 HTTP 성공 후 서버 재시작·중단 상태 복원·종료 API의 모든 시도 자원 삭제를 검사합니다. `--wire-fixture`는 실제 OpenAI 호출 코드를 사용하되 Responses HTTP 응답만 고정해 자동 대상 선택·도구 이력 재전달·코드 수정·Docker 배포·종료를 검증합니다. `--python-generated --wire-fixture`는 Dockerfile 없는 직접 실행형 Python 앱을, `--asgi-generated --wire-fixture`는 Dockerfile 없는 FastAPI ASGI 앱을 검증합니다. `--wire-fixture --resume-unstarted`는 워커 시작 실패·서버 재시작 뒤 같은 업로드를 재개해 Docker HTTP 성공과 자원 정리까지 확인합니다. `--environment --restart-before-resume`는 AI가 소스를 고친 뒤 입력을 기다리는 동안 서버를 재시작하고, 수정된 소스로 실제 Docker 배포·종료하는 경로를 검사합니다. 고정 응답이므로 실제 모델 판단의 증거는 아닙니다. 실제 OpenAI 호출을 검증할 때는 키를 설정하고
+첫 로컬 Chrome 드릴은 기존 RDS 자동 연결 계획을 검사합니다. 두 번째 드릴은 새 RDS 가격 계획부터 ZIP 업로드, 동일 작업의 DB 생성·배포 완료 표시, 생성 실패 후 이력 재진입 시 복구 버튼, 계획 변경 시 재계획 안내, 필수 환경값 입력·재개까지 모의 AWS·배포 응답으로 검사합니다. 둘 다 실제 AWS 호출이나 배포를 실행하지 않습니다. `smoke_agent.py` 명령은 Docker를 사용합니다. `--interrupted-retire`는 실제 HTTP 성공 후 서버 재시작·중단 상태 복원·종료 API의 모든 시도 자원 삭제를 검사합니다. `--wire-fixture`는 실제 OpenAI 호출 코드를 사용하되 Responses HTTP 응답만 고정해 자동 대상 선택·도구 이력 재전달·코드 수정·Docker 배포·종료를 검증합니다. `--python-generated --wire-fixture`는 Dockerfile 없는 직접 실행형 Python 앱을, `--asgi-generated --wire-fixture`는 FastAPI ASGI 앱을, `--wsgi-generated --wire-fixture`는 Flask WSGI 앱을 검증합니다. `--wire-fixture --resume-unstarted`는 워커 시작 실패·서버 재시작 뒤 같은 업로드를 재개해 Docker HTTP 성공과 자원 정리까지 확인합니다. `--environment --restart-before-resume`는 AI가 소스를 고친 뒤 입력을 기다리는 동안 서버를 재시작하고, 수정된 소스로 실제 Docker 배포·종료하는 경로를 검사합니다. 고정 응답이므로 실제 모델 판단의 증거는 아닙니다. 실제 OpenAI 호출을 검증할 때는 키를 설정하고
 `PYTHONPATH=. python3 tests/smoke_agent.py --live`를 사용합니다. AWS 실계정 smoke는 기본이 읽기 전용 사전 점검이며, 과금 가능한 리소스를
 생성하는 `--apply` 절차와 정리 방법은 [실계정 검증 기록](docs/aws-postgres-live-runbook.md)에 적었습니다. `smoke_agent.py --live`는 로컬 Docker만 사용하며, 원본 보존·실제 시작/PORT/바인딩 수정·HTTP 응답·배포 종료 API의 컨테이너/이미지 삭제를 확인합니다. `--live --auto` 조합은 클라우드 대상 선택과 과금 가능성을 피하도록 거부합니다. 현재 구현·실계정 증거·남은 작업의 구분은
 [프로젝트 현황](docs/status.md)을 따릅니다.

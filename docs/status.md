@@ -13,10 +13,11 @@
   AWS에서는 같은 앱 ID의 업데이트와 URL 유지도 확인했다. 이 실계정 경로의 AI 판단은
   테스트용 고정 응답이었다.
 - Dockerfile 없는 직접 실행형 Python `server.py`·`app.py`·`main.py`와 루트의
-  `app` 객체를 Uvicorn으로 실행하는 ASGI 앱은 고정 생성 이미지 경로를 지원한다.
-  `server.py` 샘플의 자동 대상 선택·소스 수정과 FastAPI 샘플의 ASGI 설정은 고정
-  AI 응답을 거쳐 실제 로컬 Docker HTTP 확인·종료까지 통과했다. ASGI 경로는
-  `requirements.txt`에 Uvicorn 명시가 필요하다. 실제 OpenAI 모델과 AWS Python
+  `app` 객체를 Uvicorn·Gunicorn으로 실행하는 ASGI·WSGI 앱은 고정 생성 이미지
+  경로를 지원한다. `server.py` 샘플의 자동 대상 선택·소스 수정과 FastAPI·Flask
+  샘플의 서버 설정은 고정 AI 응답을 거쳐 실제 로컬 Docker HTTP 확인·종료까지
+  통과했다. ASGI·WSGI 경로는 각각 `requirements.txt`에 Uvicorn·Gunicorn 명시가
+  필요하다. 실제 OpenAI 모델과 AWS Python
   경로는 아직 검증하지 않았다.
 - 앱 업로드, 작업용 소스 변경, 자동 대상 선택, 배포 실패 재시도, 상태 확인,
   AWS 릴리스 복구 및 리소스 종료 코드가 있다. 실제 OpenAI API를 사용하는 끝단 검증은

@@ -76,6 +76,27 @@ class OpenAIWireTests(unittest.TestCase):
             self.assertEqual((tools.work / 'main.py').read_bytes(),
                              (original / 'main.py').read_bytes())
 
+    def test_wsgi_without_dockerfile_uses_wire_agent_and_generated_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            original = Path('examples/flask-wsgi')
+            tools = DeploymentTools(original, state / 'work', 'd' * 16, {},
+                lambda *_: None, lambda **_: None)
+            fixture = ResponsesWireFixture(planner_requests=0, wsgi_generated=True)
+            with patch('urllib.request.build_opener', return_value=fixture), \
+                    patch.object(LocalDockerAdapter, 'deploy', return_value={
+                        'url': 'http://127.0.0.1:12345'}) as deploy:
+                result = DeploymentAgent(OpenAIDeployAgent(AISettings(
+                    'wire-fixture-key', 'wire-fixture-model')), tools).run()
+            fixture.assert_complete()
+            self.assertEqual(result['url'], 'http://127.0.0.1:12345')
+            self.assertEqual(tools.plan.runtime, 'python-wsgi')
+            self.assertIn('app:app', tools.plan.start_command)
+            self.assertEqual(deploy.call_count, 1)
+            self.assertEqual(tools.attempts, 1)
+            self.assertEqual((tools.work / 'app.py').read_bytes(),
+                             (original / 'app.py').read_bytes())
+
     def test_auto_plan_and_source_repair_use_responses_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)

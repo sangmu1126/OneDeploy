@@ -12,7 +12,7 @@ from onedeploy.agent import COMPACT_AGENT_REQUEST_BYTES
 class ResponsesWireFixture:
     def __init__(self, actions=None, *, expected_target='local-docker', planner_requests=1,
                  managed_postgres=False, expected_model='wire-fixture-model', compact_after_first=False,
-                 python_generated=False, asgi_generated=False):
+                 python_generated=False, asgi_generated=False, wsgi_generated=False):
         self.local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.lock = threading.Lock()
         self.planner_requests = 0
@@ -25,7 +25,13 @@ class ResponsesWireFixture:
         self.expected_model = expected_model
         self.python_generated = python_generated
         self.asgi_generated = asgi_generated
+        self.wsgi_generated = wsgi_generated
         default_actions = ([
+            ('read_project_files', {'paths': ['app.py', 'requirements.txt']}),
+            ('configure_deployment', {'start_script': 'wsgi:app.py', 'build_script': None,
+                                      'port': 4321, 'health_path': '/', 'required_env': []}),
+            ('deploy_application', {}),
+        ] if wsgi_generated else [
             ('read_project_files', {'paths': ['main.py', 'requirements.txt']}),
             ('configure_deployment', {'start_script': 'asgi:main.py', 'build_script': None,
                                       'port': 4321, 'health_path': '/', 'required_env': []}),
@@ -86,7 +92,10 @@ class ResponsesWireFixture:
         assert payload['text']['format']['strict'] is True
         context = json.loads(payload['input'])
         assert 'local-docker' in context['available_targets']
-        if self.asgi_generated:
+        if self.wsgi_generated:
+            assert 'Flask' in context['files']['app.py']
+            evidence = {'file': 'app.py', 'quote': 'Flask'}
+        elif self.asgi_generated:
             assert 'FastAPI' in context['files']['main.py']
             evidence = {'file': 'main.py', 'quote': 'FastAPI'}
         elif self.python_generated:
