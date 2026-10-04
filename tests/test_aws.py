@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from onedeploy.aws import (AwsConfigurationError, AwsExpressAdapter, AwsSettings,
-                           database_configuration_matches, service_group_ingress_is_restricted)
+                           database_configuration_matches, postgres_ssl_environment,
+                           service_group_ingress_is_restricted)
 from onedeploy.core import analyze
 from onedeploy.postgres import PostgresRequest
 from onedeploy.migrations import MigrationBundle, SqlMigration
@@ -213,6 +214,18 @@ class AwsTests(unittest.TestCase):
                 self.adapter.deploy(self.project, self.plan, ATTEMPT, postgres=request)
             build.assert_not_called()
 
+    def test_postgres_ca_path_cannot_be_overridden_by_application_environment(self):
+        request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
+                                  ('subnet-12345678', 'subnet-87654321'), SERVICE_GROUP)
+        adapter = AwsExpressAdapter(lambda *_: None,
+                                    AwsSettings(REGION, expected_account=ACCOUNT,
+                                                service_security_group=SERVICE_GROUP))
+        with patch('onedeploy.postgres.AwsPostgresProvisioner.inspect_current') as inspect:
+            with self.assertRaisesRegex(ValueError, '배포 시스템이 설정'):
+                adapter.deploy(self.project, self.plan, ATTEMPT,
+                               environment={'PGSSLROOTCERT': '/tmp/untrusted.pem'}, postgres=request)
+            inspect.assert_not_called()
+
     def test_postgres_release_cannot_drop_existing_binding(self):
         adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(REGION),
                                     existing={'database': {'database_id': 'onedeploy-demo-app'}})
@@ -237,6 +250,66 @@ class AwsTests(unittest.TestCase):
         self.assertTrue(database_configuration_matches(configuration, database))
         configuration['primaryContainer']['environment'].append({'name': 'PGHOST', 'value': 'wrong'})
         self.assertFalse(database_configuration_matches(configuration, database))
+
+    def test_python_postgres_configuration_requires_verified_ca_and_hostname(self):
+        database = {'endpoint': 'db.example', 'port': 5432, 'secret_arn':
+                    f'arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:managed-id',
+                    'execution_role_arn': f'arn:aws:iam::{ACCOUNT}:role/db-execution'}
+        ssl = postgres_ssl_environment('python-asgi')
+        self.assertEqual(ssl, [
+            {'name': 'PGSSLMODE', 'value': 'verify-full'},
+            {'name': 'PGSSLROOTCERT', 'value': '/app/.onedeploy-rds-ca.pem'}])
+        self.assertEqual(postgres_ssl_environment('nodejs'),
+                         [{'name': 'PGSSLMODE', 'value': 'require'}])
+        configuration = {'executionRoleArn': database['execution_role_arn'],
+                         'primaryContainer': {'environment': [
+                             {'name': 'PGHOST', 'value': database['endpoint']},
+                             {'name': 'PGPORT', 'value': '5432'},
+                             {'name': 'PGDATABASE', 'value': 'appdb'}, *ssl],
+                             'secrets': [
+                                 {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
+                                 {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}]}}
+        self.assertTrue(database_configuration_matches(configuration, database))
+        configuration['primaryContainer']['environment'][-1]['value'] = '/tmp/untrusted.pem'
+        self.assertFalse(database_configuration_matches(configuration, database))
+
+    def test_python_postgres_deployment_submits_verified_tls_environment(self):
+        class Submitted(Exception):
+            pass
+
+        request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
+                                  ('subnet-12345678', 'subnet-87654321'), SERVICE_GROUP)
+        database = {'endpoint': 'db.example', 'port': 5432, 'secret_arn':
+                    f'arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:managed-id',
+                    'execution_role_arn': f'arn:aws:iam::{ACCOUNT}:role/db-execution'}
+        adapter = AwsExpressAdapter(lambda *_: None,
+                                    AwsSettings(REGION, expected_account=ACCOUNT,
+                                                service_security_group=SERVICE_GROUP))
+        submitted = []
+        def aws(args, **_kwargs):
+            if args[:2] == ['ecr', 'get-login-password']:
+                return 'synthetic-password'
+            if args[:2] == ['ecs', 'create-express-gateway-service']:
+                spec = Path(args[args.index('--cli-input-json') + 1].removeprefix('file://'))
+                submitted.append(json.loads(spec.read_text()))
+                raise Submitted()
+            raise AssertionError(args)
+
+        with patch('onedeploy.postgres.AwsPostgresProvisioner.inspect_current', return_value=database), \
+                patch.object(adapter, 'validate_service_security_group'), \
+                patch.object(adapter, 'prepare_infrastructure',
+                             return_value=(ACCOUNT, REPOSITORY, 'base-execution', 'infra')), \
+                patch('onedeploy.aws.ImageBuilder.build'), \
+                patch.object(adapter, 'command', return_value='unix:///var/run/docker.sock'), \
+                patch.object(adapter, 'aws', side_effect=aws):
+            with self.assertRaises(Submitted):
+                adapter.deploy(self.project, replace(self.plan, runtime='python-asgi'), ATTEMPT,
+                               postgres=request)
+        self.assertEqual(len(submitted), 1)
+        self.assertIn({'name': 'PGSSLMODE', 'value': 'verify-full'},
+                      submitted[0]['primaryContainer']['environment'])
+        self.assertIn({'name': 'PGSSLROOTCERT', 'value': '/app/.onedeploy-rds-ca.pem'},
+                      submitted[0]['primaryContainer']['environment'])
 
     def test_release_update_rejects_changed_service_group_before_build(self):
         prior = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',

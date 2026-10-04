@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 MAX_UPLOAD = 20 * 1024 * 1024
 MAX_EXTRACTED = 100 * 1024 * 1024
 MAX_PACKAGE_BYTES = 1024 * 1024
+RDS_CA_CONTAINER_PATH = "/app/.onedeploy-rds-ca.pem"
 IGNORED = {"node_modules", ".venv", "venv", "__pycache__", ".git", ".env", ".onedeploy", "__MACOSX"}
 SOURCE_SUFFIXES = {".js", ".cjs", ".mjs", ".ts", ".tsx", ".jsx", ".json",
                    ".py", ".rb", ".go", ".php", ".java", ".kt", ".cs", ".rs",
@@ -395,8 +396,10 @@ class ImageBuilder:
             shutil.copyfile(extra_ca_bundle, project / ca_name)
             dockerfile = project / 'Dockerfile'
             content = dockerfile.read_text()
-            directive = ('\nCOPY .onedeploy-rds-ca.pem /app/.onedeploy-rds-ca.pem\n'
-                         'ENV NODE_EXTRA_CA_CERTS=/app/.onedeploy-rds-ca.pem\n')
+            directive = (f'\nCOPY .onedeploy-rds-ca.pem {RDS_CA_CONTAINER_PATH}\n'
+                         f'ENV NODE_EXTRA_CA_CERTS={RDS_CA_CONTAINER_PATH}\n')
+            if plan.runtime in {'python', 'python-asgi', 'python-wsgi'}:
+                directive += f'ENV PGSSLROOTCERT={RDS_CA_CONTAINER_PATH}\n'
             if directive not in content:
                 dockerfile.write_text(content.rstrip('\n') + directive)
         ignore = project / ".dockerignore"

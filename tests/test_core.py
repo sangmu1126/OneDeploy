@@ -117,6 +117,18 @@ class CoreTests(unittest.TestCase):
             builder.build(root, analyze(root), 'db:second', extra_ca_bundle=bundle)
             self.assertEqual((root / 'Dockerfile').read_text(), dockerfile)
 
+    def test_generated_python_postgres_image_sets_libpq_ca_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'app.py').write_text('print("hello")\n')
+            plan = analyze(root)
+            bundle = trusted_rds_ca_bundle()
+            ImageBuilder(lambda *_: None, lambda *_: None).build(
+                root, plan, 'db:python', extra_ca_bundle=bundle)
+            dockerfile = (root / 'Dockerfile').read_text()
+            self.assertIn('ENV PGSSLROOTCERT=/app/.onedeploy-rds-ca.pem', dockerfile)
+            self.assertEqual((root / '.onedeploy-rds-ca.pem').read_bytes(), bundle.read_bytes())
+
     def test_dockerfile_only_archive_is_valid_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

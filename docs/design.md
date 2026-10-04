@@ -5,7 +5,7 @@
 사용자가 로컬 앱을 주고 배포를 요청하면, AI가 필요한 작업을 수행해 실행 중인 서비스 URL을 반환한다.
 분석 보고서의 품질이 아니라 사용자가 배포를 위해 직접 해야 하는 작업을 줄이는 것이 목적이다.
 원문 주제의 중심은 AI가 앱에 필요한 코드 변경과 적절한 인프라 구성을 함께 수행하는 것이다.
-현재 지원 범위는 단일 Node.js 앱 또는 기존 Dockerfile이 있는 웹 앱을 Local Docker, Google Cloud Run 또는 AWS ECS Express Mode에 배포하는 경로다.
+현재 지원 범위는 단일 Node.js 앱, 루트 진입점을 가진 Python 앱 또는 기존 Dockerfile이 있는 웹 앱을 Local Docker, Google Cloud Run 또는 AWS ECS Express Mode에 배포하는 경로다.
 Cloud Run은 현재 구현된 어댑터일 뿐 요구사항이 지정한 우선 대상은 아니다. 실무 적용 대상은
 앱의 상태 저장 방식, 상시 실행 필요성, 조직의 클라우드 계정·네트워크·권한 체계에 따라 결정해야 한다.
 

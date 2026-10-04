@@ -19,6 +19,9 @@
   통과했다. ASGI·WSGI 경로는 각각 `requirements.txt`에 Uvicorn·Gunicorn 명시가
   필요하다. 실제 OpenAI 모델과 AWS Python
   경로는 아직 검증하지 않았다.
+  Python 생성 이미지의 AWS PostgreSQL 연결 계획에는 RDS CA 경로와
+  `PGSSLMODE=verify-full`을 추가했다. 이는 로컬 단위 검증 결과이며 실계정
+  Python DB 접속 성공을 뜻하지 않는다.
   여러 루트 Python 파일이 있으면 정적 분석이 각 파일을 1 MiB 범위에서 구문
   분석해 서버 객체 후보를 모두 확인하고,
   둘 이상이거나 서버 유형이 모호하면 실행 파일을 추측하지 않고 거부한다.

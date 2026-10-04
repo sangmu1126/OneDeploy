@@ -16,7 +16,8 @@ from onedeploy.aws_network import AwsServiceNetworkProvisioner, ServiceNetworkRe
 
 
 TEMPLATE = Path(__file__).parent / 'infra' / 'aws-postgres.json'
-MANAGED_POSTGRES_ENV = frozenset({'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSSLMODE'})
+MANAGED_POSTGRES_ENV = frozenset({'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD',
+                                  'PGSSLMODE', 'PGSSLROOTCERT'})
 
 
 def policy_document(value):

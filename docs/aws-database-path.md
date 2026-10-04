@@ -121,6 +121,12 @@ SHA-256 digest를 재조회하고 태스크 정의에는 변경 불가능한 dig
 [AWS 공식 RDS CA 번들](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html)을
 체크섬으로 고정해 마이그레이터와 DB 앱 이미지에 넣고 `NODE_EXTRA_CA_CERTS`로 Node의
 서버 인증 검증에 사용한다. 번들 교체 시 체크섬을 검토·갱신해야 한다.
+Dockerfile 없이 생성한 Python 앱 이미지는 같은 번들을 `PGSSLROOTCERT`로 지정하고,
+ECS 연결 환경에 `PGSSLMODE=verify-full`을 넣어 libpq 기반 클라이언트가 인증서
+체인과 RDS 엔드포인트 이름을 함께 검사하도록 한다. 기존 Node 배포 설정은 유지한다.
+이 Python 경로는 이미지·ECS 구성 단위 테스트까지만 확인했고 실제 AWS DB 접속은
+아직 검증하지 않았다. 앱이 자체 연결 문자열에서 TLS 옵션을 덮어쓰면 별도 소스
+검토가 필요하다.
 태스크 종료 코드가 0일 때만 웹 서비스 배포를 계속하며,
 성공 후 마이그레이션 태스크 정의와 임시 ECR 이미지 태그를 정리한다.
 태스크 정의·태스크 ARN·이미지·SQL 묶음 체크섬과 성공 결과를 작업 기록에 저장한다.

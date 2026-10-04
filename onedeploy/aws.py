@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from onedeploy.analysis import redact
-from onedeploy.core import ImageBuilder, validate_environment
+from onedeploy.core import ImageBuilder, RDS_CA_CONTAINER_PATH, validate_environment
 
 
 class AwsConfigurationError(RuntimeError):
@@ -59,17 +59,28 @@ def database_configuration_matches(configuration, database):
     expected_environment = [
         {'name': 'PGHOST', 'value': database['endpoint']},
         {'name': 'PGPORT', 'value': str(database['port'])},
-        {'name': 'PGDATABASE', 'value': 'appdb'},
-        {'name': 'PGSSLMODE', 'value': 'require'}]
+        {'name': 'PGDATABASE', 'value': 'appdb'}]
+    ssl_profiles = [
+        [{'name': 'PGSSLMODE', 'value': 'require'}],
+        postgres_ssl_environment('python')]
     expected_secrets = [
         {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
         {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}]
     actual_environment = [item for item in container.get('environment', [])
-                          if item.get('name') in {value['name'] for value in expected_environment}]
+                          if item.get('name') in {'PGHOST', 'PGPORT', 'PGDATABASE',
+                                                  'PGSSLMODE', 'PGSSLROOTCERT'}]
     return (configuration.get('executionRoleArn') == database['execution_role_arn']
             and container.get('secrets') == expected_secrets
-            and len(actual_environment) == len(expected_environment)
-            and all(item in actual_environment for item in expected_environment))
+            and any(len(actual_environment) == len(expected_environment) + len(profile)
+                    and all(item in actual_environment for item in expected_environment + profile)
+                    for profile in ssl_profiles))
+
+
+def postgres_ssl_environment(runtime):
+    if runtime in {'python', 'python-asgi', 'python-wsgi'}:
+        return [{'name': 'PGSSLMODE', 'value': 'verify-full'},
+                {'name': 'PGSSLROOTCERT', 'value': RDS_CA_CONTAINER_PATH}]
+    return [{'name': 'PGSSLMODE', 'value': 'require'}]
 
 
 @dataclass(frozen=True)
@@ -212,7 +223,7 @@ class AwsExpressAdapter:
             raise ValueError('SQL 마이그레이션에는 검증된 PostgreSQL 연결 요청이 필요합니다.')
         database = None
         if postgres is not None:
-            from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
+            from onedeploy.postgres import AwsPostgresProvisioner, MANAGED_POSTGRES_ENV, PostgresRequest
             if not isinstance(postgres, PostgresRequest):
                 raise ValueError('PostgreSQL 연결 요청이 올바르지 않습니다.')
             postgres.validate()
@@ -220,7 +231,7 @@ class AwsExpressAdapter:
                     or self.settings.region != postgres.region
                     or self.settings.service_security_group != postgres.service_security_group):
                 raise AwsConfigurationError('PostgreSQL 계정·리전·서비스 보안 그룹이 AWS 배포 대상과 다릅니다.')
-            managed_names = {'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSSLMODE'}
+            managed_names = MANAGED_POSTGRES_ENV
             if managed_names.intersection(environment or {}):
                 raise ValueError('PostgreSQL 접속 환경변수는 배포 시스템이 설정합니다.')
             environment = validate_environment(environment, [name for name in plan.required_env
@@ -332,8 +343,8 @@ class AwsExpressAdapter:
             payload['primaryContainer']['environment'].extend([
                 {'name': 'PGHOST', 'value': database['endpoint']},
                 {'name': 'PGPORT', 'value': str(database['port'])},
-                {'name': 'PGDATABASE', 'value': 'appdb'},
-                {'name': 'PGSSLMODE', 'value': 'require'}])
+                {'name': 'PGDATABASE', 'value': 'appdb'}]
+                + postgres_ssl_environment(plan.runtime))
             payload['primaryContainer']['secrets'] = [
                 {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
                 {'name': 'PGPASSWORD', 'valueFrom': database['secret_arn'] + ':password::'}]
