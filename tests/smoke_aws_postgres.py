@@ -5,6 +5,7 @@ import argparse
 import json
 import secrets
 import shutil
+import sys
 import tempfile
 import time
 import urllib.error
@@ -116,8 +117,8 @@ def main(argv=None):
                 raise AssertionError('ECS service update did not preserve the URL and replace the image')
             probe(second_result['url'], key, record_id, 'GET')
             probe(second_result['url'], key, record_id, 'DELETE')
-            print('PASS: PostgreSQL migration and write/read survived an ECS service revision update.', flush=True)
         finally:
+            original_error = sys.exc_info()[1]
             try:
                 if first_result:
                     results = [item for item in (first_result, second_result) if item]
@@ -141,6 +142,11 @@ def main(argv=None):
                     first.cleanup_failure(first_attempt)
             except Exception as exc:
                 print('ECS 정리 상태를 직접 확인해야 합니다:', exc, flush=True)
+                if original_error is not None:
+                    original_error.add_note(f'ECS cleanup also failed: {exc}')
+                else:
+                    raise
+        print('PASS: PostgreSQL migration and write/read survived an ECS service revision update.', flush=True)
 
 
 if __name__ == '__main__':

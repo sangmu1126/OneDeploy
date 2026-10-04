@@ -28,7 +28,30 @@ class AwsPostgresSmokeTests(unittest.TestCase):
             with self.subTest(runtime=runtime):
                 self.assert_apply_migrates_before_probe_and_reuses_schema_on_update(runtime)
 
-    def assert_apply_migrates_before_probe_and_reuses_schema_on_update(self, runtime):
+    def test_cleanup_failure_does_not_report_success(self):
+        self.assert_apply_migrates_before_probe_and_reuses_schema_on_update(
+            'python', retire_error=True)
+
+    def test_deploy_error_keeps_its_cause_when_cleanup_also_fails(self):
+        arguments = ['--apply', '--application', 'demo-app', '--account', '123456789012',
+                     '--region', 'ap-northeast-2', '--vpc-id', 'vpc-12345678',
+                     '--subnet-id', 'subnet-11111111', '--subnet-id', 'subnet-22222222',
+                     '--service-security-group', 'sg-33333333', '--probe-runtime', 'python']
+        class FailingAdapter:
+            def deploy(self, *_args, **_kwargs):
+                raise ValueError('build failed')
+            def cleanup_failure(self, _attempt):
+                raise RuntimeError('cleanup failed')
+        with patch('tests.smoke_aws_postgres.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app',
+                                 'stack_id': 'owned-stack', 'status': 'available'}), \
+                patch('tests.smoke_aws_postgres.AwsExpressAdapter', return_value=FailingAdapter()):
+            with self.assertRaisesRegex(ValueError, 'build failed') as caught:
+                main(arguments)
+        self.assertIn('cleanup failed', '\n'.join(caught.exception.__notes__))
+
+    def assert_apply_migrates_before_probe_and_reuses_schema_on_update(self, runtime,
+                                                                      retire_error=False):
         arguments = ['--apply', '--application', 'demo-app', '--account', '123456789012',
                      '--region', 'ap-northeast-2', '--vpc-id', 'vpc-12345678',
                      '--subnet-id', 'subnet-11111111', '--subnet-id', 'subnet-22222222',
@@ -65,6 +88,8 @@ class AwsPostgresSmokeTests(unittest.TestCase):
                     'activeConfigurations': [{'primaryContainer': {'image': 'v2'}}]}})
             def retire(self, result, attempt):
                 calls.append(('retire', result['image']))
+                if retire_error:
+                    raise RuntimeError('retire failed')
         first, second = Adapter('v1'), Adapter('v2')
         def probe(_url, _key, _record_id, method):
             calls.append(('probe', method))
@@ -73,7 +98,11 @@ class AwsPostgresSmokeTests(unittest.TestCase):
                                  'stack_id': 'owned-stack', 'status': 'available'}), \
                 patch('tests.smoke_aws_postgres.AwsExpressAdapter', side_effect=[first, second]), \
                 patch('tests.smoke_aws_postgres.probe', side_effect=probe):
-            main(arguments)
+            if retire_error:
+                with self.assertRaisesRegex(RuntimeError, 'retire failed'):
+                    main(arguments)
+            else:
+                main(arguments)
         self.assertEqual([item[:2] for item in calls], [
             ('deploy', 'v1'), ('probe', 'POST'), ('probe', 'GET'),
             ('deploy', 'v2'), ('probe', 'GET'), ('probe', 'DELETE'), ('retire', 'v2')])
