@@ -3,6 +3,7 @@ import json
 import shutil
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -211,6 +212,51 @@ class AgentTests(unittest.TestCase):
                 DeploymentAgent(OpenAIDeployAgent(AISettings('fake', 'model')), self.tools).run()
             deploy.assert_not_called()
         self.assertEqual(self.tools.attempts, 0)
+
+    def test_temporary_rate_limit_retries_once_after_server_delay(self):
+        failure = urllib.error.HTTPError('https://api.openai.com/v1/responses', 429, 'rate limit',
+                                         {'Retry-After': '2'}, io.BytesIO(json.dumps({
+                                             'error': {'code': 'slow_down'}}).encode()))
+        output = call('read_runtime_logs', {})
+        success = io.BytesIO(json.dumps({'status': 'completed', 'output': output}).encode())
+        with patch('onedeploy.agent.urllib.request.build_opener') as opener, \
+                patch('onedeploy.agent.time.sleep') as sleep, \
+                patch('onedeploy.agent.random.uniform', return_value=0.1):
+            opener.return_value.open.side_effect = [failure, success]
+            result = OpenAIDeployAgent(AISettings('fake', 'model')).next(
+                [{'role': 'user', 'content': 'deploy'}])
+        self.assertEqual(result, output)
+        self.assertEqual(opener.return_value.open.call_count, 2)
+        self.assertGreaterEqual(sleep.call_args.args[0], 2)
+
+    def test_quota_error_and_long_server_delay_are_not_retried(self):
+        for status, code, headers in [
+                (429, 'credit_balance_exhausted', {}),
+                (503, 'server_is_overloaded', {'Retry-After': '30'})]:
+            with self.subTest(status=status, code=code):
+                failure = urllib.error.HTTPError('https://api.openai.com/v1/responses',
+                    status, 'unavailable', headers,
+                    io.BytesIO(json.dumps({'error': {'code': code}}).encode()))
+                with patch('onedeploy.agent.urllib.request.build_opener') as opener, \
+                        patch('onedeploy.agent.time.sleep') as sleep:
+                    opener.return_value.open.side_effect = failure
+                    with self.assertRaisesRegex(AgentError, f'HTTP {status}'):
+                        OpenAIDeployAgent(AISettings('fake', 'model')).next(
+                            [{'role': 'user', 'content': 'deploy'}])
+                opener.return_value.open.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_server_error_retries_only_once(self):
+        failures = [urllib.error.HTTPError('https://api.openai.com/v1/responses',
+                    500, 'server error', {}, io.BytesIO(b'{}')) for _ in range(2)]
+        with patch('onedeploy.agent.urllib.request.build_opener') as opener, \
+                patch('onedeploy.agent.time.sleep') as sleep:
+            opener.return_value.open.side_effect = failures
+            with self.assertRaisesRegex(AgentError, '일시 오류 HTTP 500'):
+                OpenAIDeployAgent(AISettings('fake', 'model')).next(
+                    [{'role': 'user', 'content': 'deploy'}])
+        self.assertEqual(opener.return_value.open.call_count, 2)
+        sleep.assert_called_once()
 
     def test_waiting_job_and_unconfigured_agent_job_restore(self):
         root = self.root / 'state'
