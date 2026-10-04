@@ -50,6 +50,8 @@ def main(argv=None):
     parser.add_argument('--vpc-id', required=True)
     parser.add_argument('--subnet-id', action='append', required=True)
     parser.add_argument('--service-security-group', required=True)
+    parser.add_argument('--probe-runtime', choices=('node', 'python'), default='node',
+                        help='Sample app runtime for the ECS data-path drill (default: node)')
     args = parser.parse_args(argv)
     request = PostgresRequest(args.application, args.account, args.region, args.vpc_id,
                               tuple(args.subnet_id), args.service_security_group)
@@ -63,7 +65,9 @@ def main(argv=None):
         print('읽기 전용 DB 검증 완료. --apply 없이는 ECS 서비스나 이미지를 만들지 않습니다.', flush=True)
         return
 
-    source = Path(__file__).resolve().parents[1] / 'examples' / 'postgres-probe-node'
+    source = (Path(__file__).resolve().parents[1] / 'examples'
+              / f'postgres-probe-{args.probe_runtime}')
+    expected_runtime = {'node': 'custom-dockerfile', 'python': 'python-wsgi'}[args.probe_runtime]
     key = secrets.token_urlsafe(32)
     record_id = uuid.uuid4().hex
     first_attempt = uuid.uuid4().hex[:16] + '-a1'
@@ -73,28 +77,37 @@ def main(argv=None):
     first_result = None
     second_result = None
     with tempfile.TemporaryDirectory(prefix='onedeploy-postgres-smoke-') as directory:
-        project = Path(directory) / 'app'
-        shutil.copytree(source, project)
-        plan = replace(analyze(project), target='aws-ecs-express', health_path='/health',
+        first_project = Path(directory) / 'app-v1'
+        second_project = Path(directory) / 'app-v2'
+        shutil.copytree(source, first_project)
+        shutil.copytree(source, second_project)
+        plan = replace(analyze(first_project), target='aws-ecs-express', health_path='/health',
                        required_env=['PROBE_KEY'])
-        migrations = collect_sql_migrations(project)
+        if plan.runtime != expected_runtime:
+            raise AssertionError(f'Unexpected v1 probe runtime: {plan.runtime}')
+        migrations = collect_sql_migrations(first_project)
         try:
-            first_result = first.deploy(project, plan, first_attempt, {'PROBE_KEY': key},
+            first_result = first.deploy(first_project, plan, first_attempt, {'PROBE_KEY': key},
                                         postgres=request, migrations=migrations)
             if (first_result.get('migration', {}).get('bundle_digest') != migrations.digest
                     or first_result['migration'].get('cleanup_complete') is not True):
                 raise AssertionError('First ECS release did not complete the checked migration')
             probe(first_result['url'], key, record_id, 'POST')
             probe(first_result['url'], key, record_id, 'GET')
-            # ImageBuilder adds .dockerignore to the smoke copy on the first build.
-            # Re-analyze that exact copy before the second immutable-source check.
-            plan = replace(analyze(project), target='aws-ecs-express', health_path='/health',
+            # ImageBuilder writes generated build files into its input. A fresh copy
+            # keeps v2 on the same runtime and TLS profile as the original sample.
+            plan = replace(analyze(second_project), target='aws-ecs-express', health_path='/health',
                            required_env=['PROBE_KEY'])
+            if plan.runtime != expected_runtime:
+                raise AssertionError(f'Unexpected v2 probe runtime: {plan.runtime}')
+            second_migrations = collect_sql_migrations(second_project)
+            if second_migrations.digest != migrations.digest:
+                raise AssertionError('Probe migration changed between ECS releases')
             second = AwsExpressAdapter(lambda stage, message: print(f'[v2:{stage}] {message}', flush=True),
                                        settings, existing=first_result)
-            second_result = second.deploy(project, plan, second_attempt, {'PROBE_KEY': key},
-                                          postgres=request, migrations=migrations)
-            if (second_result.get('migration', {}).get('bundle_digest') != migrations.digest
+            second_result = second.deploy(second_project, plan, second_attempt, {'PROBE_KEY': key},
+                                          postgres=request, migrations=second_migrations)
+            if (second_result.get('migration', {}).get('bundle_digest') != second_migrations.digest
                     or second_result['migration'].get('cleanup_complete') is not True):
                 raise AssertionError('Updated ECS release did not confirm migration idempotency')
             if (second_result['url'] != first_result['url']

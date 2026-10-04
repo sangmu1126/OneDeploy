@@ -174,10 +174,13 @@ RDS의 암호화·삭제 보호·비공개 엔드포인트·서브넷, DB 보안
 
 기존 DB를 이용한 라이브 데이터 경로 smoke는 별도로 준비했다. 기본 실행은 `--inspect`와 같은
 읽기 전용 검증만 한다. `--apply`를 지정하면 SQL 마이그레이션이 smoke용 테이블을 만들고,
-인증 헤더가 필요한 임시 Node.js 앱을 ECS에 배포한다. 앱은 테이블을 직접 생성하지 않고
+인증 헤더가 필요한 임시 Node.js 앱을 ECS에 배포한다. `--probe-runtime python`을
+추가하면 같은 검사를 Flask·Psycopg 앱으로 수행한다. 앱은 테이블을 직접 생성하지 않고
 PostgreSQL에 임의 ID를 쓰고 읽는다. 같은 서비스의 새 이미지 리비전을 배포할 때
 마이그레이션을 다시 호출해 체크섬 기반 중복 실행 방지를 확인한 뒤 데이터를 다시 읽는다.
 성공 시 검증 행을 삭제하고 임시 ECS 서비스와 이미지 태그를 정리한다. RDS·비밀과 smoke용 테이블은 보존된다.
+두 릴리스는 각각 깨끗한 소스 사본에서 빌드해 첫 빌드가 생성한 Dockerfile이
+두 번째 릴리스의 런타임과 TLS 프로필을 바꾸지 않도록 한다.
 2026-10-01 실제 AWS 계정에서 이 smoke를 실행해 통과했다. v1·v2 각각의 SQL
 마이그레이션, v1 쓰기/읽기, 같은 URL의 v2에서 기존 행 읽기 및 검증 행 삭제를 확인했다.
 임시 ECS 서비스와 두 앱 이미지 태그는 정리했고 RDS·비밀은 보존했다.
@@ -187,6 +190,7 @@ PYTHONPATH=. python3 tests/smoke_aws_postgres.py --application demo-app \
   --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --vpc-id <DEFAULT_VPC_ID> \
   --subnet-id <SUBNET_A_ID> --subnet-id <SUBNET_B_ID> \
   --service-security-group <RESTRICTED_SERVICE_GROUP_ID>
+# Python 데이터 경로는 --probe-runtime python 추가
 # ECS와 ECR을 실제 사용하고 비용을 발생시킬 때만 --apply 추가
 ```
 

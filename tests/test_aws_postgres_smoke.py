@@ -13,19 +13,26 @@ class AwsPostgresSmokeTests(unittest.TestCase):
                      '--region', 'ap-northeast-2', '--vpc-id', 'vpc-12345678',
                      '--subnet-id', 'subnet-11111111', '--subnet-id', 'subnet-22222222',
                      '--service-security-group', 'sg-33333333']
-        with patch('tests.smoke_aws_postgres.AwsPostgresProvisioner.inspect_current',
-                   return_value={'database_id': 'onedeploy-demo-app',
-                                 'stack_id': 'owned-stack', 'status': 'available'}) as inspect, \
-                patch('tests.smoke_aws_postgres.AwsExpressAdapter.deploy') as deploy:
-            main(arguments)
-        inspect.assert_called_once_with()
-        deploy.assert_not_called()
+        for runtime in ('node', 'python'):
+            with self.subTest(runtime=runtime), \
+                    patch('tests.smoke_aws_postgres.AwsPostgresProvisioner.inspect_current',
+                          return_value={'database_id': 'onedeploy-demo-app',
+                                        'stack_id': 'owned-stack', 'status': 'available'}) as inspect, \
+                    patch('tests.smoke_aws_postgres.AwsExpressAdapter.deploy') as deploy:
+                main(arguments + ['--probe-runtime', runtime])
+                inspect.assert_called_once_with()
+                deploy.assert_not_called()
 
     def test_apply_migrates_before_probe_and_reuses_schema_on_update(self):
+        for runtime in ('node', 'python'):
+            with self.subTest(runtime=runtime):
+                self.assert_apply_migrates_before_probe_and_reuses_schema_on_update(runtime)
+
+    def assert_apply_migrates_before_probe_and_reuses_schema_on_update(self, runtime):
         arguments = ['--apply', '--application', 'demo-app', '--account', '123456789012',
                      '--region', 'ap-northeast-2', '--vpc-id', 'vpc-12345678',
                      '--subnet-id', 'subnet-11111111', '--subnet-id', 'subnet-22222222',
-                     '--service-security-group', 'sg-33333333']
+                     '--service-security-group', 'sg-33333333', '--probe-runtime', runtime]
         service_arn = 'arn:aws:ecs:ap-northeast-2:123456789012:service/default/probe'
         calls = []
         class Adapter:
@@ -33,17 +40,26 @@ class AwsPostgresSmokeTests(unittest.TestCase):
                 self.image = image
                 self.image_pushed = True
             def deploy(self, project, plan, attempt, environment, postgres=None, migrations=None):
-                self.assertions(project, migrations)
+                self.assertions(project, plan, migrations)
                 assert plan.source_digest == source_digest(project)
                 if self.image == 'v1':
                     (Path(project) / '.dockerignore').write_text('node_modules\n')
+                    (Path(project) / 'Dockerfile').write_text('FROM scratch\n')
                 calls.append(('deploy', self.image, migrations.digest))
                 return {'url': 'https://example.test', 'service_arn': service_arn,
                         'image': self.image, 'migration': {
                             'bundle_digest': migrations.digest, 'cleanup_complete': True}}
-            def assertions(self, project, migrations):
+            def assertions(self, project, plan, migrations):
                 assert migrations.migrations[0].name == '9000_onedeploy_probe.sql'
-                assert 'CREATE TABLE' not in (Path(project) / 'server.js').read_text()
+                entry = 'app.py' if runtime == 'python' else 'server.js'
+                assert 'CREATE TABLE' not in (Path(project) / entry).read_text()
+                assert plan.runtime == ('python-wsgi' if runtime == 'python' else 'custom-dockerfile')
+                original_dockerfile = (Path(__file__).resolve().parents[1] / 'examples'
+                                       / f'postgres-probe-{runtime}' / 'Dockerfile')
+                dockerfile = Path(project) / 'Dockerfile'
+                assert dockerfile.exists() == original_dockerfile.exists()
+                if original_dockerfile.exists():
+                    assert dockerfile.read_bytes() == original_dockerfile.read_bytes()
             def aws(self, args, **_kwargs):
                 return json.dumps({'service': {'currentDeployment': None,
                     'activeConfigurations': [{'primaryContainer': {'image': 'v2'}}]}})

@@ -303,8 +303,11 @@ Secrets Manager·로그·ECS/Fargate/ALB·세금은 포함되지 않아 총 청�
    스택·서비스 보안 그룹 소유권, 비공개 연결, 암호화·삭제 보호, 비밀·역할을
    읽기 전용으로 대조한다. 비밀 원문은 읽지 않는다.
 5. `PYTHONPATH=. python3 tests/smoke_aws_postgres.py`를 먼저 `--apply` 없이
-   실행하고, 이어서 `--apply`로 일회성 검증을 실행한다. SQL 마이그레이션의
+   실행하고, 이어서 `--apply`로 일회성 검증을 실행한다. 기본 Node.js 예제 대신
+   Python 앱을 검사하려면 두 명령 모두 `--probe-runtime python`을 추가한다.
+   SQL 마이그레이션의
    중복 방지, 서비스 v1→v2 URL 유지, DB 쓰기·읽기·재시작 후 보존을 확인한다.
+   Python 옵션은 모의 배포만 확인했으며 실계정 실행 기록은 아직 없다.
 
 smoke가 성공하면 임시 ECS 서비스와 ECR 이미지 태그를 정리한다. 실패·중단 시에는
 기록된 서비스/태스크/이미지 ARN의 실제 상태를 읽기 전용으로 확인한 뒤 소유권이
