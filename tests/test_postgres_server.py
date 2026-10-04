@@ -813,6 +813,27 @@ class PostgresServerTests(unittest.TestCase):
         self.assertTrue((Path(job['project']) / 'app.py').is_file())
         self.assertFalse((Path(job['project']) / 'Dockerfile').exists())
 
+    def test_python_postgres_update_upload_reuses_owned_release_and_database(self):
+        database = {'database_id': 'onedeploy-demo-app'}
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value=database):
+            first_status, first_payload = self.upload(probe_archive('python', 'v1'))
+            self.assertEqual(first_status, 202)
+            first = self.app.jobs[first_payload['id']]
+            first['status'] = 'succeeded'
+            first['result'] = {'database': database, 'url': 'https://example.test',
+                               'service_arn': 'arn:aws:ecs:ap-northeast-2:123456789012:service/default/probe',
+                               'image': 'example:v1'}
+            self.app.save(first['id'])
+            second_status, second_payload = self.upload(probe_archive('python', 'v2'))
+        self.assertEqual(second_status, 202)
+        second = self.app.jobs[second_payload['id']]
+        self.assertEqual(second['replaces_job_id'], first['id'])
+        self.assertEqual(second['prior_result'], first['result'])
+        self.assertEqual(second['postgres']['application_id'], 'demo-app')
+        self.assertIn("version='v1'", (Path(first['project']) / 'app.py').read_text())
+        self.assertIn("version='v2'", (Path(second['project']) / 'app.py').read_text())
+
     def test_auto_target_uses_only_supported_owned_postgres_path(self):
         database = {'database_id': 'onedeploy-demo-app'}
         with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',

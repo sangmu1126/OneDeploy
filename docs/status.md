@@ -5,7 +5,7 @@
 구체적인 경계와 명령은 [AWS 데이터 경로](aws-database-path.md), 결정 이유와 과거
 검증 기록은 [의사결정 기록](decision-log.md)을 따른다.
 
-2026-10-03 데모 AWS 실행 자원을 [일시 중지](aws-pause-2026-10-03.md)했다. 2026-10-04 Python API, 2026-10-05 Python 업데이트 실계정 검증을 위해 `demo-app` RDS를 각각 잠시 시작했다. 임시 ECS 서비스는 `INACTIVE`, 이미지 태그는 삭제됐고 기존 데이터·스냅샷·스택은 보존했다. [Terraform 구성](../terraform/aws-live/README.md)에 기존 자원 네 개를 import했으며 실제 계정 변경에 Terraform apply는 사용하지 않았다.
+2026-10-03 데모 AWS 실행 자원을 [일시 중지](aws-pause-2026-10-03.md)했다. 2026-10-04 Python API, 2026-10-05 Python 내부 어댑터와 제품 API 업데이트 실계정 검증을 위해 `demo-app` RDS를 일시 시작했고 매번 `stopped`까지 재확인했다. 임시 ECS 서비스는 `INACTIVE`, 이미지 태그는 삭제됐고 기존 데이터·스냅샷·스택은 보존했다. [Terraform 구성](../terraform/aws-live/README.md)에 기존 자원 네 개를 import했으며 실제 계정 변경에 Terraform apply는 사용하지 않았다.
 
 ## 확인된 경로
 
@@ -36,13 +36,15 @@
   순서는 모의 어댑터로 검증했다. 2026-10-05 Python 실계정 v1→v2 드릴에서는
   서로 다른 코드의 HTTP 버전 응답과 동일 서비스·URL 유지, v1이 쓴 DB 행의
   v2 조회·삭제, SQL 마이그레이션 재실행을 통과했다. 임시 ECS 서비스와 두 이미지
-  태그는 정리했다. 이 드릴은 내부 AWS 어댑터 경로이며 제품 API/UI의 Python
-  업데이트 검증은 별도로 남아 있다.
+  태그는 정리했다. 이 드릴은 내부 AWS 어댑터 경로다.
   서버 API와 Chrome 배포 드릴도 Python ZIP을 선택할 수 있다. Python ZIP의
   업로드·기존 RDS 바인딩과 고정 AI 도구 호출의 WSGI 설정·마이그레이션 전달은
   로컬 모의 AWS에서 통과했다. Python API 옵션은 2026-10-04 서울 리전에서
   ZIP 업로드·환경값 재개·SQL 마이그레이션·ECS·HTTPS 데이터 쓰기/읽기/삭제·
-  임시 서비스/이미지 종료를 통과했다. Chrome Python 옵션은 실계정 미검증이다.
+  임시 서비스/이미지 종료를 통과했다. 2026-10-05에는 같은 제품 API의 Python
+  v1→v2 ZIP 업로드·환경값 재개·동일 서비스/URL 업데이트, 이전 릴리스의
+  `superseded` 기록과 DB 행 보존·삭제도 실계정에서 통과했다. 고정 AI 도구
+  응답을 사용했다. Chrome Python 옵션은 실계정 미검증이다.
   새 RDS 생성과 같은 작업에서 Python 소스의 잘못된 `localhost` DB 연결을
   고정 Responses 도구 호출로 수정하고 WSGI 계획·관리형 DB·SQL 마이그레이션을
   배포 어댑터까지 전달하는 흐름도 모의 AWS에서 통과했다. 실제 모델 판단이나

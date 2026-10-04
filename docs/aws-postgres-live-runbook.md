@@ -369,6 +369,20 @@ ECR 태그 `0556af9dc1ac4108-a1`, `7b2d25405e6842ba-a1`은 목록에 없었다.
 관리형 RDS·비밀·기존 스냅샷은 보존했다. RDS는 다시 중지했다. 제품 API/UI의
 Python 업데이트와 실제 OpenAI 모델 판단은 이 드릴의 검증 범위에 포함되지 않는다.
 
+같은 날 `tests.smoke_aws_postgres_api --apply --probe-runtime python --verify-update`로
+**제품 HTTP API**의 v1→v2 경로를 별도로 실행했다. API 작업
+`49dc19884a0449b4`가 v1 ZIP 업로드·`PROBE_KEY` 입력·SQL 마이그레이션·ECS
+배포와 공개 HTTPS의 v1 응답·DB 행 쓰기/읽기를 통과했다. 이어서 같은 앱 ID의
+v2 ZIP을 작업 `0cbf1e63b8154ca5`로 제출했다. 두 번째 작업은 기존 릴리스를
+교체했다고 기록했고 이전 작업은 `superseded`가 됐다. 공개 URL과 ECS 서비스
+ARN은 유지됐으며 v2 HTTP 응답, v1이 쓴 행의 조회·삭제가 통과했다. 두 작업의
+AI 도구 응답은 고정 시험 값으로, 실제 모델 호출 결과가 아니다.
+
+최신 릴리스의 제품 종료 API로 임시 서비스 `onedeploy-49dc19884a0449b4-a1`을
+정리했다. AWS 재조회에서 서비스는 `INACTIVE`, v1·v2 ECR 이미지 태그는
+모두 없었다. 기존 RDS는 다시 `stopped`까지 확인했고 관리형 비밀·스냅샷은 보존했다. Chrome Python 업데이트는
+별도 검증이 필요하다.
+
 ## 2026-10-01 실제 Chrome UI 경로
 
 `tests/smoke_aws_postgres_browser.py`의 기본 모드는 기존 RDS를 읽기 전용으로 확인한다. `--apply`에서만 Chrome의 배포 UI가 기존 DB 조회·ZIP 업로드·필수 값 입력·재개를 실행한다. AI 도구 호출은 고정 응답이다. 서울 리전의 `demo-app` RDS에서 이 경로를 실행해 ECS 배포, HTTP 데이터 쓰기·읽기·삭제, 임시 ECS 서비스·이미지 정리를 통과했다. RDS·비밀·앱 전용 보안 그룹은 보존했다.

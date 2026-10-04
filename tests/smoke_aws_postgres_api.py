@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from tests.agent_fixture import call
-from tests.smoke_aws_postgres import probe
+from tests.smoke_aws_postgres import probe, probe_version
 from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsSettings
 from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
@@ -49,13 +49,25 @@ class PostgresFixture:
         return call(name, arguments, self.index)
 
 
-def archive(runtime='node') -> bytes:
+def archive(runtime='node', version=None) -> bytes:
     source = SOURCES[runtime]
     content = io.BytesIO()
     with zipfile.ZipFile(content, 'w') as bundle:
         for path in sorted(source.rglob('*')):
             if path.is_file():
-                bundle.write(path, path.relative_to(source).as_posix())
+                name = path.relative_to(source).as_posix()
+                entry = 'app.py' if runtime == 'python' else 'server.js'
+                if version is not None and name == entry:
+                    original = path.read_text()
+                    old = ('return jsonify(ok=True)' if runtime == 'python'
+                           else 'reply(response, 200, {ok: true});')
+                    new = (f"return jsonify(ok=True, version='{version}')" if runtime == 'python'
+                           else f"reply(response, 200, {{ok: true, version: '{version}'}});")
+                    if original.count(old) != 1:
+                        raise AssertionError(f'Cannot stamp {runtime} {version} health response')
+                    bundle.writestr(name, original.replace(old, new, 1))
+                else:
+                    bundle.write(path, name)
     return content.getvalue()
 
 
@@ -69,6 +81,8 @@ def main(argv=None):
     parser.add_argument('--subnet-id', action='append', required=True)
     parser.add_argument('--service-security-group', required=True)
     parser.add_argument('--probe-runtime', choices=('node', 'python'), default='node')
+    parser.add_argument('--verify-update', action='store_true',
+                        help='Upload a changed v2 release and verify URL/data preservation')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'\d{12}', args.account):
         parser.error('--account must be a 12-digit AWS account ID')
@@ -113,13 +127,14 @@ def main(argv=None):
                          timeout=30) as response:
             return json.load(response)
 
-    try:
-        job_id = api('/api/deployments', archive(args.probe_runtime), {
+    def deploy(version=None):
+        nonlocal job_id, job
+        job_id = api('/api/deployments', archive(args.probe_runtime, version), {
             'X-Deploy-Target': 'aws-ecs-express', 'X-Public-Access': 'true',
             'X-Application-Id': args.application, 'X-Postgres-Existing': 'true',
             'X-Postgres-Vpc-Id': args.vpc_id,
             'X-Postgres-Subnet-Ids': ','.join(args.subnet_id)})['id']
-        print('Started API DB job:', job_id, flush=True)
+        print('Started API DB job:', version or 'single', job_id, flush=True)
         deadline = time.monotonic() + 1800
         resumed = False
         last_stage = None
@@ -129,7 +144,9 @@ def main(argv=None):
             if stage != last_stage:
                 print('Stage:', stage, flush=True)
                 last_stage = stage
-            if job['status'] == 'waiting_input' and not resumed:
+            if job['status'] == 'waiting_input':
+                if resumed:
+                    raise AssertionError('API job requested environment again after resume')
                 if job.get('missing_environment') != ['PROBE_KEY']:
                     raise AssertionError('Unexpected environment request: '
                                          + repr(job.get('missing_environment')))
@@ -151,8 +168,30 @@ def main(argv=None):
             raise AssertionError('API job did not bind and migrate the owned database')
         if not api('/api/jobs/' + job_id + '/health').get('healthy'):
             raise AssertionError('API health check failed')
-        probe(result['url'], key, record_id, 'POST')
-        probe(result['url'], key, record_id, 'GET')
+        return job
+
+    try:
+        first = deploy('v1' if args.verify_update else None)
+        first_result = first['result']
+        if args.verify_update:
+            probe_version(first_result['url'], 'v1')
+        probe(first_result['url'], key, record_id, 'POST')
+        probe(first_result['url'], key, record_id, 'GET')
+        if args.verify_update:
+            second = deploy('v2')
+            result = second['result']
+            if (second.get('replaces_job_id') != first['id']
+                    or result['url'] != first_result['url']
+                    or result['service_arn'] != first_result['service_arn']
+                    or result['image'] == first_result['image']):
+                raise AssertionError('API update did not replace the prior ECS release')
+            previous = api('/api/jobs/' + first['id'])
+            if previous.get('deployment_state') != 'superseded':
+                raise AssertionError('API did not mark the previous release superseded')
+            probe_version(result['url'], 'v2')
+            probe(result['url'], key, record_id, 'GET')
+        else:
+            result = first_result
         probe(result['url'], key, record_id, 'DELETE')
         print('PASS: upload -> environment resume -> ECS + RDS -> HTTP data read/write', flush=True)
         api('/api/jobs/' + job_id + '/retire', b'')

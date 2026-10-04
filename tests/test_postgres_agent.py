@@ -11,6 +11,17 @@ from tests.smoke_aws_postgres_api import PostgresFixture, archive
 
 
 class PostgresAgentTests(unittest.TestCase):
+    def test_update_archives_change_app_code_without_changing_migration(self):
+        for runtime, entry in (('node', 'server.js'), ('python', 'app.py')):
+            with self.subTest(runtime=runtime):
+                with zipfile.ZipFile(io.BytesIO(archive(runtime, 'v1'))) as first, \
+                        zipfile.ZipFile(io.BytesIO(archive(runtime, 'v2'))) as second:
+                    self.assertNotEqual(first.read(entry), second.read(entry))
+                    self.assertEqual(first.read('migrations/9000_onedeploy_probe.sql'),
+                                     second.read('migrations/9000_onedeploy_probe.sql'))
+                self.assertNotIn('version=', (Path('examples') /
+                    f'postgres-probe-{runtime}' / entry).read_text())
+
     def test_python_api_fixture_uploads_and_deploys_managed_postgres_app(self):
         with zipfile.ZipFile(io.BytesIO(archive('python'))) as bundle:
             names = set(bundle.namelist())
