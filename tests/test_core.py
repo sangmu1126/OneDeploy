@@ -199,6 +199,72 @@ class CoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'gunicorn'):
                 make_plan(root, 'wsgi:app.py', None)
 
+    def test_static_python_analysis_selects_unique_app_object_across_root_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'server.py').write_text('from main import app\n')
+            (root / 'main.py').write_text('from fastapi import FastAPI\napp = FastAPI()\n')
+            (root / 'requirements.txt').write_text('fastapi==0.119.0\nuvicorn==0.38.0\n')
+            self.assertIn('main:app', analyze(root).start_command)
+            (root / 'app.py').write_text('from fastapi import FastAPI\napp = FastAPI()\n')
+            with self.assertRaisesRegex(ValueError, 'Multiple Python app objects'):
+                analyze(root)
+
+    def test_static_python_analysis_identifies_flask_when_uvicorn_is_also_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'server.py').write_text('from app import app\n')
+            (root / 'app.py').write_text('from flask import Flask\napp = Flask(__name__)\n')
+            (root / 'requirements.txt').write_text('flask==3.1.1\ngunicorn==23.0.0\nuvicorn==0.38.0\n')
+            plan = analyze(root)
+            self.assertEqual(plan.runtime, 'python-wsgi')
+            self.assertIn('app:app', plan.start_command)
+            (root / 'app.py').write_text('app = create_app()\n')
+            with self.assertRaisesRegex(ValueError, 'server type is ambiguous'):
+                analyze(root)
+
+    def test_static_python_analysis_does_not_select_the_wrong_server_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'app.py').write_text('from fastapi import FastAPI\napp = FastAPI()\n')
+            (root / 'requirements.txt').write_text('fastapi==0.119.0\ngunicorn==23.0.0\n')
+            with self.assertRaisesRegex(ValueError, 'requires uvicorn'):
+                analyze(root)
+            (root / 'app.py').write_text('from flask import Flask\napp = Flask(__name__)\n')
+            (root / 'requirements.txt').write_text('flask==3.1.1\nuvicorn==0.38.0\n')
+            with self.assertRaisesRegex(ValueError, 'requires gunicorn'):
+                analyze(root)
+
+    def test_static_python_analysis_ignores_text_and_local_assignments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'server.py').write_text('print("direct server")\n')
+            (root / 'app.py').write_text('''"""\napp = FastAPI()\n"""\ndef helper():\n    app = FastAPI()\n''')
+            (root / 'requirements.txt').write_text('uvicorn==0.38.0\n')
+            self.assertEqual(analyze(root).start_command, 'python server.py')
+            (root / 'app.py').write_text('app = 42\n')
+            self.assertEqual(analyze(root).start_command, 'python server.py')
+            (root / 'app.py').write_text('from fastapi import FastAPI\napp: FastAPI = FastAPI()\n')
+            self.assertIn('app:app', analyze(root).start_command)
+
+    def test_static_python_analysis_rejects_invalid_or_oversized_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'main.py').write_text('def broken(:\n')
+            with self.assertRaisesRegex(ValueError, 'invalid Python syntax'):
+                analyze(root)
+            (root / 'main.py').write_text('#' + 'x' * (1024 * 1024) + '\n')
+            with self.assertRaisesRegex(ValueError, '1 MiB static analysis limit'):
+                analyze(root)
+
+    def test_static_python_analysis_uses_declared_source_encoding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'app.py').write_bytes(
+                b'# coding: latin-1\n# caf\xe9\nfrom flask import Flask\napp = Flask(__name__)\n')
+            (root / 'requirements.txt').write_text('flask==3.1.1\ngunicorn==23.0.0\n')
+            self.assertEqual(analyze(root).runtime, 'python-wsgi')
+
     def test_failed_readiness_cleans_container(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

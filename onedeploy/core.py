@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import io
 import json
 import hashlib
 from email import policy
@@ -10,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import tokenize
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -210,6 +213,35 @@ def has_python_requirement(project: Path, package: str) -> bool:
                           r"(?:[<>=!~][^\r\n]*)?[ \t]*(?:#.*)?$", content))
 
 
+def python_app_constructor(path: Path) -> str | None:
+    """Inspect module-level app assignment without executing uploaded Python code."""
+    with path.open('rb') as source:
+        content = source.read(MAX_PACKAGE_BYTES + 1)
+    if len(content) > MAX_PACKAGE_BYTES:
+        raise ValueError(f"{path.name} exceeds the 1 MiB static analysis limit")
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(content).readline)
+        module = ast.parse(content.decode(encoding), filename=path.name)
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        raise ValueError(f"{path.name} has invalid Python syntax for static analysis") from None
+    constructors = []
+    for statement in module.body:
+        value = None
+        if isinstance(statement, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'app'
+                                                       for target in statement.targets):
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name) \
+                and statement.target.id == 'app':
+            value = statement.value
+        if value is None or isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
+            continue
+        constructor = value.func if isinstance(value, ast.Call) else None
+        constructors.append(constructor.id if isinstance(constructor, ast.Name) else 'unknown')
+    if len(constructors) > 1:
+        raise ValueError(f"{path.name} defines app more than once; choose a start_script with AI analysis")
+    return constructors[0] if constructors else None
+
+
 def make_plan(project: Path, start_script: str, build_script: str | None,
               port: int = 3000, health_path: str = "/", **metadata) -> DeploymentPlan:
     existing_dockerfile = project / "Dockerfile"
@@ -300,17 +332,40 @@ def analyze(project: Path) -> DeploymentPlan:
         return make_plan(project, "dockerfile", None,
                          warnings=["정적 분석은 PORT=3000, HTTP 검사 경로=/를 가정합니다. 기존 Dockerfile의 실행 설정을 확인하세요."])
     if not (project / "package.json").is_file():
-        entry = next((name for name in ("server.py", "app.py", "main.py") if (project / name).is_file()), None)
-        if entry is None:
+        entries = [name for name in ("server.py", "app.py", "main.py")
+                   if (project / name).is_file()]
+        if not entries:
             raise ValueError("Python app requires server.py, app.py or main.py at project root")
-        with (project / entry).open(encoding='utf-8', errors='replace') as source:
-            preview = source.read(20001)
-        if re.search(r'(?m)^\s*app\s*=', preview) and has_python_requirement(project, "uvicorn"):
-            start = 'asgi:' + entry
-        elif re.search(r'(?m)^\s*app\s*=\s*Flask\s*\(', preview) and has_python_requirement(project, "gunicorn"):
-            start = 'wsgi:' + entry
-        else:
-            start = entry
+        uvicorn = has_python_requirement(project, "uvicorn")
+        gunicorn = has_python_requirement(project, "gunicorn")
+        server_candidates = []
+        ambiguous = []
+        missing_server = []
+        for entry in entries:
+            constructor = python_app_constructor(project / entry)
+            if constructor == 'Flask':
+                if gunicorn:
+                    server_candidates.append('wsgi:' + entry)
+                else:
+                    missing_server.append('Flask app requires gunicorn in requirements.txt')
+            elif constructor in {'FastAPI', 'Starlette'}:
+                if uvicorn:
+                    server_candidates.append('asgi:' + entry)
+                else:
+                    missing_server.append('ASGI app requires uvicorn in requirements.txt')
+            elif constructor and uvicorn and not gunicorn:
+                server_candidates.append('asgi:' + entry)
+            elif constructor and gunicorn and not uvicorn:
+                server_candidates.append('wsgi:' + entry)
+            elif constructor and uvicorn and gunicorn:
+                ambiguous.append(entry)
+        if len(server_candidates) + len(ambiguous) + len(missing_server) > 1:
+            raise ValueError("Multiple Python app objects found; choose a start_script with AI analysis")
+        if ambiguous:
+            raise ValueError("Python app server type is ambiguous; choose a start_script with AI analysis")
+        if missing_server:
+            raise ValueError(missing_server[0])
+        start = server_candidates[0] if server_candidates else entries[0]
         return make_plan(project, start, None,
                          warnings=["정적 분석은 PORT=3000, HTTP 검사 경로=/를 가정합니다. Python 서버 실행 설정을 확인하세요."])
     package = read_package(project)
