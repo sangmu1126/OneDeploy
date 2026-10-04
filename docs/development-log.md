@@ -399,3 +399,16 @@ WSGI 배포를 설정하고 `PROBE_KEY` 입력·재개, SQL 마이그레이션, 
 `799fe546b61d4be8`이다. 종료 API 후 임시 서비스는 `INACTIVE`, ECR 시험
 태그는 없음을 확인했다. 기존 RDS도 `stopped`까지 확인했다. 실제 OpenAI
 모델은 `OPENAI_API_KEY`가 없어 실행하지 않았다.
+
+Python PostgreSQL 업데이트 smoke의 검증 범위를 보강했다. 이전에는 v1·v2가
+동일한 앱 코드를 담아 이미지 태그 교체만 증명했다. 각 릴리스의 임시 소스에
+서로 다른 `/health` 버전을 넣고, 공개 HTTPS에서 v1·v2 응답을 각각 확인한다.
+기존 행의 v2 조회·삭제와 정리 완료 조건은 유지했다. Node·Python 모의 어댑터
+테스트와 전체 Python 테스트 425개가 통과했다.
+
+2026-10-05 실제 AWS에서 보존 RDS를 일시 시작해 Python v1→v2 내부 어댑터
+드릴을 실행했다. 두 릴리스의 SQL 마이그레이션, 동일 ECS 서비스·URL의 코드
+버전 변경, v1이 쓴 PostgreSQL 행의 v2 조회·삭제가 통과했다. 임시 서비스
+`onedeploy-0556af9dc1ac4108-a1`은 `INACTIVE`, 두 앱 이미지 태그는 ECR
+목록에서 없음을 재확인했다. RDS는 다시 중지했다. 실제 모델 호출과 제품 API/UI의
+Python 업데이트는 검증하지 않았다.

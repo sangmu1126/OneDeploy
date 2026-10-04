@@ -307,7 +307,7 @@ Secrets Manager·로그·ECS/Fargate/ALB·세금은 포함되지 않아 총 청�
    Python 앱을 검사하려면 두 명령 모두 `--probe-runtime python`을 추가한다.
    SQL 마이그레이션의
    중복 방지, 서비스 v1→v2 URL 유지, DB 쓰기·읽기·재시작 후 보존을 확인한다.
-   Python 옵션은 모의 배포만 확인했으며 실계정 실행 기록은 아직 없다.
+   Python 옵션의 실계정 결과는 아래 2026-10-05 기록을 따른다.
 
 smoke가 성공하면 임시 ECS 서비스와 ECR 이미지 태그를 정리한다. 실패·중단 시에는
 기록된 서비스/태스크/이미지 ARN의 실제 상태를 읽기 전용으로 확인한 뒤 소유권이
@@ -353,6 +353,21 @@ AI 도구 응답은 **고정 테스트 값**이며 실제 OpenAI 모델 호출�
 실행하지 않았다. 제품 종료 API 뒤 임시 ECS 서비스는 `INACTIVE`, 검증용 ECR
 이미지 태그 조회는 빈 목록이었다. RDS는 다시 `stopped`까지 확인했다. 기존 스택·
 비밀·스냅샷과 데이터는 보존하며 저장소 비용은 계속 발생할 수 있다.
+
+## 2026-10-05 Python 서비스 업데이트와 데이터 보존 검증
+
+보존된 `onedeploy-demo-app` RDS를 잠시 시작해 `available`과 앱 소유권을
+읽기 전용으로 확인했다. `tests.smoke_aws_postgres --apply --probe-runtime python`을
+실행했다. 드릴은 원본 예제의 임시 복사본 두 개에 서로 다른 `/health` 버전을
+기록해 실제 코드 변경을 만들었다. v1 이미지·SQL 마이그레이션·ECS Express를
+배포하고 공개 HTTPS에서 `v1` 응답과 PostgreSQL 행 쓰기·읽기를 확인했다.
+v2는 같은 ECS 서비스와 URL에서 `v2`를 반환했고, 기존 행을 읽어 삭제했다.
+마이그레이션 재실행도 통과했다. AI 호출은 이 내부 어댑터 드릴에 포함되지 않았다.
+
+임시 서비스 `onedeploy-0556af9dc1ac4108-a1`은 `INACTIVE`로 재조회했고
+ECR 태그 `0556af9dc1ac4108-a1`, `7b2d25405e6842ba-a1`은 목록에 없었다.
+관리형 RDS·비밀·기존 스냅샷은 보존했다. RDS는 다시 중지했다. 제품 API/UI의
+Python 업데이트와 실제 OpenAI 모델 판단은 이 드릴의 검증 범위에 포함되지 않는다.
 
 ## 2026-10-01 실제 Chrome UI 경로
 

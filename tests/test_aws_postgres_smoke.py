@@ -76,6 +76,9 @@ class AwsPostgresSmokeTests(unittest.TestCase):
                 assert migrations.migrations[0].name == '9000_onedeploy_probe.sql'
                 entry = 'app.py' if runtime == 'python' else 'server.js'
                 assert 'CREATE TABLE' not in (Path(project) / entry).read_text()
+                marker = (f"version='{self.image}'" if runtime == 'python'
+                          else f"version: '{self.image}'")
+                assert marker in (Path(project) / entry).read_text()
                 assert plan.runtime == ('python-wsgi' if runtime == 'python' else 'custom-dockerfile')
                 original_dockerfile = (Path(__file__).resolve().parents[1] / 'examples'
                                        / f'postgres-probe-{runtime}' / 'Dockerfile')
@@ -93,20 +96,24 @@ class AwsPostgresSmokeTests(unittest.TestCase):
         first, second = Adapter('v1'), Adapter('v2')
         def probe(_url, _key, _record_id, method):
             calls.append(('probe', method))
+        def probe_version(_url, version):
+            calls.append(('version', version))
         with patch('tests.smoke_aws_postgres.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'onedeploy-demo-app',
                                  'stack_id': 'owned-stack', 'status': 'available'}), \
                 patch('tests.smoke_aws_postgres.AwsExpressAdapter', side_effect=[first, second]), \
-                patch('tests.smoke_aws_postgres.probe', side_effect=probe):
+                patch('tests.smoke_aws_postgres.probe', side_effect=probe), \
+                patch('tests.smoke_aws_postgres.probe_version', side_effect=probe_version):
             if retire_error:
                 with self.assertRaisesRegex(RuntimeError, 'retire failed'):
                     main(arguments)
             else:
                 main(arguments)
         self.assertEqual([item[:2] for item in calls], [
-            ('deploy', 'v1'), ('probe', 'POST'), ('probe', 'GET'),
-            ('deploy', 'v2'), ('probe', 'GET'), ('probe', 'DELETE'), ('retire', 'v2')])
-        self.assertEqual(calls[0][2], calls[3][2])
+            ('deploy', 'v1'), ('version', 'v1'), ('probe', 'POST'), ('probe', 'GET'),
+            ('deploy', 'v2'), ('version', 'v2'), ('probe', 'GET'), ('probe', 'DELETE'),
+            ('retire', 'v2')])
+        self.assertEqual(calls[0][2], calls[4][2])
 
 
 if __name__ == '__main__':

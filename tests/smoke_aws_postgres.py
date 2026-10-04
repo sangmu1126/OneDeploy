@@ -42,6 +42,36 @@ def probe(url: str, key: str, record_id: str, method: str) -> dict:
     raise AssertionError(f'PostgreSQL {method} probe failed: {last_error}')
 
 
+def probe_version(url: str, version: str) -> None:
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    last_error = None
+    for _ in range(24):
+        try:
+            with opener.open(url + '/health', timeout=10) as response:
+                body = json.load(response)
+                if response.status == 200 and body == {'ok': True, 'version': version}:
+                    return
+                last_error = f'HTTP {response.status}: unexpected version'
+        except (OSError, ValueError) as exc:
+            last_error = type(exc).__name__
+        time.sleep(5)
+    raise AssertionError(f'ECS release {version} did not reach the public URL: {last_error}')
+
+
+def stamp_release(project: Path, runtime: str, version: str) -> None:
+    entry = project / ('app.py' if runtime == 'python' else 'server.js')
+    original = entry.read_text()
+    old = 'return jsonify(ok=True)' if runtime == 'python' else 'reply(response, 200, {ok: true});'
+    new = (f"return jsonify(ok=True, version='{version}')" if runtime == 'python'
+           else f"reply(response, 200, {{ok: true, version: '{version}'}});")
+    if original.count(old) != 1:
+        raise AssertionError(f'Cannot stamp {runtime} {version} health response')
+    entry.write_text(original.replace(old, new, 1))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Verify ECS PostgreSQL write/read across a service update')
     parser.add_argument('--apply', action='store_true', help='Create temporary billable ECS services and images')
@@ -82,6 +112,8 @@ def main(argv=None):
         second_project = Path(directory) / 'app-v2'
         shutil.copytree(source, first_project)
         shutil.copytree(source, second_project)
+        stamp_release(first_project, args.probe_runtime, 'v1')
+        stamp_release(second_project, args.probe_runtime, 'v2')
         plan = replace(analyze(first_project), target='aws-ecs-express', health_path='/health',
                        required_env=['PROBE_KEY'])
         if plan.runtime != expected_runtime:
@@ -93,6 +125,7 @@ def main(argv=None):
             if (first_result.get('migration', {}).get('bundle_digest') != migrations.digest
                     or first_result['migration'].get('cleanup_complete') is not True):
                 raise AssertionError('First ECS release did not complete the checked migration')
+            probe_version(first_result['url'], 'v1')
             probe(first_result['url'], key, record_id, 'POST')
             probe(first_result['url'], key, record_id, 'GET')
             # Keep each release input immutable and re-check its runtime/TLS profile.
@@ -114,6 +147,7 @@ def main(argv=None):
                     or second_result['service_arn'] != first_result['service_arn']
                     or second_result['image'] == first_result['image']):
                 raise AssertionError('ECS service update did not preserve the URL and replace the image')
+            probe_version(second_result['url'], 'v2')
             probe(second_result['url'], key, record_id, 'GET')
             probe(second_result['url'], key, record_id, 'DELETE')
         finally:
