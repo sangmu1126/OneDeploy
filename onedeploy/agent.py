@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -248,7 +249,8 @@ class DeploymentTools:
                                                     fromfile=path, tofile=path)))
         self.event("editing", f"작업용 소스 수정: {path}")
         self.checkpoint(change={"path": path, "diff": diff}, plan=None)
-        return {"changed": path, "diff": diff, "next": "Reconfigure before deploying"}
+        return {"changed": path, "patch_sha256": hashlib.sha256(new_text.encode()).hexdigest(),
+                "next": "Reconfigure before deploying"}
 
     def configure_deployment(self, start_script, build_script, port, health_path, required_env):
         if not isinstance(required_env, list) or len(required_env) > 40:

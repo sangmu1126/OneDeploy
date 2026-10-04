@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import shutil
 import stat
@@ -88,6 +89,15 @@ class AgentTests(unittest.TestCase):
             self.tools.apply_project_patch('server.js', 'x', 'y')
         self.assertEqual(target.stat().st_size, 40001)
         self.assertFalse(list(self.tools.work.parent.glob('.onedeploy-patch-*')))
+
+    def test_patch_keeps_full_review_diff_out_of_ai_tool_history(self):
+        content = 'x' * 4096
+        result = self.tools.apply_project_patch('large.js', '', content)
+        self.assertLess(len(json.dumps(result)), 250)
+        self.assertNotIn('diff', result)
+        self.assertEqual(result['patch_sha256'], hashlib.sha256(content.encode()).hexdigest())
+        self.assertIn(content, self.updates[-1]['change']['diff'])
+        self.assertEqual((self.tools.work / 'large.js').read_text(), content)
 
     def test_large_source_file_is_not_returned_to_the_agent(self):
         (self.tools.work / 'large.js').write_text('x' * 30000)
