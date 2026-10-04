@@ -14,9 +14,21 @@ from onedeploy.infrastructure import (InfrastructureProfile, explicit_infrastruc
                                       inspect_infrastructure, validate_infrastructure,
                                       validate_infrastructure_proposal, OpenAIInfrastructurePlanner)
 from onedeploy.server import App, handler_for
+from onedeploy.core import analyze
+from onedeploy.migrations import collect_sql_migrations
 
 
 class InfrastructureTests(unittest.TestCase):
+    def test_python_postgres_probe_is_supported_only_with_aws_database_binding(self):
+        project = Path('examples/postgres-probe-python')
+        profile = inspect_infrastructure(project)
+        self.assertEqual(profile.database_engines, ('postgresql',))
+        self.assertEqual(analyze(project).runtime, 'python-wsgi')
+        self.assertEqual(len(collect_sql_migrations(project).migrations), 1)
+        validate_infrastructure(profile, 'aws-ecs-express', postgres=True)
+        with self.assertRaisesRegex(ValueError, 'postgresql'):
+            validate_infrastructure(profile, 'local-docker')
+
     def test_explicit_postgres_plan_requires_detected_engine_and_existing_binding(self):
         profile = InfrastructureProfile('database', ('package.json',), 1,
                                         ('database',), ('postgresql',))

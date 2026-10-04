@@ -133,6 +133,7 @@ PYTHONPATH=. python3 tests/smoke_agent.py --wire-fixture
 PYTHONPATH=. python3 tests/smoke_agent.py --python-generated --wire-fixture
 PYTHONPATH=. python3 tests/smoke_agent.py --asgi-generated --wire-fixture
 PYTHONPATH=. python3 tests/smoke_agent.py --wsgi-generated --wire-fixture
+PYTHONPATH=. python3 -m tests.smoke_python_postgres_tls
 PYTHONPATH=. python3 tests/smoke_agent.py --wire-fixture --resume-unstarted
 PYTHONPATH=. python3 tests/smoke_agent.py --environment --restart-before-resume
 ```
@@ -141,6 +142,8 @@ PYTHONPATH=. python3 tests/smoke_agent.py --environment --restart-before-resume
 `PYTHONPATH=. python3 tests/smoke_agent.py --live`를 사용합니다. AWS 실계정 smoke는 기본이 읽기 전용 사전 점검이며, 과금 가능한 리소스를
 생성하는 `--apply` 절차와 정리 방법은 [실계정 검증 기록](docs/aws-postgres-live-runbook.md)에 적었습니다. `smoke_agent.py --live`는 로컬 Docker만 사용하며, 원본 보존·실제 시작/PORT/바인딩 수정·HTTP 응답·배포 종료 API의 컨테이너/이미지 삭제를 확인합니다. `--live --auto` 조합은 클라우드 대상 선택과 과금 가능성을 피하도록 거부합니다. 현재 구현·실계정 증거·남은 작업의 구분은
 [프로젝트 현황](docs/status.md)을 따릅니다.
+
+`smoke_python_postgres_tls`는 Docker와 OpenSSL을 사용해 임시 로컬 PostgreSQL을 만들고 [`examples/postgres-probe-python`](examples/postgres-probe-python)의 생성 이미지를 실행합니다. 올바른 CA·호스트 이름에서 HTTP 데이터 쓰기·읽기·삭제를, 잘못된 CA·호스트 이름에서 연결 실패를 검사한 뒤 컨테이너·네트워크·시험 이미지를 삭제합니다. AWS 자원을 만들지 않으며 실계정 접속 검증을 대신하지 않습니다.
 
 ## 문서
 

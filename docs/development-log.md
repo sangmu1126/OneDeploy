@@ -344,3 +344,12 @@ Python DB 배포 완료 검사를 제출한 TLS 프로필에 맞췄다. 이전 �
 각각 허용하지만, 이번 리비전의 ECS 실행 구성은 요청한 런타임의 설정과 정확히
 일치해야 성공 처리한다. 모의 ECS 응답에서 Python 설정을 Node 프로필로 낮추면
 HTTP 확인 전에 배포 오류가 나고, 원래 설정이면 성공하는 회귀 테스트를 추가했다.
+
+Python 관리형 PostgreSQL 경로를 로컬 TLS 데이터 드릴로 확장했다. Flask·Gunicorn·
+Psycopg 예제는 기존 Node 프로브와 같은 SQL 마이그레이션, `PG*` 환경변수,
+인증된 레코드 API를 제공한다. 임시 PostgreSQL의 서버 인증서를 테스트 CA로
+서명해 Dockerfile 없는 Python 이미지를 빌드하고, `PGSSLMODE=verify-full`로
+HTTP 쓰기·읽기·삭제를 통과했다. 동일 DB의 다른 네트워크 별칭과 다른 CA로
+실행한 컨테이너는 각각 libpq의 호스트 이름 불일치·인증서 검증 오류를 확인했다.
+임시 컨테이너·네트워크·이미지 태그는 정리했다. 실제 AWS RDS의 Python 접속은
+아직 검증하지 않았다.
