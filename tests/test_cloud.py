@@ -36,7 +36,9 @@ class CloudTests(unittest.TestCase):
         self.commands.append((args, kwargs))
         output = ''
         if args[0] == 'docker':
-            if 'inspect' in args:
+            if args[1:3] == ['image', 'inspect']:
+                output = 'linux/amd64'
+            elif 'inspect' in args:
                 output = 'unix:///test/docker.sock'
             if 'login' in args:
                 self.assertEqual(kwargs['input'], 'private-access-token')

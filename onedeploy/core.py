@@ -416,6 +416,23 @@ class ImageBuilder:
             if platform:
                 args += ["--platform", platform]
             self.command(args + ["-t", image, str(context)])
+            if platform:
+                try:
+                    try:
+                        actual = self.command([
+                            "docker", "image", "inspect", "--platform", platform,
+                            "--format", "{{.Os}}/{{.Architecture}}", image]).strip().lower()
+                    except Exception as exc:
+                        raise ValueError(f"빌드 이미지의 {platform} 플랫폼을 Docker에서 확인할 수 없습니다.") from exc
+                    if actual != platform:
+                        raise ValueError(f"빌드 이미지 플랫폼 불일치: {platform}이 필요하지만 {actual or '불명'}입니다.")
+                    self.event("building", f"이미지 플랫폼 확인 완료: {actual}")
+                except Exception:
+                    try:
+                        self.command(["docker", "image", "rm", image], timeout=30)
+                    except Exception:
+                        self.event("cleanup", "플랫폼 확인 실패 후 로컬 이미지 정리 확인 필요: " + image)
+                    raise
         return image
 
 

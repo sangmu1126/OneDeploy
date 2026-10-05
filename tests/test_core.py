@@ -111,6 +111,52 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(Path(commands[0][0][-1]).exists())
             self.assertEqual(source_digest(root), plan.source_digest)
 
+    def test_cloud_image_platform_is_verified_after_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / 'Dockerfile').write_text('FROM node:22\n')
+            plan = analyze(project)
+            commands = []
+            def command(args, **_kwargs):
+                commands.append(args)
+                return 'linux/amd64' if args[1:3] == ['image', 'inspect'] else ''
+            ImageBuilder(command, lambda *_: None).build(
+                project, plan, 'example:verified', platform='linux/amd64')
+            self.assertEqual(commands[1], ['docker', 'image', 'inspect', '--platform',
+                                            'linux/amd64', '--format',
+                                            '{{.Os}}/{{.Architecture}}', 'example:verified'])
+            self.assertFalse(any(args[1:3] == ['image', 'rm'] for args in commands))
+
+    def test_mismatched_cloud_image_is_removed_before_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / 'Dockerfile').write_text('FROM --platform=$TARGETPLATFORM node:22\n')
+            plan = analyze(project)
+            commands = []
+            def command(args, **_kwargs):
+                commands.append(args)
+                return 'linux/arm64' if args[1:3] == ['image', 'inspect'] else ''
+            with self.assertRaisesRegex(ValueError, 'linux/amd64.*linux/arm64'):
+                ImageBuilder(command, lambda *_: None).build(
+                    project, plan, 'example:wrong-platform', platform='linux/amd64')
+            self.assertEqual(commands[-1], ['docker', 'image', 'rm', 'example:wrong-platform'])
+
+    def test_uninspectable_cloud_image_is_removed_before_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / 'Dockerfile').write_text('FROM node:22\n')
+            plan = analyze(project)
+            commands = []
+            def command(args, **_kwargs):
+                commands.append(args)
+                if args[1:3] == ['image', 'inspect']:
+                    raise RuntimeError('platform not found')
+                return ''
+            with self.assertRaisesRegex(ValueError, '플랫폼을 Docker에서 확인할 수 없습니다'):
+                ImageBuilder(command, lambda *_: None).build(
+                    project, plan, 'example:uninspectable', platform='linux/amd64')
+            self.assertEqual(commands[-1], ['docker', 'image', 'rm', 'example:uninspectable'])
+
     def test_postgres_build_adds_verified_ca_to_existing_dockerfile_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
