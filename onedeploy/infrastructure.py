@@ -13,7 +13,7 @@ from onedeploy.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_re
 
 
 SOURCE_EXTENSIONS = {'.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.php', '.java', '.kt', '.cs', '.prisma'}
-MANIFESTS = {'package.json', 'requirements.txt', 'pyproject.toml', 'Gemfile', 'go.mod', 'Cargo.toml', 'Procfile'}
+MANIFESTS = {'package.json', 'requirements.txt', 'pyproject.toml', 'Gemfile', 'go.mod', 'Cargo.toml', 'Procfile', 'Dockerfile'}
 SKIP_DIRECTORIES = {'tests', 'test', '__tests__', 'spec', 'docs', 'examples', 'vendor', 'dist', 'build', 'node_modules'}
 SQLITE_FILES = {'.db', '.sqlite', '.sqlite3'}
 SQLITE_SOURCE = re.compile(
@@ -69,10 +69,14 @@ TARGET_RESOURCES = {
 }
 # These describe the currently implemented adapters, not everything the providers offer.
 TARGET_CAPABILITIES = {
-    'local-docker': {'postgresql_binding': False, 'durable_files': False, 'background_worker': False},
-    'cloud-run': {'postgresql_binding': False, 'durable_files': False, 'background_worker': False},
-    'aws-ecs-express': {'postgresql_binding': True, 'durable_files': False, 'background_worker': False},
+    'local-docker': {'postgresql_binding': False, 'durable_files': False, 'background_worker': False,
+                     'image_platform': None},
+    'cloud-run': {'postgresql_binding': False, 'durable_files': False, 'background_worker': False,
+                  'image_platform': 'linux/amd64'},
+    'aws-ecs-express': {'postgresql_binding': True, 'durable_files': False, 'background_worker': False,
+                        'image_platform': 'linux/amd64'},
 }
+DOCKER_FROM = re.compile(r'(?im)^\s*FROM\s+(?:--platform=([^\s]+)\s+)?[^\s#]+')
 MAX_INSPECT_FILES = 1000
 MAX_INSPECT_BYTES = 8 * 1024 * 1024
 MAX_INSPECT_FILE_BYTES = 1024 * 1024
@@ -107,6 +111,7 @@ class InfrastructureProfile:
     scanned_files: int
     requirements: tuple[str, ...] = ()
     database_engines: tuple[str, ...] = ()
+    final_image_platform: str | None = None
 
     def as_dict(self):
         return asdict(self)
@@ -117,6 +122,7 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     evidence = []
     requirements = set()
     database_engines = set()
+    final_image_platform = None
     scanned = 0
     budget = MAX_INSPECT_BYTES
     for path in sorted(project.rglob('*')):
@@ -142,6 +148,13 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
             raise ValueError('검사 중 소스 파일이 변경됐습니다. 다시 업로드하세요.')
         content = raw.decode('utf-8', errors='replace')
         budget -= len(raw)
+        if relative.as_posix() == 'Dockerfile':
+            stages = DOCKER_FROM.findall(re.sub(r'\\\r?\n\s*', ' ', content))
+            if stages:
+                final_image_platform = stages[-1].lower() or None
+                if final_image_platform and len(evidence) < 20:
+                    evidence.append('Dockerfile')
+            continue
         found = set()
         if path.name == 'package.json':
             try:
@@ -209,7 +222,7 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     if 'database' in requirements and not database_engines:
         database_engines.add('unknown')
     return InfrastructureProfile(storage, tuple(evidence), scanned, tuple(sorted(requirements)),
-                                 tuple(sorted(database_engines)))
+                                 tuple(sorted(database_engines)), final_image_platform)
 
 
 def infrastructure_compatibility(profile: InfrastructureProfile, target: str,
@@ -219,7 +232,8 @@ def infrastructure_compatibility(profile: InfrastructureProfile, target: str,
         raise ValueError('지원하지 않는 배포 대상입니다.')
     # Auto has no adapter yet: only requirements supported by every candidate pass here.
     capabilities = TARGET_CAPABILITIES.get(target, {
-        'postgresql_binding': False, 'durable_files': False, 'background_worker': False})
+        'postgresql_binding': False, 'durable_files': False, 'background_worker': False,
+        'image_platform': None})
     problems = []
     if 'sqlite' in profile.requirements or profile.storage == 'sqlite':
         problems.append('SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다')
@@ -232,8 +246,17 @@ def infrastructure_compatibility(profile: InfrastructureProfile, target: str,
         problems.append('로컬 파일 쓰기에 영속 저장소가 필요합니다')
     if 'background-worker' in profile.requirements and not capabilities['background_worker']:
         problems.append('별도 백그라운드 워커가 필요합니다')
+    literal_platform = (profile.final_image_platform
+                        if profile.final_image_platform and re.fullmatch(
+                            r'[a-z0-9_]+/[a-z0-9_]+(?:/[a-z0-9_]+)?', profile.final_image_platform)
+                        else None)
+    if (literal_platform and capabilities['image_platform']
+            and '/'.join(literal_platform.split('/')[:2]) != capabilities['image_platform']):
+        problems.append(f'최종 Dockerfile 단계의 {profile.final_image_platform} 플랫폼이 '
+                        f"{capabilities['image_platform']} 이미지 빌드와 충돌합니다")
     return {'target': target, 'detected_requirements': list(profile.requirements),
             'database_engines': list(profile.database_engines), 'evidence': list(profile.evidence),
+            'declared_image_platform': profile.final_image_platform,
             'postgres_binding': postgres, 'adapter_capabilities': capabilities.copy(),
             'compatible': not problems, 'problems': problems,
             'inspection_note': '탐지 신호가 없어도 무상태 앱임이 증명된 것은 아닙니다.'}

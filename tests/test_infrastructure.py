@@ -42,6 +42,67 @@ class InfrastructureTests(unittest.TestCase):
         self.assertTrue(supported['evidence'])
         self.assertFalse(other_target['adapter_capabilities']['postgresql_binding'])
 
+    def test_final_dockerfile_platform_is_checked_for_cloud_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            dockerfile = project / 'Dockerfile'
+            dockerfile.write_text('FROM --platform=linux/arm64 node:22 AS build\n'
+                                  'FROM --platform=linux/amd64 node:22\n')
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.final_image_platform, 'linux/amd64')
+            validate_infrastructure(profile, 'aws-ecs-express')
+            dockerfile.write_text('FROM --platform=linux/amd64 node:22 AS build\n'
+                                  'FROM --platform=linux/arm64 node:22\n')
+            profile = inspect_infrastructure(project)
+            self.assertEqual(profile.final_image_platform, 'linux/arm64')
+            validate_infrastructure(profile, 'local-docker')
+            with self.assertRaisesRegex(ValueError, 'linux/arm64'):
+                validate_infrastructure(profile, 'aws-ecs-express')
+            with self.assertRaisesRegex(ValueError, 'linux/arm64'):
+                validate_infrastructure(profile, 'cloud-run')
+            dockerfile.write_text('FROM --platform=$TARGETPLATFORM node:22\n')
+            validate_infrastructure(inspect_infrastructure(project), 'aws-ecs-express')
+
+    def test_aws_upload_rejects_pinned_arm_image_before_creating_job(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('Dockerfile', 'FROM --platform=linux/arm64 node:22\nCMD ["node", "server.js"]\n')
+            bundle.writestr('server.js', 'console.log("ready")')
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), AISettings('fixture-key', 'fixture-model'),
+                      aws_settings=AwsSettings('ap-northeast-2'), monitor_interval=0)
+            handler_class = handler_for(app)
+            handler = handler_class.__new__(handler_class)
+            handler.path = '/api/deployments'
+            handler.headers = {'X-OneDeploy-Token': app.token,
+                               'Content-Length': str(len(archive.getvalue())),
+                               'X-Deploy-Target': 'aws-ecs-express', 'X-Public-Access': 'true'}
+            handler.rfile = io.BytesIO(archive.getvalue())
+            handler.json_response = Mock()
+            with patch('onedeploy.server.AwsSettings.unavailable_reason', return_value=None):
+                handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[0], 400)
+            self.assertIn('linux/arm64', handler.json_response.call_args.args[1]['error'])
+            self.assertFalse(app.jobs)
+
+    def test_agent_edit_cannot_change_final_image_to_arm_for_aws(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'source'
+            project.mkdir()
+            (project / 'Dockerfile').write_text('FROM node:22\nCMD ["node", "server.js"]\n')
+            (project / 'server.js').write_text('console.log("ready")')
+            tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None,
+                                    lambda **_: None, target='aws-ecs-express')
+            before = tools.read_project_files(['Dockerfile'])['files']['Dockerfile']
+            tools.apply_project_patch('Dockerfile', before,
+                                      before.replace('FROM node:22',
+                                                     'FROM --platform=linux/arm64 node:22'))
+            tools.configure_deployment('dockerfile', None, 3000, '/', [])
+            with self.assertRaisesRegex(ValueError, 'linux/arm64'):
+                tools.deploy_application()
+            self.assertEqual(tools.attempts, 0)
+
     def test_explicit_postgres_plan_requires_detected_engine_and_existing_binding(self):
         profile = InfrastructureProfile('database', ('package.json',), 1,
                                         ('database',), ('postgresql',))

@@ -18,6 +18,10 @@
 같은 호환성 검사를 적용하고, 선택된 대상의 탐지 요구·근거·지원 여부를 작업의
 `infrastructure_plan.compatibility`에 기록한다. PostgreSQL은 AWS DB 바인딩이
 확인된 경우에만 지원으로 판정한다. 450개 Python 회귀 테스트가 통과했다.
+같은 날 Dockerfile 최종 단계가 리터럴 ARM64 플랫폼을 고정하면 AWS·Cloud Run의
+AMD64 빌드와 충돌한다는 사전 검사를 추가했다. AWS 업로드는 작업 생성 전에,
+AI가 수정한 Dockerfile은 실제 배포 시도 전에 같은 규칙으로 거부한다. 다단계
+빌드의 앞 단계만 ARM64인 경우와 플랫폼 변수를 사용하는 경우는 허용한다.
 
 2026-10-04까지 확인된 주요 흐름은 앱 업로드와 코드 준비, AWS ECS Express 배포,
 기존·신규 PostgreSQL 연결, SQL 마이그레이션, HTTP 데이터 쓰기·읽기, RDS 스냅샷
