@@ -491,3 +491,17 @@ HTTP 응답까지는 가지 못했으므로 이 시도는 전체 배포 성공�
 태스크 정의도 삭제했다. 작업 기록과 `database-cleanup.json`은 로컬 드릴 상태에 남겼다.
 다음 실행은 더 긴 Chrome CDP 명령 제한 시간을 적용하고 ECS 배포 및 HTTPS 데이터
 경로까지 끝나는지 확인해야 한다. API 키가 없어 실제 OpenAI 모델은 호출하지 않았다.
+
+### 재시작 후 수동 재개 완료 결과
+
+앞선 CDP 회수 실패를 조사하려고 드라이버 명령 제한 시간을 30초에서 120초로 늘린
+후 `dbdrill-c9341af7`에서 동일한 실계정 드릴을 다시 실행했다. Chrome 화면에서 한 번
+업로드해 DB를 생성하고, 앱 서버를 재시작한 다음 이력에서 작업
+`93583538b5824426`을 수동 재개했다. RDS 검증, 컨테이너 이미지 준비, ECS 일회성 SQL
+마이그레이션(`applied: 1`), ECS Express 서비스 생성, HTTPS `/health`, 샘플 앱의
+PostgreSQL 쓰기·읽기·삭제가 모두 통과했고 제품 작업은 `succeeded`였다.
+
+종료 API도 통과했다. ECS 서비스는 `INACTIVE`, 테스트 ECS 태스크는 실행 중인 항목이
+없고, DB cleanup 기록은 `succeeded / stack_deleted`다. 최종 AWS 확인에서 RDS 인스턴스,
+앱 네트워크 스택, 앱 전용 ECS 서비스, 두 ECR 태그는 남아 있지 않았다. 검증은
+고정 AI 도구 응답을 사용했고 OpenAI API 키 부재로 실제 모델 호출은 하지 않았다.
