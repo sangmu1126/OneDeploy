@@ -21,6 +21,7 @@ from onedeploy.analysis import AISettings, analyze_project, redact
 from onedeploy.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
 from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 from onedeploy.aws_network import ServiceNetworkRequest, discover_default_network
+from onedeploy.certificate import deployment_certificate
 from onedeploy.cloud import CloudRunAdapter, CloudRunSettings
 from onedeploy.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from onedeploy.health import check_deployment
@@ -1354,6 +1355,17 @@ def handler_for(app: App):
                     self.json_response(409, {"error": "배포 종료 중이거나 이미 종료됐습니다."})
                 else:
                     self.json_response(200, app.check_and_record_health(job_id))
+                return
+            if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/certificate", self.path):
+                job_id = self.path.split('/')[3]
+                with app.lock:
+                    job = app.jobs.get(job_id)
+                    snapshot = json.loads(json.dumps(job)) if job else None
+                    history = json.loads(json.dumps(app.health_history.get(job_id, [])))
+                if snapshot:
+                    self.json_response(200, deployment_certificate(snapshot, history))
+                else:
+                    self.json_response(404, {"error": "Not found"})
                 return
             if self.path.startswith("/api/jobs/"):
                 with app.lock:

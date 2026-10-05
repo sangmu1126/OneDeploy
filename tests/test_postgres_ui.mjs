@@ -10,6 +10,29 @@ assert.ok(cancelStart >= 0 && cancelEnd > cancelStart);
 const cancelContext = {};
 runInNewContext(html.slice(cancelStart, cancelEnd), cancelContext);
 
+test('deployment certificate separates recorded checks from unverified checks', async () => {
+  const start = html.indexOf('const certificateLabels=');
+  const end = html.indexOf("el('certificateSection').ontoggle", start);
+  assert.ok(start >= 0 && end > start);
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {textContent: ''});
+    return elements.get(id);
+  };
+  const context = {
+    selected: 'a'.repeat(16), certificateFor: null, el: element,
+    api: async () => ({verification: [
+      {name: 'deployment_http', status: 'passed'},
+      {name: 'image_identity', status: 'unverified'},
+    ], unverified: ['image_identity']}), JSON,
+  };
+  runInNewContext(html.slice(start, end), context);
+  await context.loadCertificate();
+  assert.match(element('certificateSummary').textContent, /배포 당시 HTTP/);
+  assert.match(element('certificateSummary').textContent, /미검증: 실행 이미지 동일성/);
+  assert.match(element('certificateJson').textContent, /"image_identity"/);
+});
+
 test('running deployment can be cancelled only before its first attempt', () => {
   assert.equal(cancelContext.canCancel({status: 'waiting_input'}), true);
   assert.equal(cancelContext.canCancel({status: 'running', attempts: 0}), true);
