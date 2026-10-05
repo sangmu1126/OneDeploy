@@ -25,7 +25,8 @@ from onedeploy.cloud import CloudRunAdapter, CloudRunSettings
 from onedeploy.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from onedeploy.health import check_deployment
 from onedeploy.infrastructure import (OpenAIInfrastructurePlanner,
-                                      explicit_infrastructure_plan, inspect_infrastructure,
+                                      explicit_infrastructure_plan, infrastructure_compatibility,
+                                      inspect_infrastructure,
                                       plan_infrastructure, validate_infrastructure)
 from onedeploy.migrations import collect_sql_migrations
 from onedeploy.network_operations import NetworkOperations
@@ -1714,6 +1715,7 @@ def handler_for(app: App):
                             infrastructure_plan = plan_infrastructure(project, available_targets,
                                 public_flag == 'true', app.infrastructure_planner_factory(app.ai_settings))
                             target = infrastructure_plan['target']
+                            validate_infrastructure(infrastructure_profile, target)
                         else:
                             infrastructure_plan = explicit_infrastructure_plan(
                                 target, infrastructure_profile,
@@ -1728,6 +1730,8 @@ def handler_for(app: App):
                                     ('검토된 생성 계획을 확인해 AWS를 선택했습니다. DB는 생성 후 앱 실패에도 보존됩니다.'
                                      if create_plan_id is not None else
                                      'RDS 소유권을 확인해 AWS를 선택했습니다. DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.'))
+                        infrastructure_plan['compatibility'] = infrastructure_compatibility(
+                            infrastructure_profile, target, postgres=postgres_request is not None)
                         with app.lock:
                             app.ensure_application_available(application_id, target)
                             latest = None

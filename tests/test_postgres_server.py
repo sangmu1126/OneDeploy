@@ -1019,6 +1019,9 @@ class PostgresServerTests(unittest.TestCase):
         self.assertIn('existing RDS PostgreSQL', infrastructure['resources'])
         self.assertIn('one-off SQL migration task', infrastructure['resources'])
         self.assertIn('package.json', infrastructure['detected_files'])
+        self.assertTrue(infrastructure['compatibility']['compatible'])
+        self.assertTrue(infrastructure['compatibility']['postgres_binding'])
+        self.assertEqual(infrastructure['compatibility']['database_engines'], ['postgresql'])
         self.assertNotIn('password', json.dumps(job).lower())
         with patch('onedeploy.server.DeploymentTools') as tools, \
                 patch('onedeploy.server.DeploymentAgent') as agent:

@@ -11,6 +11,13 @@
 | [AWS 데이터 경로](aws-database-path.md) | RDS·ECS·스냅샷의 동작과 운영 절차 |
 | [실패 생성 정리](aws-postgres-failed-create-recovery.md) | 롤백 스택 정리 조건, 작업 기록, 재생성 경계 |
 | [요구사항](requirements.md) · [설계](design.md) | 해커톤 원문 해석과 구현 구조 |
+| [이식성 청사진](portability-blueprint.md) | 공통 요구 계약, 대상별 기능 경계와 단계별 완료 기준 |
+
+2026-10-05: 배포 대상별로 OneDeploy가 실제 제공하는 PostgreSQL 바인딩·영속 파일·
+별도 워커 기능을 한곳에 정의했다. 업로드의 자동 대상 선택과 사용자 지정 대상에
+같은 호환성 검사를 적용하고, 선택된 대상의 탐지 요구·근거·지원 여부를 작업의
+`infrastructure_plan.compatibility`에 기록한다. PostgreSQL은 AWS DB 바인딩이
+확인된 경우에만 지원으로 판정한다. 450개 Python 회귀 테스트가 통과했다.
 
 2026-10-04까지 확인된 주요 흐름은 앱 업로드와 코드 준비, AWS ECS Express 배포,
 기존·신규 PostgreSQL 연결, SQL 마이그레이션, HTTP 데이터 쓰기·읽기, RDS 스냅샷

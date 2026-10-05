@@ -11,7 +11,8 @@ from onedeploy.agent import DeploymentTools
 from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsSettings
 from onedeploy.infrastructure import (InfrastructureProfile, explicit_infrastructure_plan,
-                                      inspect_infrastructure, validate_infrastructure,
+                                      infrastructure_compatibility, inspect_infrastructure,
+                                      validate_infrastructure,
                                       validate_infrastructure_proposal, OpenAIInfrastructurePlanner)
 from onedeploy.server import App, handler_for
 from onedeploy.core import analyze
@@ -28,6 +29,18 @@ class InfrastructureTests(unittest.TestCase):
         validate_infrastructure(profile, 'aws-ecs-express', postgres=True)
         with self.assertRaisesRegex(ValueError, 'postgresql'):
             validate_infrastructure(profile, 'local-docker')
+
+    def test_target_compatibility_requires_real_database_binding_and_records_evidence(self):
+        profile = inspect_infrastructure(Path('examples/postgres-probe-python'))
+        missing = infrastructure_compatibility(profile, 'aws-ecs-express')
+        supported = infrastructure_compatibility(profile, 'aws-ecs-express', postgres=True)
+        other_target = infrastructure_compatibility(profile, 'cloud-run', postgres=True)
+        self.assertFalse(missing['compatible'])
+        self.assertTrue(supported['compatible'])
+        self.assertFalse(other_target['compatible'])
+        self.assertEqual(supported['database_engines'], ['postgresql'])
+        self.assertTrue(supported['evidence'])
+        self.assertFalse(other_target['adapter_capabilities']['postgresql_binding'])
 
     def test_explicit_postgres_plan_requires_detected_engine_and_existing_binding(self):
         profile = InfrastructureProfile('database', ('package.json',), 1,
@@ -476,6 +489,10 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(job['requested_target'], 'auto')
             self.assertEqual(job['infrastructure_plan']['planner'], 'openai')
             self.assertEqual(job['infrastructure_profile']['storage'], 'unconfirmed')
+            compatibility = job['infrastructure_plan']['compatibility']
+            self.assertTrue(compatibility['compatible'])
+            self.assertEqual(compatibility['target'], 'aws-ecs-express')
+            self.assertFalse(compatibility['postgres_binding'])
             private_handler = handler_class.__new__(handler_class)
             private_handler.path = '/api/deployments'
             private_handler.headers = {**handler.headers, 'X-Public-Access': 'false'}

@@ -67,6 +67,12 @@ TARGET_RESOURCES = {
     'cloud-run': ['Artifact Registry repository', 'runtime service account', 'Cloud Run service'],
     'aws-ecs-express': ['CloudFormation base stack', 'ECR repository', 'ECS Express service'],
 }
+# These describe the currently implemented adapters, not everything the providers offer.
+TARGET_CAPABILITIES = {
+    'local-docker': {'postgresql_binding': False, 'durable_files': False, 'background_worker': False},
+    'cloud-run': {'postgresql_binding': False, 'durable_files': False, 'background_worker': False},
+    'aws-ecs-express': {'postgresql_binding': True, 'durable_files': False, 'background_worker': False},
+}
 MAX_INSPECT_FILES = 1000
 MAX_INSPECT_BYTES = 8 * 1024 * 1024
 MAX_INSPECT_FILE_BYTES = 1024 * 1024
@@ -206,22 +212,38 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                                  tuple(sorted(database_engines)))
 
 
-def validate_infrastructure(profile: InfrastructureProfile, target: str, *, postgres: bool = False) -> None:
+def infrastructure_compatibility(profile: InfrastructureProfile, target: str,
+                                 *, postgres: bool = False) -> dict:
+    """Assess detected requirements against the actual OneDeploy target adapter."""
+    if target != 'auto' and target not in TARGET_CAPABILITIES:
+        raise ValueError('지원하지 않는 배포 대상입니다.')
+    # Auto has no adapter yet: only requirements supported by every candidate pass here.
+    capabilities = TARGET_CAPABILITIES.get(target, {
+        'postgresql_binding': False, 'durable_files': False, 'background_worker': False})
     problems = []
     if 'sqlite' in profile.requirements or profile.storage == 'sqlite':
         problems.append('SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다')
     if 'database' in profile.requirements or profile.storage == 'database':
-        if not (postgres and target == 'aws-ecs-express'
+        if not (postgres and capabilities['postgresql_binding']
                 and profile.database_engines == ('postgresql',)):
             engines = ', '.join(profile.database_engines) if profile.database_engines else '불명'
             problems.append(f'{engines} 데이터베이스 서비스 연결·마이그레이션 검증이 필요합니다')
-    if 'local-files' in profile.requirements:
+    if 'local-files' in profile.requirements and not capabilities['durable_files']:
         problems.append('로컬 파일 쓰기에 영속 저장소가 필요합니다')
-    if 'background-worker' in profile.requirements:
+    if 'background-worker' in profile.requirements and not capabilities['background_worker']:
         problems.append('별도 백그라운드 워커가 필요합니다')
-    if problems:
+    return {'target': target, 'detected_requirements': list(profile.requirements),
+            'database_engines': list(profile.database_engines), 'evidence': list(profile.evidence),
+            'postgres_binding': postgres, 'adapter_capabilities': capabilities.copy(),
+            'compatible': not problems, 'problems': problems,
+            'inspection_note': '탐지 신호가 없어도 무상태 앱임이 증명된 것은 아닙니다.'}
+
+
+def validate_infrastructure(profile: InfrastructureProfile, target: str, *, postgres: bool = False) -> None:
+    report = infrastructure_compatibility(profile, target, postgres=postgres)
+    if report['problems']:
         raise ValueError('인프라 요구가 감지됐습니다 (' + ', '.join(profile.evidence[:3]) + '): '
-                         + '; '.join(problems) + '. 현재 ' + target
+                         + '; '.join(report['problems']) + '. 현재 ' + target
                          + ' 구성에서는 지원하지 않아 데이터 손실 또는 작업 누락 위험이 있으므로 배포를 중단합니다.')
 
 
