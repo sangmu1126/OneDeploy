@@ -3,7 +3,8 @@
 기준: 2026-10-05. 이 문서는 현재 상태를 요약한다. 행사 원문과의 대조는
 [요구사항](requirements.md), 구현 구조는 [설계](design.md), AWS 데이터 경로의
 구체적인 경계와 명령은 [AWS 데이터 경로](aws-database-path.md), 결정 이유와 과거
-검증 기록은 [의사결정 기록](decision-log.md)을 따른다.
+검증 기록은 [의사결정 기록](decision-log.md)을 따른다. 아직 실행하지 않은 실환경
+검증의 조건과 합격 기준은 [후속 검증 계획](deferred-verification.md)에 정리했다.
 
 2026-10-03 데모 AWS 실행 자원을 [일시 중지](aws-pause-2026-10-03.md)했다. 2026-10-04 Python API, 2026-10-05 Python 내부 어댑터·제품 API·Chrome 업데이트 실계정 검증을 위해 `demo-app` RDS를 일시 시작했고 매번 `stopped`까지 재확인했다. 임시 ECS 서비스는 `INACTIVE`, 이미지 태그는 삭제됐고 기존 데이터·스냅샷·스택은 보존했다. [Terraform 구성](../terraform/aws-live/README.md)에 기존 자원 네 개를 import했으며 실제 계정 변경에 Terraform apply는 사용하지 않았다.
 
