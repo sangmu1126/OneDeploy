@@ -531,4 +531,16 @@ digest, 태그의 실제 digest를 확인한 뒤 삭제한다. 정의 비활성�
 다른 digest로 바뀌면 ECS 정의나 태그를 삭제하지 않는 테스트를 추가했다.
 웹 서비스 배포 성공 뒤 마이그레이션 정리만 실패해도 이력에서 정리 버튼을 노출하고,
 성공 시 `migration.cleanup_complete`를 갱신한다. SQL과 서비스 배포는 다시 실행하지
-않는다. 이 추가 경로의 실제 AWS 변경은 아직 검증하지 않았다.
+않는다. 제품 HTTP 재정리 경로의 실제 AWS 변경은 아직 검증하지 않았다.
+
+2026-10-05 실계정 검증을 시도할 때 보존된 `onedeploy-demo-app` RDS는
+`InsufficientDBInstanceCapacity`로 시작이 거부됐다. 반복 시작이나 인스턴스
+변경 없이 `stopped`를 재확인했다. 대신 SQL·RDS 접근이 없는 전용
+`tests.smoke_aws_migration_cleanup` 드릴을 만들었다. 실행 전 AWS 계정, 기반
+스택 출력, ECR 저장소, 서브넷, 앱 소유 보안 그룹을 읽기 전용으로 검사하고,
+`--apply`에서만 임시 이미지·정의를 만들고 태스크를 실행한다. 시도
+`5e52791bff854262-a1`에서 실제 태스크 `STOPPED`/exit 0을 확인한 뒤 공통
+정리 함수가 정의를 비활성화하고 태그를 제거했다. AWS 재조회 결과는 ECR
+`ImageNotFound`, 해당 계열 활성 정의 `[]`, 원본 RDS `stopped`였다. ARN·digest와
+각 단계는 Git 제외 로컬 기록에 남겼다. 제품 HTTP 정리 버튼과 실제 SQL은 이
+DB 없는 드릴에서 검증하지 않았다.

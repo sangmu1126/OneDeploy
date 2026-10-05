@@ -505,3 +505,33 @@ PostgreSQL 쓰기·읽기·삭제가 모두 통과했고 제품 작업은 `succe
 없고, DB cleanup 기록은 `succeeded / stack_deleted`다. 최종 AWS 확인에서 RDS 인스턴스,
 앱 네트워크 스택, 앱 전용 ECS 서비스, 두 ECR 태그는 남아 있지 않았다. 검증은
 고정 AI 도구 응답을 사용했고 OpenAI API 키 부재로 실제 모델 호출은 하지 않았다.
+
+## 2026-10-05 DB 없는 마이그레이션 자원 정리 실계정 드릴
+
+정상 마이그레이션과 중단 복구가 공유하는 ECS 정의·ECR 태그 정리 함수를
+`tests.smoke_aws_migration_cleanup`으로 검증했다. 기본 실행은 계정·기반 스택·
+ECR·서브넷·앱 소유 보안 그룹을 읽기 전용으로 검사한다. `--apply`는 로컬
+`alpine:3.21` ARM64 이미지를 이 시도만의 ECR 태그에 올리고, SQL·RDS 접근이 없는
+Fargate 태스크를 한 번 실행한다. 태스크가 멈춘 후 실제 정리 함수를 호출하고,
+`.onedeploy/migration-cleanup-drills/`에 ARN·digest·단계 기록을 저장한다.
+중간에 멈추면 기록 파일을 `--cleanup-record <파일> --apply`로 지정해 이미 확인된
+태스크와 리소스의 정리만 재시도한다. 태스크 ARN이 기록되지 않았거나 종료 결과가
+불확실하면 자동 정리를 거부한다.
+
+2026-10-05 서울 리전에서는 기존 `onedeploy-demo-app` RDS 시작이
+`InsufficientDBInstanceCapacity`로 거부돼 RDS를 재시도하거나 설정을 변경하지
+않았다. DB 없는 드릴 `5e52791bff854262-a1`을 실행해 ECS 태스크
+`1530b61f7f2644f491aebf84aa5bb9b3`의 `STOPPED`·종료 코드 0과 정리 함수의
+`state=done`을 확인했다. 이후 ECR 태그 `5e52791bff854262-a1-db`는
+`ImageNotFound`, 해당 계열의 활성 태스크·정의는 `[]`였고 정의 리비전 1은
+`INACTIVE` 목록에 있었다. 기존 데모 RDS는
+마지막 조회에도 `stopped`였다. 이 드릴은 제품 HTTP 정리 API나 실제 SQL 실행을
+검증하지 않는다.
+
+```sh
+PYTHONPATH=. python3 -m tests.smoke_aws_migration_cleanup \
+  --account <AWS_ACCOUNT_ID> --region ap-northeast-2 --application demo-app \
+  --vpc-id <DEFAULT_VPC_ID> --subnet-id <PUBLIC_SUBNET_A> \
+  --subnet-id <PUBLIC_SUBNET_B> --service-security-group <APP_GROUP_ID>
+# 읽기 전용 계획 뒤, 실제 임시 ECR·Fargate 실행에만 --apply 추가
+```
