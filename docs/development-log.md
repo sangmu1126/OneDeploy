@@ -10,8 +10,12 @@
 | [AWS PostgreSQL 실계정 검증 기록](aws-postgres-live-runbook.md) | 실제 생성·배포·복원·폐기 순서와 확인 결과 |
 | [AWS 데이터 경로](aws-database-path.md) | RDS·ECS·스냅샷의 동작과 운영 절차 |
 | [실패 생성 정리](aws-postgres-failed-create-recovery.md) | 롤백 스택 정리 조건, 작업 기록, 재생성 경계 |
-| [요구사항](requirements.md) · [설계](design.md) | 해커톤 원문 해석과 구현 구조 |
+| [요구사항](requirements.md) · [설계](design.md) | 해커톤 원문 해석·출제 의도·요구사항 명세(R-xx)와 현재 구현 구조 |
 | [이식성 청사진](portability-blueprint.md) | 공통 요구 계약, 대상별 기능 경계와 단계별 완료 기준 |
+| [독창성 설계](originality-design.md) | 배포 후 자동 드릴 중심의 차별화 설계, 첫 안과 방향 전환 과정 |
+| [개요](overview.md) | 심사위원·처음 보는 사람을 위한 요약 (30초 소개, 구조, 현재 상태) |
+| [목표 설계](target-design.md) | 출제 의도 기반의 목표 구조: 실행 방식 선택, 어댑터 계약, SQLite 전환, 드릴·증명서 |
+| [남은 작업 로드맵](roadmap.md) | 이식성·운영·행사 세 축의 남은 작업, 작업 원칙, 정리 후보와 결정 대기 항목 |
 
 2026-10-06: AWS·Cloud Run용 빌드 결과를 업로드하기 전에 Docker 로컬 이미지의
 `linux/amd64` OS·아키텍처를 확인하도록 했다. 빌드가 성공해도 실제 플랫폼이
