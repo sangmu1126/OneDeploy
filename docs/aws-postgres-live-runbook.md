@@ -71,7 +71,14 @@ python3 -m tests.smoke_aws_postgres_rollback_drill \
 
 2026-10-05 첫 재실행의 임시 `dbdrill-c8f1a26d`는 전용 네트워크 생성 뒤 RDS 구성의 읽기 전용 `preflight()`가 실패해 DB 생성 요청에 이르지 않았다. 같은 구성 조회는 직후 다시 통과했다. 드릴의 조기 실패 정리가 빠진 결함을 발견해, 생성 작업 기록이 없고 DB·RDS 스택의 부재가 모두 확인될 때에만 전용 네트워크를 회수하도록 보강했다. 첫 시도의 네트워크는 소유권·미사용 상태를 검증한 뒤 수동 회수했고 스택 `DELETE_COMPLETE`를 확인했다.
 
-새 임시 `dbdrill-6d92c3e8`로 바뀐 드릴을 실계정에서 끝까지 실행했다. 제품 생성 요청은 `needs_attention`이 됐고 `reconcile()`이 앱 소유 `ROLLBACK_COMPLETE`를 표시했다. `cleanup_plan()`·`cleanup_start()`가 실패 스택을 실제 삭제한 뒤 로컬 시도를 보관했고 같은 앱 ID의 새 생성 계획이 열렸다. 전용 네트워크도 정리됐다. 최종 AWS 조회에서 두 시도의 활성 스택이 없고, `dbdrill-6d92c3e8`의 DB·네트워크 스택과 `dbdrill-c8f1a26d`의 네트워크 스택은 `DELETE_COMPLETE`, 해당 DB·수동 스냅샷·보안 그룹 목록은 모두 `[]`였다. 기존 `demo-app` RDS는 중지 상태로 유지했다. 제품 API/UI에서 버튼을 누르는 실계정 시험은 별도다. 이 드릴은 실패 스택을 실제 삭제하므로 `--apply`는 새로운 임시 앱 ID에만 사용한다.
+새 임시 `dbdrill-6d92c3e8`로 바뀐 드릴을 실계정에서 끝까지 실행했다. 제품 생성 요청은 `needs_attention`이 됐고 `reconcile()`이 앱 소유 `ROLLBACK_COMPLETE`를 표시했다. `cleanup_plan()`·`cleanup_start()`가 실패 스택을 실제 삭제한 뒤 로컬 시도를 보관했고 같은 앱 ID의 새 생성 계획이 열렸다. 전용 네트워크도 정리됐다. 최종 AWS 조회에서 두 시도의 활성 스택이 없고, `dbdrill-6d92c3e8`의 DB·네트워크 스택과 `dbdrill-c8f1a26d`의 네트워크 스택은 `DELETE_COMPLETE`, 해당 DB·수동 스냅샷·보안 그룹 목록은 모두 `[]`였다. 기존 `demo-app` RDS는 중지 상태로 유지했다.
+
+같은 날 `--browser-cleanup`을 추가해 제품 HTTP 서버와 실제 Chrome에서 정리 버튼을 누르는 드릴도 수행했다. 첫 임시 `dbdrill-4f7b2a91`은 계획 통과 후 생성 직전 RDS 옵션 조회에서 가용 영역 한 곳만 반환해 DB 생성 요청 전 중단됐다. 자동 종료 경계가 생성 기록·DB·스택 부재를 확인하고 네트워크를 회수했으며 스택은 `DELETE_COMPLETE`다. 생성 기록 전 읽기 전용 계획·사전 점검만 제한적으로 재시도하도록 시험 도구를 보강했다. 새 `dbdrill-7a39e4c2`에서는 실제 Chrome이 실패 작업 조회 → 정리 계획 표시 → 잘못된 스택 ARN 거부 → 정확한 ARN 정리 접수 → `failed_cleaned` → 같은 앱 ID의 새 계획 표시를 통과했다. AWS 재조회에서 DB·네트워크 스택은 `DELETE_COMPLETE`, 임시 DB·수동 스냅샷·보안 그룹은 `[]`이고 기존 `demo-app` RDS는 `stopped`·삭제 보호·암호화 유지 상태다. 이 드릴은 실패 스택을 실제 삭제하므로 `--apply`는 새로운 임시 앱 ID에만 사용한다.
+
+```sh
+python3 -m tests.smoke_aws_postgres_rollback_drill \
+  --apply --browser-cleanup --account <AWS_ACCOUNT_ID> --region ap-northeast-2
+```
 
 ## 2026-10-03 제품 UI에서 임시 RDS 폐기
 

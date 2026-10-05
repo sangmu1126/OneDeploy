@@ -149,6 +149,12 @@ try {
     await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('jobId').textContent.includes('작업 ')&&e('infrastructure').textContent.includes('지원 경로 자동 선택')&&e('infrastructure').textContent.includes('existing RDS PostgreSQL');})()"), 30000);
     console.log('PASS: browser uploaded PostgreSQL app without VPC/subnet inputs and recorded AWS policy plan');
   } else if (stage === 'recover') {
+    const recoveryNetwork = archive ? JSON.parse(archive) : {
+      vpc_id: 'vpc-12345678', subnet_ids: ['subnet-11111111', 'subnet-22222222'],
+    };
+    assert.match(recoveryNetwork.vpc_id, /^vpc-[a-f0-9]+$/);
+    assert.ok(Array.isArray(recoveryNetwork.subnet_ids) && recoveryNetwork.subnet_ids.length >= 2);
+    for (const subnet of recoveryNetwork.subnet_ids) assert.match(subnet, /^subnet-[a-f0-9]+$/);
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('postgresOperation').click();return true;})()`);
     await until(() => evaluate("(() => {const e=id=>document.getElementById(id);return e('postgresOperationInfo').textContent.includes(' · needs_attention · ')&&!e('postgresRecovery').hidden;})()"), 30000);
     await evaluate("document.getElementById('postgresRecoveryPlan').click();true");
@@ -157,9 +163,9 @@ try {
     await evaluate("(() => {const e=id=>document.getElementById(id);e('postgresRecoveryConfirm').value='wrong-stack';e('postgresRecoveryStart').click();return true;})()");
     assert.ok(await evaluate("document.getElementById('postgresRecoveryInfo').textContent.includes('정확히 입력하세요')"));
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('postgresRecoveryConfirm').value=${JSON.stringify(stackId)};e('postgresRecoveryStart').click();return true;})()`);
-    await until(() => evaluate("document.getElementById('postgresOperationInfo').textContent.includes(' · failed_cleaned · ')"), 30000);
-    await evaluate("(() => {const e=id=>document.getElementById(id);e('postgresPlanVpc').value='vpc-12345678';e('postgresPlanSubnets').value='subnet-11111111,subnet-22222222';e('postgresPlan').click();return true;})()");
-    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresPlanInfo').textContent;if(text&&!text.includes('생성하지 않았습니다'))throw Error(text);return text.includes('생성하지 않았습니다')&&!e('postgresCreate').hidden;})()"), 30000);
+    await until(() => evaluate("document.getElementById('postgresOperationInfo').textContent.includes(' · failed_cleaned · ')"), 120000);
+    await evaluate(`(() => {const e=id=>document.getElementById(id);e('postgresPlanVpc').value=${JSON.stringify(recoveryNetwork.vpc_id)};e('postgresPlanSubnets').value=${JSON.stringify(recoveryNetwork.subnet_ids.join(','))};e('postgresPlan').click();return true;})()`);
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);const text=e('postgresPlanInfo').textContent;if(text&&!text.includes('생성하지 않았습니다'))throw Error(text);return text.includes('생성하지 않았습니다')&&!e('postgresCreate').hidden;})()"), 120000);
     console.log('PASS: browser recovered failed stack and reopened same-ID RDS plan');
   } else if (stage === 'retire') {
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('retirementPlan').click();return true;})()`);

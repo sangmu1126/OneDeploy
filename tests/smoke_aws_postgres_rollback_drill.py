@@ -9,18 +9,27 @@ import argparse
 import json
 import re
 import secrets
+import shutil
+import subprocess
+import threading
 import time
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
 import onedeploy.postgres as postgres
+from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsConfigurationError, AwsSettings
 from onedeploy.aws_network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
 from onedeploy.postgres import AwsPostgresProvisioner, PostgresRequest
 from onedeploy.postgres_operations import PostgresOperations
+from onedeploy.server import App, handler_for
 from tests.smoke_aws_network import retire_probe
 from tests.smoke_aws_restore_marker_source import save, save_new
+
+CHROME = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+DRIVER = Path(__file__).with_name('browser_postgres_create_cdp.mjs')
 
 
 def _aws(provisioner: AwsPostgresProvisioner, args: list[str]) -> dict:
@@ -102,6 +111,69 @@ def retire_before_create(network_provisioner: AwsServiceNetworkProvisioner,
                  created_network['service_security_group'])
 
 
+def browser_cleanup(state_dir: Path, application: str, settings: AwsSettings,
+                    network: dict) -> PostgresOperations:
+    """Run the real product HTTP and Chrome controls against the owned rollback."""
+    app = App(state_dir, AISettings('fixture-only', 'scripted'),
+              agent_factory=lambda _: object(), aws_settings=settings, monitor_interval=0)
+    class QuietHandler(handler_for(app)):
+        def log_message(self, *_args):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), QuietHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    profile = state_dir / 'chrome-profile'
+    with (state_dir / 'chrome.log').open('w') as log:
+        chrome = subprocess.Popen([str(CHROME), '--headless=new', '--no-first-run',
+            '--no-default-browser-check', '--disable-gpu', '--disable-background-networking',
+            '--no-proxy-server', '--remote-debugging-address=127.0.0.1',
+            '--remote-debugging-port=0', '--remote-allow-origins=*',
+            '--user-data-dir=' + str(profile), 'about:blank'],
+            stdout=log, stderr=subprocess.STDOUT)
+        try:
+            port_file = profile / 'DevToolsActivePort'
+            deadline = time.monotonic() + 30
+            while not port_file.is_file():
+                if chrome.poll() is not None or time.monotonic() > deadline:
+                    raise RuntimeError('Chrome debugging endpoint did not start: '
+                                       + str(state_dir / 'chrome.log'))
+                time.sleep(.2)
+            subnet_ids = network['subnet_ids']
+            subprocess.run(['node', str(DRIVER),
+                f'http://127.0.0.1:{server.server_port}/',
+                port_file.read_text().splitlines()[0], application, 'recover',
+                json.dumps({'vpc_id': network['vpc_id'], 'subnet_ids': subnet_ids})],
+                check=True, timeout=8 * 60)
+            return app.postgres_operations
+        finally:
+            chrome.terminate()
+            try:
+                chrome.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                chrome.kill()
+                chrome.wait(timeout=10)
+            shutil.rmtree(profile, ignore_errors=True)
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+
+
+def start_after_stable_preflight(manager: PostgresOperations,
+                                 request: PostgresRequest) -> dict:
+    """Retry only read-only checks; never repeat an accepted creation operation."""
+    for attempt in range(4):
+        try:
+            planned = manager.plan(request)
+            return manager.start(request.application_id, planned['plan_id'])
+        except AwsConfigurationError as exc:
+            if ('기본 PostgreSQL 버전의 암호화된' not in str(exc)
+                    or request.application_id in manager.operations or attempt == 3):
+                raise
+            print('RDS 읽기 전용 구성 조회가 불안정해 생성 기록 전 재확인합니다.', flush=True)
+            time.sleep(10)
+    raise AssertionError('Unreachable preflight retry state')
+
+
 def run(args) -> dict:
     if not re.fullmatch(r'dbdrill-[a-f0-9]{8}', args.application):
         raise ValueError('새 dbdrill-<8 hex> 임시 앱만 허용합니다.')
@@ -115,6 +187,11 @@ def run(args) -> dict:
     if not args.apply:
         return {'application_id': args.application, 'mode': 'read_only',
                 'network_stack': network_request.stack_name}
+    if args.browser_cleanup:
+        if not CHROME.is_file():
+            raise RuntimeError('Chrome executable not found')
+        subprocess.run(['node', '--version'], check=True, capture_output=True,
+                       text=True, timeout=10)
 
     state_dir = Path('.onedeploy') / 'postgres-rollback-drills' / args.application
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -147,8 +224,7 @@ def run(args) -> dict:
         template_file = state_dir / 'intentional-rollback-template.json'
         template_file.write_text(json.dumps(rollback_template()))
         with patch.object(postgres, 'TEMPLATE', template_file):
-            planned = manager.plan(request)
-            started = manager.start(args.application, planned['plan_id'])
+            started = start_after_stable_preflight(manager, request)
             if started['status'] != 'running':
                 raise AssertionError('실패 시험용 RDS 생성 요청이 기록되지 않았습니다.')
             state['stage'] = 'create_recorded'
@@ -185,17 +261,22 @@ def run(args) -> dict:
                 or 'ROLLBACK_COMPLETE' not in result['message']):
             raise AssertionError('롤백 상태를 사용자 작업 기록에서 확인하지 못했습니다.')
         print('PASS: owned rollback and read-only user reconciliation confirmed', flush=True)
-        cleanup = manager.cleanup_plan(args.application)
-        if (cleanup['stack_id'] != stack_id
-                or cleanup['stack_status'] != 'ROLLBACK_COMPLETE'):
-            raise AssertionError('제품 정리 계획의 실패 스택이 예상과 다릅니다.')
-        state['stage'] = 'product_cleanup_planned'
-        save(journal, state)
-        started = manager.cleanup_start(args.application, cleanup['plan_id'], stack_id)
-        if started['status'] != 'recovering':
-            raise AssertionError('제품 실패 스택 정리 요청이 기록되지 않았습니다.')
-        state['stage'] = 'product_cleanup_recorded'
-        save(journal, state)
+        if args.browser_cleanup:
+            state['stage'] = 'browser_cleanup_started'
+            save(journal, state)
+            manager = browser_cleanup(state_dir, args.application, settings, network)
+        else:
+            cleanup = manager.cleanup_plan(args.application)
+            if (cleanup['stack_id'] != stack_id
+                    or cleanup['stack_status'] != 'ROLLBACK_COMPLETE'):
+                raise AssertionError('제품 정리 계획의 실패 스택이 예상과 다릅니다.')
+            state['stage'] = 'product_cleanup_planned'
+            save(journal, state)
+            started = manager.cleanup_start(args.application, cleanup['plan_id'], stack_id)
+            if started['status'] != 'recovering':
+                raise AssertionError('제품 실패 스택 정리 요청이 기록되지 않았습니다.')
+            state['stage'] = 'product_cleanup_recorded'
+            save(journal, state)
         deadline = time.monotonic() + 1200
         while time.monotonic() < deadline:
             operation = manager.get(args.application)
@@ -211,9 +292,14 @@ def run(args) -> dict:
         save(journal, state)
         if not list((manager.archive).glob(args.application + '-*.json')):
             raise AssertionError('실패한 생성 시도의 로컬 보존 기록이 없습니다.')
-        retry = manager.plan(request)
-        if retry['stack_name'] != request.stack_name:
-            raise AssertionError('같은 앱 ID의 새 생성 계획을 확인하지 못했습니다.')
+        if args.browser_cleanup:
+            planned = manager.plans.get(args.application)
+            if not planned or planned['result']['stack_name'] != request.stack_name:
+                raise AssertionError('브라우저의 같은 앱 ID 재계획을 확인하지 못했습니다.')
+        else:
+            retry = manager.plan(request)
+            if retry['stack_name'] != request.stack_name:
+                raise AssertionError('같은 앱 ID의 새 생성 계획을 확인하지 못했습니다.')
         product_verified = True
         state['stage'] = 'retry_plan_verified'
         save(journal, state)
@@ -267,10 +353,14 @@ def run(args) -> dict:
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description='Fail and reconcile a disposable AWS RDS create operation')
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--browser-cleanup', action='store_true',
+                        help='Use real Chrome and product HTTP controls for failed stack cleanup')
     parser.add_argument('--application', default='dbdrill-' + secrets.token_hex(4))
     parser.add_argument('--account', required=True)
     parser.add_argument('--region', required=True)
     args = parser.parse_args(argv)
+    if args.browser_cleanup and not args.apply:
+        parser.error('--browser-cleanup requires --apply')
     print(json.dumps(run(args), ensure_ascii=False), flush=True)
 
 
