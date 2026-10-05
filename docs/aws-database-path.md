@@ -208,3 +208,10 @@ PYTHONPATH=. python3 tests/smoke_aws_postgres.py --application demo-app \
 실행 순서는 고유한 최종 수동 스냅샷 요청 → `available` 및 소유 태그·암호화 확인 → DB 소유권·ECS 사용자 재검사 → 삭제 보호 해제와 재확인 → ECS 사용자·스냅샷 마지막 확인 → DB 삭제·완료 대기 → 최종 스냅샷 재확인 → 스택 종료 보호 해제·삭제·완료 대기 → 최종 스냅샷 재확인이다. 기존 수동 스냅샷과 앱 네트워크는 보존된다. 자동 백업은 DB와 함께 삭제되며 수동 스냅샷 저장 비용은 계속 발생할 수 있다.
 
 기록의 `stage`는 다음 AWS 변경 **직전**에도 저장된다. `creating_final_snapshot`, `removing_db_protection`, `deleting_database`, `removing_stack_protection`, `deleting_stack`에서 중단되면 요청이 AWS에 접수됐는지 단정할 수 없다. 삭제 보호 해제 단계에서 일반 오류가 나면 보호 복구를 시도해 재확인하지만 프로세스 강제 종료에는 실행되지 않는다. 서버 재시작은 `running`을 `needs_attention`으로 바꾸고 재실행하지 않는다. 그 경우 기록의 계정·DB ARN·스택 ARN·스냅샷 ID로 실제 AWS 자원을 수동 대조한다. 특히 보호 해제 뒤 강제 종료됐다면 원본 DB의 삭제 보호 상태를 확인해야 한다. 성공 기록을 포함한 폐기 기록이 있는 앱 ID의 AWS 재배포는 막는다.
+
+중단된 AWS 배포 작업에 일회성 SQL 마이그레이션 태스크 ARN이 남아 있으면
+`POST /api/jobs/<작업 ID>/migration/inspect`에서 소유 ECS 태스크의 현재 결과를
+읽기 전용으로 재확인한다. 계정·리전과 태스크의 앱·배포 시도 태그, 태스크 정의를
+검사한 뒤 성공·실패·진행 중·확인 불가와 조회 시각을 작업 기록에 남긴다. 태스크가
+AWS 조회 범위에서 사라지면 확인 불가로 표시한다. 이 조회는 SQL이나 앱 배포를
+다시 실행하지 않으며, 성공 결과도 앱 배포 성공으로 바꾸지 않는다.

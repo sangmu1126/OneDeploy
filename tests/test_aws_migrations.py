@@ -121,6 +121,12 @@ class AwsMigrationTests(unittest.TestCase):
         task['containers'][0]['exitCode'] = 1
         with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [task]})):
             self.assertEqual(inspect_migration_task(*args)['status'], 'failed')
+        task['containers'][0].pop('exitCode')
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [task]})):
+            self.assertEqual(inspect_migration_task(*args)['status'], 'unknown')
+        task['containers'][0]['exitCode'] = False
+        with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [task]})):
+            self.assertEqual(inspect_migration_task(*args)['status'], 'unknown')
         task['containers'] = []
         task['stopCode'] = 'TaskFailedToStart'
         with patch.object(self.adapter, 'aws', return_value=json.dumps({'tasks': [task]})):

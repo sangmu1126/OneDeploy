@@ -891,6 +891,50 @@ class App:
             return {'reconciled': True, 'release': 'previous', 'health': health}
         return {'reconciled': False, 'reason': '활성 이미지 또는 HTTP 응답을 확인할 수 없습니다.', 'health': health}
 
+    def inspect_interrupted_aws_migration(self, job_id: str) -> dict:
+        """Record one owned ECS task outcome without restarting an interrupted deployment."""
+        from onedeploy.aws_migrations import inspect_migration_task
+
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if (not job or job.get('mode') != 'agent'
+                    or job.get('target') != 'aws-ecs-express'
+                    or job.get('status') not in {'failed', 'interrupted'}
+                    or job.get('result') is not None
+                    or type(job.get('attempts')) is not int
+                    or not 1 <= job['attempts'] <= 3
+                    or not job.get('aws_migration_task_arn')
+                    or not job.get('aws_migration_task_definition_arn')):
+                raise ValueError('재확인할 중단된 AWS SQL 마이그레이션 작업이 아닙니다.')
+            snapshot = json.loads(json.dumps(job))
+        request = postgres_request_from_job(snapshot)
+        if request is None or request.application_id != snapshot.get('application_id'):
+            raise ValueError('작업의 PostgreSQL 소유 정보를 확인하지 못했습니다.')
+        settings = AwsSettings(**snapshot['aws'])
+        if settings.region != request.region or settings.expected_account != request.account:
+            raise AwsConfigurationError('작업의 AWS 계정·리전과 PostgreSQL 소유 정보가 다릅니다.')
+        adapter = AwsExpressAdapter(lambda *_: None, settings)
+        caller = json.loads(adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
+        if caller.get('Account') != request.account:
+            raise AwsConfigurationError('현재 AWS 계정이 마이그레이션 소유 계정과 다릅니다.')
+        outcome = inspect_migration_task(adapter, request.application_id, request.account,
+            request.region, job_id + '-a' + str(snapshot['attempts']),
+            snapshot['aws_migration_task_arn'], snapshot['aws_migration_task_definition_arn'])
+        inspected = {**outcome, 'checked_at': datetime.now(timezone.utc).isoformat()}
+        with self.lock:
+            current = self.jobs.get(job_id)
+            if (not current or current.get('status') not in {'failed', 'interrupted'}
+                    or current.get('attempts') != snapshot['attempts']
+                    or current.get('aws_migration_task_arn') != snapshot['aws_migration_task_arn']
+                    or current.get('aws_migration_task_definition_arn') != snapshot['aws_migration_task_definition_arn']):
+                raise ValueError('재확인 중 배포 작업 상태가 변경됐습니다.')
+            current['aws_migration_inspection'] = inspected
+            current['events'].append({'time': inspected['checked_at'], 'stage': 'migration_inspected',
+                'message': 'AWS SQL 마이그레이션 태스크 결과: ' + outcome['status']
+                           + '. 앱 배포는 자동 재개하지 않습니다.'})
+            self.save(job_id)
+        return inspected
+
     def cleanup_abandoned_aws_image(self, job_id):
         with self.lock:
             failed = self.jobs.get(job_id)
@@ -1415,6 +1459,12 @@ def handler_for(app: App):
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('이미지 정리 요청에는 본문을 넣을 수 없습니다.')
                     self.json_response(200, app.cleanup_abandoned_aws_image(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/migration/inspect", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('SQL 마이그레이션 재확인 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.inspect_interrupted_aws_migration(job_id))
                     return
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/reconcile", self.path):
                     job_id = self.path.split('/')[3]

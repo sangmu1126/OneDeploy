@@ -769,6 +769,78 @@ class PostgresServerTests(unittest.TestCase):
         resume.assert_called_once_with('a' * 16)
         self.assertEqual(handler.json_response.call_args.args[0], 202)
 
+    def test_interrupted_migration_inspection_records_owned_task_without_redeploy(self):
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}):
+            _, payload = self.upload(archive())
+        job_id = payload['id']
+        attempt = job_id + '-a1'
+        definition = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/onedeploy-migrate-{attempt}:1'
+        task_arn = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task/default/' + 'a' * 32
+        job = self.app.jobs[job_id]
+        job.update(status='interrupted', attempts=1, steps=4,
+                   aws_migration_status='running', aws_migration_task_arn=task_arn,
+                   aws_migration_task_definition_arn=definition)
+        self.app.save(job_id)
+        restored = App(self.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.settings, monitor_interval=0)
+        def aws(_adapter, args, **_kwargs):
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['ecs', 'describe-tasks']:
+                return json.dumps({'tasks': [{'taskArn': task_arn,
+                    'taskDefinitionArn': definition,
+                    'clusterArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/default',
+                    'launchType': 'FARGATE', 'lastStatus': 'STOPPED',
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-app', 'value': 'demo-app'},
+                             {'key': 'onedeploy-attempt', 'value': attempt}],
+                    'containers': [{'name': 'migration', 'exitCode': 0}]}]})
+            raise AssertionError(args)
+        with patch('onedeploy.server.AwsExpressAdapter.aws', autospec=True, side_effect=aws) as called, \
+                patch.object(restored, 'run_agent') as deploy:
+            result = restored.inspect_interrupted_aws_migration(job_id)
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(called.call_count, 2)
+        deploy.assert_not_called()
+        self.assertEqual(restored.jobs[job_id]['status'], 'interrupted')
+        self.assertEqual(restored.jobs[job_id]['aws_migration_status'], 'running')
+        self.assertEqual(restored.jobs[job_id]['aws_migration_inspection']['status'], 'succeeded')
+        self.assertEqual(json.loads((self.root / job_id / 'job.json').read_text())
+                         ['aws_migration_inspection']['status'], 'succeeded')
+        with patch('onedeploy.server.AwsExpressAdapter.aws', autospec=True,
+                   return_value=json.dumps({'Account': '000000000000'})) as wrong_account:
+            with self.assertRaisesRegex(Exception, '현재 AWS 계정'):
+                restored.inspect_interrupted_aws_migration(job_id)
+        wrong_account.assert_called_once()
+        restored.jobs[job_id]['attempts'] = 0
+        with patch('onedeploy.server.AwsExpressAdapter.aws') as no_aws:
+            with self.assertRaisesRegex(ValueError, '중단된 AWS SQL'):
+                restored.inspect_interrupted_aws_migration(job_id)
+        no_aws.assert_not_called()
+
+    def test_interrupted_migration_inspection_route_requires_token_and_empty_body(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/jobs/' + 'a' * 16 + '/migration/inspect'
+        handler.headers = {'Content-Length': '0'}
+        handler.json_response = Mock()
+        with patch.object(self.app, 'inspect_interrupted_aws_migration') as inspect:
+            handler.do_POST()
+        inspect.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+        handler.headers['X-OneDeploy-Token'] = self.app.token
+        handler.headers['Content-Length'] = '2'
+        with patch.object(self.app, 'inspect_interrupted_aws_migration') as inspect:
+            handler.do_POST()
+        inspect.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 400)
+        handler.headers['Content-Length'] = '0'
+        with patch.object(self.app, 'inspect_interrupted_aws_migration',
+                          return_value={'status': 'succeeded'}) as inspect:
+            handler.do_POST()
+        inspect.assert_called_once_with('a' * 16)
+        self.assertEqual(handler.json_response.call_args.args, (200, {'status': 'succeeded'}))
+
     def test_opt_in_upload_persists_and_restores_postgres_request(self):
         database = {'database_id': 'onedeploy-demo-app'}
         with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',

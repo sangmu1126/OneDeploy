@@ -51,7 +51,9 @@ def inspect_migration_task(adapter: AwsExpressAdapter, application_id: str, acco
     last_status = task.get('lastStatus')
     if last_status == 'STOPPED':
         if containers:
-            status = 'succeeded' if containers[0].get('exitCode') == 0 else 'failed'
+            exit_code = containers[0].get('exitCode')
+            status = ('succeeded' if type(exit_code) is int and exit_code == 0 else
+                      'failed' if type(exit_code) is int else 'unknown')
         else:
             status = 'failed' if task.get('stopCode') == 'TaskFailedToStart' else 'unknown'
     elif last_status in {'PROVISIONING', 'PENDING', 'ACTIVATING', 'RUNNING',

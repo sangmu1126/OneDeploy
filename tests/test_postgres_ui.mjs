@@ -66,6 +66,45 @@ test('interrupted local deployment shows cleanup only for recorded attempts', as
   await element('resumeUnstarted').onclick();
   assert.ok(requests.includes('/api/deployments/' + job.id + '/resume-unstarted'));
 });
+
+test('interrupted AWS migration shows a read-only task inspection result', async () => {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: '', checked: false, files: [], hidden: false, disabled: false,
+      textContent: '', replaceChildren() {}, querySelectorAll() { return []; },
+    });
+    return elements.get(id);
+  };
+  const job = {id: 'a'.repeat(16), mode: 'agent', target: 'aws-ecs-express',
+    status: 'interrupted', attempts: 1, events: [],
+    aws_migration_task_arn: 'owned-task', aws_migration_task_definition_arn: 'owned-definition'};
+  const requests = [];
+  const context = {
+    document: {getElementById: element, hidden: false},
+    fetch: async path => {
+      requests.push(path);
+      return {ok: true, json: async () => path === '/api/config'
+        ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
+        : path.endsWith('/migration/inspect')
+          ? {status: 'succeeded'}
+          : path === '/api/jobs/' + job.id
+            ? {...job, aws_migration_inspection: {status: 'succeeded', checked_at: '2026-10-05T00:00:00Z'}}
+            : []};
+    },
+    setInterval() {}, setTimeout, FormData, Set, Error, Date,
+  };
+  runInNewContext(html.split('<script>', 2)[1].split('</script>', 1)[0], context);
+  await new Promise(resolve => setImmediate(resolve));
+  context.show(job);
+  assert.equal(element('inspectMigration').hidden, false);
+  await element('inspectMigration').onclick();
+  assert.ok(requests.includes('/api/jobs/' + job.id + '/migration/inspect'));
+  assert.match(element('migrationInfo').textContent, /SQL 태스크 성공/);
+  assert.match(element('migrationInfo').textContent, /자동 재개하지 않습니다/);
+  context.show({...job, status: 'running'});
+  assert.equal(element('inspectMigration').hidden, true);
+});
 const start = html.indexOf('function postgresUploadHeaders(application)');
 const end = html.indexOf("el('deploy').onclick=", start);
 assert.ok(start >= 0 && end > start);
