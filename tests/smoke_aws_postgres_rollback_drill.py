@@ -87,6 +87,21 @@ def inspect_rolled_back(provisioner: AwsPostgresProvisioner, stack_id: str) -> d
             'resource_count': len(summaries)}
 
 
+def retire_before_create(network_provisioner: AwsServiceNetworkProvisioner,
+                         created_network: dict, provisioner: AwsPostgresProvisioner,
+                         manager: PostgresOperations | None) -> None:
+    """Reclaim the drill network only when no DB creation was ever recorded."""
+    application = provisioner.request.application_id
+    if (manager is not None and (application in manager.operations
+                                 or manager.untrusted_unknown
+                                 or application in manager.untrusted_applications)):
+        raise AwsConfigurationError('DB 생성 기록이 있거나 불확실해 네트워크를 자동 정리하지 않습니다.')
+    provisioner.assert_database_absent()
+    provisioner.assert_stack_available()
+    retire_probe(network_provisioner, created_network['stack_id'],
+                 created_network['service_security_group'])
+
+
 def run(args) -> dict:
     if not re.fullmatch(r'dbdrill-[a-f0-9]{8}', args.application):
         raise ValueError('새 dbdrill-<8 hex> 임시 앱만 허용합니다.')
@@ -112,6 +127,9 @@ def run(args) -> dict:
     stack_cleaned = False
     network_cleaned = False
     product_verified = False
+    manager = None
+    provisioner = None
+    precreate_cleaned = False
     try:
         created_network = network_provisioner.create()
         state.update(stage='network_created',
@@ -215,6 +233,17 @@ def run(args) -> dict:
                 print('PASS: rollback stack deleted', flush=True)
             except Exception as exc:
                 print('롤백 스택 정리 확인 필요:', type(exc).__name__, str(exc), flush=True)
+        if created_network and not stack_id and state['stage'] == 'network_created':
+            try:
+                if provisioner is None:
+                    raise AwsConfigurationError('DB 생성 전 상태를 재확인할 수 없습니다.')
+                retire_before_create(network_provisioner, created_network,
+                                     provisioner, manager)
+                network_cleaned = True
+                precreate_cleaned = True
+                print('PASS: no DB creation recorded; temporary network retired', flush=True)
+            except Exception as exc:
+                print('생성 전 시험용 네트워크 정리 확인 필요:', type(exc).__name__, str(exc), flush=True)
         if created_network and stack_cleaned:
             try:
                 retire_probe(network_provisioner, created_network['stack_id'],
@@ -224,8 +253,9 @@ def run(args) -> dict:
             except Exception as exc:
                 print('시험용 네트워크 정리 확인 필요:', type(exc).__name__, str(exc), flush=True)
         state.update(status='succeeded' if stack_cleaned and network_cleaned and product_verified
-                     else 'needs_attention', stage='cleaned' if stack_cleaned and network_cleaned and product_verified
-                     else state['stage'])
+                     else 'failed_preflight' if precreate_cleaned else 'needs_attention',
+                     stage='cleaned' if stack_cleaned and network_cleaned and product_verified
+                     else 'preflight_failed_network_retired' if precreate_cleaned else state['stage'])
         save(journal, state)
         print('Local rollback drill:', state_dir.resolve(), flush=True)
     if not stack_cleaned or not network_cleaned or not product_verified:
