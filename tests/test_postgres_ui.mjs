@@ -18,6 +18,36 @@ test('running deployment can be cancelled only before its first attempt', () => 
   assert.equal(cancelContext.canCancel({status: 'succeeded', attempts: 0}), false);
 });
 
+test('dashboard counts active services and jobs needing attention', async () => {
+  const start = html.indexOf('async function history()');
+  const end = html.indexOf('async function loadRollbackTargets', start);
+  assert.ok(start >= 0 && end > start);
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      textContent: '', children: [], replaceChildren() { this.children = []; },
+      append(child) { this.children.push(child); },
+    });
+    return elements.get(id);
+  };
+  const jobs = [
+    {id: 'one', status: 'succeeded', deployment_state: 'active', created_at: '2026-10-05T00:00:00Z'},
+    {id: 'two', status: 'failed', deployment_state: 'active', created_at: '2026-10-05T00:00:00Z'},
+    {id: 'three', status: 'interrupted', deployment_state: 'needs_attention', created_at: '2026-10-05T00:00:00Z'},
+    {id: 'four', status: 'succeeded', deployment_state: 'deleted', created_at: '2026-10-05T00:00:00Z'},
+  ];
+  const context = {
+    el: element, api: async () => jobs, busy: false, statuses: {}, open() {}, Date, String,
+    document: {createElement: () => ({children: [], append(child) { this.children.push(child); }})},
+  };
+  runInNewContext(html.slice(start, end), context);
+  await context.history();
+  assert.equal(element('metricTotal').textContent, '4');
+  assert.equal(element('metricActive').textContent, '1');
+  assert.equal(element('metricAttention').textContent, '2');
+  assert.equal(element('history').children.length, 4);
+});
+
 test('interrupted local deployment shows cleanup only for recorded attempts', async () => {
   const elements = new Map();
   const element = id => {
