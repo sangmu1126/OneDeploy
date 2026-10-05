@@ -1618,6 +1618,41 @@ def handler_for(app: App):
                                      args=(job_id,), daemon=True).start()
                     self.json_response(202, {'id': job_id, 'deployment_state': 'deleting'})
                     return
+                if self.path == "/api/compatibility":
+                    public_flag = self.headers.get('X-Public-Access', 'false')
+                    if public_flag not in {'true', 'false'}:
+                        raise ValueError('공개 접근 선택 값이 올바르지 않습니다.')
+                    size = int(self.headers.get('Content-Length', '0'))
+                    content_type = self.headers.get('Content-Type', '')
+                    folder_upload = content_type.lower().startswith('multipart/form-data;')
+                    if not 0 < size <= MAX_UPLOAD + (1024 * 1024 if folder_upload else 0):
+                        raise ValueError('업로드는 20 MiB 이하여야 합니다.')
+                    with tempfile.TemporaryDirectory(prefix='onedeploy-compatibility-') as temporary:
+                        archive = Path(temporary) / 'app.zip'
+                        body = self.rfile.read(size)
+                        if folder_upload:
+                            folder_upload_to_zip(body, content_type, archive)
+                        else:
+                            archive.write_bytes(body)
+                        project = extract_project(archive, Path(temporary) / 'source')
+                        profile = inspect_infrastructure(project)
+                        digest = source_digest(project)
+                        availability = {'local-docker': None,
+                                        'aws-ecs-express': app.aws_settings.unavailable_reason(),
+                                        'cloud-run': app.cloud_settings.unavailable_reason()}
+                        reports = []
+                        for target in ('local-docker', 'aws-ecs-express', 'cloud-run'):
+                            report = infrastructure_compatibility(
+                                profile, target, public_access=public_flag == 'true')
+                            reason = availability[target]
+                            reports.append({**report, 'configured': reason is None,
+                                            'configuration_reason': reason,
+                                            'preview_eligible': report['compatible'] and reason is None,
+                                            'cost': {'estimate': None,
+                                                     'note': '대상 전체 비용은 아직 산정하지 않았습니다.'}})
+                    self.json_response(200, {'source_digest': digest,
+                                             'reports': reports})
+                    return
                 if self.path == "/api/deployments":
                     if not app.ai_settings.available:
                         self.json_response(503, {"error": "AI 배포를 사용하려면 서버에 OPENAI_API_KEY를 설정하세요."})

@@ -33,6 +33,33 @@ test('deployment certificate separates recorded checks from unverified checks', 
   assert.match(element('certificateJson').textContent, /"image_identity"/);
 });
 
+test('environment preview shows target differences before deployment', async () => {
+  const start = html.indexOf('function selectedUploadBody()');
+  const end = html.indexOf("el('deploy').onclick", start);
+  assert.ok(start >= 0 && end > start);
+  const file = {name: 'app.zip'};
+  const elements = {file: {files: [file]}, folder: {files: []}, public: {checked: true},
+                    compatibilityPreview: {}, compatibilityMap: {hidden: true, textContent: ''}};
+  const calls = [];
+  const context = {el: id => elements[id], Error, String,
+    api: async (path, options) => {
+      calls.push([path, options]);
+      return {reports: [
+        {target: 'local-docker', compatible: true, preview_eligible: true,
+         access_mode: 'loopback', problems: [], configuration_reason: null},
+        {target: 'aws-ecs-express', compatible: false, preview_eligible: false,
+         access_mode: null, problems: ['공개 범위 미지원'], configuration_reason: null},
+      ]};
+    }};
+  runInNewContext(html.slice(start, end), context);
+  await elements.compatibilityPreview.onclick();
+  assert.equal(calls[0][0], '/api/compatibility');
+  assert.equal(calls[0][1].body, file);
+  assert.match(elements.compatibilityMap.textContent, /Local Docker · 감지된 요구 기준 통과/);
+  assert.match(elements.compatibilityMap.textContent, /AWS ECS Express · 현재 미지원/);
+  assert.match(elements.compatibilityMap.textContent, /비용: 미산정/);
+});
+
 test('running deployment can be cancelled only before its first attempt', () => {
   assert.equal(cancelContext.canCancel({status: 'waiting_input'}), true);
   assert.equal(cancelContext.canCancel({status: 'running', attempts: 0}), true);
@@ -193,7 +220,7 @@ function headers({target = 'aws-ecs-express', publicAccess = true, existing = tr
     target: {value: target}, public: {checked: publicAccess},
     postgresExisting: {checked: existing},
   };
-  const context = {el: id => fields[id], Set, Error};
+  const context = {el: id => fields[id] || (fields[id] = {}), Set, Error};
   runInNewContext(source, context);
   return context.postgresUploadHeaders(application);
 }
