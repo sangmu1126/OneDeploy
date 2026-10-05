@@ -65,6 +65,100 @@ def inspect_migration_task(adapter: AwsExpressAdapter, application_id: str, acco
             'last_status': last_status, 'exit_code': containers[0].get('exitCode') if containers else None}
 
 
+def cleanup_interrupted_migration(adapter: AwsExpressAdapter, request: PostgresRequest,
+                                  attempt_id: str, task_arn: str, definition_arn: str,
+                                  image: str, image_digest: str, *,
+                                  definition_inactive: bool = False,
+                                  checkpoint=None) -> dict:
+    """Remove only a stopped owned migration's definition and unique ECR tag."""
+    request.validate()
+    expected_repository = (f'{request.account}.dkr.ecr.{request.region}.amazonaws.com/'
+                           'onedeploy-managed')
+    if (adapter.settings.region != request.region
+            or adapter.settings.expected_account != request.account
+            or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id)
+            or not isinstance(task_arn, str)
+            or not re.fullmatch(f'arn:aws:ecs:{re.escape(request.region)}:{request.account}:task/default/[a-f0-9]{{32}}', task_arn)
+            or not isinstance(definition_arn, str)
+            or not re.fullmatch(f'arn:aws:ecs:{re.escape(request.region)}:{request.account}:task-definition/onedeploy-migrate-{attempt_id}:[0-9]+', definition_arn)
+            or image != f'{expected_repository}:{attempt_id}-db'
+            or not isinstance(image_digest, str)
+            or not re.fullmatch(r'sha256:[a-f0-9]{64}', image_digest)):
+        raise AwsConfigurationError('정리할 마이그레이션 이미지 소유 정보가 올바르지 않습니다.')
+    # The first cleanup requires a fresh, known task outcome. Once deregistration
+    # is journaled, ECS may no longer describe an inactive definition on retry.
+    if not definition_inactive:
+        outcome = inspect_migration_task(adapter, request.application_id,
+            request.account, request.region, attempt_id, task_arn, definition_arn)
+        if outcome['status'] not in {'succeeded', 'failed'}:
+            raise AwsConfigurationError('마이그레이션 태스크 종료 결과가 확정되지 않아 정리하지 않습니다.')
+    family = f'onedeploy-migrate-{attempt_id}'
+    running = json.loads(adapter.aws(['ecs', 'list-tasks', '--cluster', 'default',
+        '--family', family, '--desired-status', 'RUNNING'], private=True, quiet=True))
+    if (running.get('nextToken') or not isinstance(running.get('taskArns'), list)
+            or running['taskArns']):
+        raise AwsConfigurationError('같은 마이그레이션 계열에 실행 중인 태스크가 있어 정리하지 않습니다.')
+    if not definition_inactive:
+        described = json.loads(adapter.aws(['ecs', 'describe-task-definition',
+            '--task-definition', definition_arn, '--include', 'TAGS'], private=True, quiet=True))
+        definition = described.get('taskDefinition', {})
+        tags = {item.get('key'): item.get('value') for item in described.get('tags', [])}
+        containers = definition.get('containerDefinitions', [])
+        if (definition.get('taskDefinitionArn') != definition_arn
+                or definition.get('family') != family
+                or definition.get('status') not in {'ACTIVE', 'INACTIVE'}
+                or tags.get('onedeploy-managed') != 'true'
+                or tags.get('onedeploy-app') != request.application_id
+                or tags.get('onedeploy-attempt') != attempt_id
+                or len(containers) != 1 or containers[0].get('name') != 'migration'
+                or containers[0].get('image') != expected_repository + '@' + image_digest):
+            raise AwsConfigurationError('마이그레이션 태스크 정의의 소유권·이미지가 예상과 다릅니다.')
+
+    tag = attempt_id + '-db'
+    def image_state():
+        response = json.loads(adapter.aws(['ecr', 'batch-get-image',
+            '--registry-id', request.account, '--repository-name', 'onedeploy-managed',
+            '--image-ids', 'imageTag=' + tag], private=True, quiet=True))
+        images, failures = response.get('images'), response.get('failures')
+        if (images == [] and isinstance(failures, list) and len(failures) == 1
+                and failures[0].get('imageId', {}).get('imageTag') == tag
+                and failures[0].get('failureCode') == 'ImageNotFound'):
+            return False
+        if (not isinstance(images, list) or len(images) != 1 or failures != []
+                or images[0].get('registryId') != request.account
+                or images[0].get('repositoryName') != 'onedeploy-managed'
+                or images[0].get('imageId', {}).get('imageTag') != tag
+                or images[0]['imageId'].get('imageDigest') != image_digest):
+            raise AwsConfigurationError('마이그레이션 ECR 태그의 소유권·digest를 확인하지 못했습니다.')
+        return True
+
+    image_present = image_state()
+    if not definition_inactive:
+        if definition['status'] == 'ACTIVE':
+            response = json.loads(adapter.aws(['ecs', 'deregister-task-definition',
+                '--task-definition', definition_arn], private=True, quiet=True))
+            deregistered = response.get('taskDefinition', {})
+            if (deregistered.get('taskDefinitionArn') != definition_arn
+                    or deregistered.get('status') != 'INACTIVE'):
+                raise AwsConfigurationError('마이그레이션 태스크 정의 비활성화를 확인하지 못했습니다.')
+        definition_inactive = True
+        if checkpoint is not None:
+            checkpoint()
+    if image_present:
+        deleted = json.loads(adapter.aws(['ecr', 'batch-delete-image',
+            '--registry-id', request.account, '--repository-name', 'onedeploy-managed',
+            '--image-ids', 'imageTag=' + tag], private=True, quiet=True))
+        ids = deleted.get('imageIds', [])
+        if (deleted.get('failures') or len(ids) != 1
+                or ids[0].get('imageTag') != tag
+                or ids[0].get('imageDigest') != image_digest):
+            raise AwsConfigurationError('마이그레이션 ECR 태그 삭제 응답이 예상과 다릅니다.')
+        if image_state():
+            raise AwsConfigurationError('마이그레이션 ECR 태그가 삭제 후에도 남아 있습니다.')
+    return {'state': 'done', 'task_definition_arn': definition_arn,
+            'image': image, 'image_deleted': image_present}
+
+
 class AwsMigrationRunner:
     def __init__(self, adapter: AwsExpressAdapter, request: PostgresRequest,
                  database: dict, bundle: MigrationBundle, repository: str, attempt_id: str):
@@ -235,12 +329,17 @@ class AwsMigrationRunner:
         if (definition.get('taskDefinitionArn') != self.registered_arn
                 or definition.get('status') != 'INACTIVE'):
             raise AwsConfigurationError('마이그레이션 태스크 정의 정리를 확인하지 못했습니다.')
+        if self.adapter.checkpoint:
+            self.adapter.checkpoint(aws_migration_cleanup_definition_inactive=True)
         tag = self.attempt_id + '-db'
         removed = json.loads(self.adapter.aws(['ecr', 'batch-delete-image', '--repository-name',
             'onedeploy-managed', '--image-ids', f'imageTag={tag}'], private=True))
         if (removed.get('failures') or not any(item.get('imageTag') == tag
                                              for item in removed.get('imageIds', []))):
             raise AwsConfigurationError('마이그레이션 ECR 이미지 태그 정리를 확인하지 못했습니다.')
+        if self.adapter.checkpoint:
+            self.adapter.checkpoint(aws_migration_cleanup_state='done',
+                                    aws_migration_cleanup_image_deleted=True)
         self.completed = False
         return True
 

@@ -242,6 +242,9 @@ class App:
                 if job.get('aws_image_cleanup_state') == 'running':
                     job['aws_image_cleanup_state'] = 'failed'
                     self.save(job_id)
+                if job.get('aws_migration_cleanup_state') == 'running':
+                    job['aws_migration_cleanup_state'] = 'failed'
+                    self.save(job_id)
                 if job.get('release_rollback_state') == 'running':
                     job['release_rollback_state'] = ('needs_attention' if job.get('release_rollback_submitted') else 'failed')
                     if job.get('release_rollback_submitted'):
@@ -935,6 +938,78 @@ class App:
             self.save(job_id)
         return inspected
 
+    def cleanup_interrupted_aws_migration(self, job_id: str) -> dict:
+        """Explicitly retire a verified stopped migration's unique AWS artifacts."""
+        from onedeploy.aws_migrations import cleanup_interrupted_migration
+
+        def eligible(job):
+            if not job:
+                return False
+            inspection = job.get('aws_migration_inspection') or {}
+            completed = job.get('aws_migration_result') or {}
+            inspected = (inspection.get('status') in {'succeeded', 'failed'}
+                         and inspection.get('task_arn') == job.get('aws_migration_task_arn')
+                         and inspection.get('task_definition_arn') == job.get('aws_migration_task_definition_arn'))
+            recorded_success = (job.get('aws_migration_status') == 'succeeded'
+                                and completed.get('task_arn') == job.get('aws_migration_task_arn')
+                                and completed.get('task_definition_arn') == job.get('aws_migration_task_definition_arn')
+                                and completed.get('image') == job.get('aws_migration_image')
+                                and completed.get('image_digest') == job.get('aws_migration_image_digest'))
+            return (job and job.get('mode') == 'agent'
+                    and job.get('target') == 'aws-ecs-express'
+                    and job.get('status') in {'failed', 'interrupted'}
+                    and job.get('result') is None
+                    and type(job.get('attempts')) is int and 1 <= job['attempts'] <= 3
+                    and job.get('aws_migration_cleanup_state') not in {'running', 'done'}
+                    and (inspected or recorded_success))
+
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job):
+                raise ValueError('정리할 수 있는 중단된 AWS SQL 마이그레이션이 아닙니다.')
+            snapshot = json.loads(json.dumps(job))
+            job['aws_migration_cleanup_state'] = 'running'
+            job.pop('aws_migration_cleanup_error', None)
+            self.save(job_id)
+        try:
+            request = postgres_request_from_job(snapshot)
+            if request is None or request.application_id != snapshot.get('application_id'):
+                raise ValueError('작업의 PostgreSQL 소유 정보를 확인하지 못했습니다.')
+            settings = AwsSettings(**snapshot['aws'])
+            if settings.region != request.region or settings.expected_account != request.account:
+                raise AwsConfigurationError('작업의 AWS 계정·리전과 PostgreSQL 소유 정보가 다릅니다.')
+            adapter = AwsExpressAdapter(lambda *_: None, settings)
+            caller = json.loads(adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
+            if caller.get('Account') != request.account:
+                raise AwsConfigurationError('현재 AWS 계정이 마이그레이션 소유 계정과 다릅니다.')
+            def definition_inactive_checkpoint():
+                with self.lock:
+                    current = self.jobs[job_id]
+                    if (current.get('aws_migration_cleanup_state') != 'running'
+                            or current.get('aws_migration_task_definition_arn') != snapshot['aws_migration_task_definition_arn']):
+                        raise ValueError('정리 중 작업 기록이 변경됐습니다.')
+                    current['aws_migration_cleanup_definition_inactive'] = True
+                    self.save(job_id)
+            result = cleanup_interrupted_migration(adapter, request,
+                job_id + '-a' + str(snapshot['attempts']), snapshot['aws_migration_task_arn'],
+                snapshot['aws_migration_task_definition_arn'], snapshot['aws_migration_image'],
+                snapshot['aws_migration_image_digest'],
+                definition_inactive=bool(snapshot.get('aws_migration_cleanup_definition_inactive')),
+                checkpoint=definition_inactive_checkpoint)
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['aws_migration_cleanup_state'] = 'failed'
+                self.jobs[job_id]['aws_migration_cleanup_error'] = redact(str(exc))[:300]
+                self.save(job_id)
+            raise
+        with self.lock:
+            current = self.jobs[job_id]
+            current['aws_migration_cleanup_state'] = 'done'
+            current['aws_migration_cleanup_image_deleted'] = result['image_deleted']
+            self.save(job_id)
+        self.event(job_id, 'migration_cleanup', '중단된 SQL 마이그레이션의 전용 ECS 정의와 ECR 태그를 정리했습니다.')
+        return result
+
     def cleanup_abandoned_aws_image(self, job_id):
         with self.lock:
             failed = self.jobs.get(job_id)
@@ -1465,6 +1540,12 @@ def handler_for(app: App):
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('SQL 마이그레이션 재확인 요청에는 본문을 넣을 수 없습니다.')
                     self.json_response(200, app.inspect_interrupted_aws_migration(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/migration/cleanup", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('SQL 마이그레이션 정리 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.cleanup_interrupted_aws_migration(job_id))
                     return
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/reconcile", self.path):
                     job_id = self.path.split('/')[3]

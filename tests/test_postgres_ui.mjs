@@ -78,18 +78,25 @@ test('interrupted AWS migration shows a read-only task inspection result', async
   };
   const job = {id: 'a'.repeat(16), mode: 'agent', target: 'aws-ecs-express',
     status: 'interrupted', attempts: 1, events: [],
-    aws_migration_task_arn: 'owned-task', aws_migration_task_definition_arn: 'owned-definition'};
+    aws_migration_task_arn: 'owned-task', aws_migration_task_definition_arn: 'owned-definition',
+    aws_migration_image: 'owned-image', aws_migration_image_digest: 'owned-digest'};
   const requests = [];
+  let cleaned = false;
   const context = {
     document: {getElementById: element, hidden: false},
     fetch: async path => {
       requests.push(path);
+      if (path.endsWith('/migration/cleanup')) cleaned = true;
       return {ok: true, json: async () => path === '/api/config'
         ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []}
         : path.endsWith('/migration/inspect')
           ? {status: 'succeeded'}
+          : path.endsWith('/migration/cleanup')
+            ? {state: 'done'}
           : path === '/api/jobs/' + job.id
-            ? {...job, aws_migration_inspection: {status: 'succeeded', checked_at: '2026-10-05T00:00:00Z'}}
+            ? {...job, aws_migration_inspection: {status: 'succeeded', checked_at: '2026-10-05T00:00:00Z',
+                task_arn: 'owned-task', task_definition_arn: 'owned-definition'},
+                aws_migration_cleanup_state: cleaned ? 'done' : undefined}
             : []};
     },
     setInterval() {}, setTimeout, FormData, Set, Error, Date,
@@ -102,8 +109,19 @@ test('interrupted AWS migration shows a read-only task inspection result', async
   assert.ok(requests.includes('/api/jobs/' + job.id + '/migration/inspect'));
   assert.match(element('migrationInfo').textContent, /SQL 태스크 성공/);
   assert.match(element('migrationInfo').textContent, /자동 재개하지 않습니다/);
+  assert.equal(element('cleanupMigration').hidden, false);
+  await element('cleanupMigration').onclick();
+  assert.ok(requests.includes('/api/jobs/' + job.id + '/migration/cleanup'));
+  assert.equal(element('cleanupMigration').hidden, true);
+  assert.match(element('migrationCleanupInfo').textContent, /정리를 확인했습니다/);
   context.show({...job, status: 'running'});
   assert.equal(element('inspectMigration').hidden, true);
+  context.show({...job, aws_migration_status: 'succeeded',
+    aws_migration_result: {task_arn: 'owned-task', task_definition_arn: 'owned-definition',
+      image: 'owned-image', image_digest: 'owned-digest'},
+    aws_migration_inspection: {status: 'unknown', task_arn: 'owned-task',
+      task_definition_arn: 'owned-definition'}});
+  assert.equal(element('cleanupMigration').hidden, false);
 });
 const start = html.indexOf('function postgresUploadHeaders(application)');
 const end = html.indexOf("el('deploy').onclick=", start);

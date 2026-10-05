@@ -841,6 +841,129 @@ class PostgresServerTests(unittest.TestCase):
         inspect.assert_called_once_with('a' * 16)
         self.assertEqual(handler.json_response.call_args.args, (200, {'status': 'succeeded'}))
 
+    def test_interrupted_migration_cleanup_journals_progress_without_redeploy(self):
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}):
+            _, payload = self.upload(archive())
+        job_id = payload['id']
+        attempt = job_id + '-a1'
+        definition = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/onedeploy-migrate-{attempt}:1'
+        task_arn = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task/default/' + 'a' * 32
+        image = f'{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/onedeploy-managed:{attempt}-db'
+        job = self.app.jobs[job_id]
+        job.update(status='interrupted', attempts=1, steps=4,
+                   aws_migration_task_arn=task_arn,
+                   aws_migration_task_definition_arn=definition,
+                   aws_migration_image=image, aws_migration_image_digest='sha256:' + 'b' * 64,
+                   aws_migration_inspection={'status': 'succeeded', 'task_arn': task_arn,
+                                             'task_definition_arn': definition})
+        self.app.save(job_id)
+        def cleanup(_adapter, _request, _attempt, _task, _definition, _image, _digest,
+                    *, definition_inactive, checkpoint):
+            self.assertEqual(self.app.jobs[job_id]['aws_migration_cleanup_state'], 'running')
+            self.assertFalse(definition_inactive)
+            checkpoint()
+            self.assertTrue(json.loads((self.root / job_id / 'job.json').read_text())
+                            ['aws_migration_cleanup_definition_inactive'])
+            return {'state': 'done', 'image_deleted': True,
+                    'task_definition_arn': definition, 'image': image}
+        with patch('onedeploy.server.AwsExpressAdapter.aws', autospec=True,
+                   return_value=json.dumps({'Account': ACCOUNT})) as aws, \
+                patch('onedeploy.aws_migrations.cleanup_interrupted_migration',
+                      side_effect=cleanup) as cleaner, \
+                patch.object(self.app, 'run_agent') as deploy:
+            result = self.app.cleanup_interrupted_aws_migration(job_id)
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(aws.call_count, 1)
+        self.assertEqual(cleaner.call_args.args[2:7],
+                         (attempt, task_arn, definition, image, 'sha256:' + 'b' * 64))
+        deploy.assert_not_called()
+        self.assertEqual(job['status'], 'interrupted')
+        self.assertEqual(job['aws_migration_cleanup_state'], 'done')
+        self.assertTrue(job['aws_migration_cleanup_image_deleted'])
+        with self.assertRaisesRegex(ValueError, '정리할 수 있는'):
+            self.app.cleanup_interrupted_aws_migration(job_id)
+
+    def test_interrupted_migration_cleanup_restores_failed_retry_state(self):
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}):
+            _, payload = self.upload(archive())
+        job_id = payload['id']
+        job = self.app.jobs[job_id]
+        task_arn = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task/default/' + 'a' * 32
+        definition = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/onedeploy-migrate-{job_id}-a1:1'
+        job.update(status='interrupted', attempts=1, aws_migration_task_arn=task_arn,
+                   aws_migration_task_definition_arn=definition,
+                   aws_migration_image=f'{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/onedeploy-managed:{job_id}-a1-db',
+                   aws_migration_image_digest='sha256:' + 'b' * 64,
+                   aws_migration_inspection={'status': 'succeeded', 'task_arn': task_arn,
+                                             'task_definition_arn': definition},
+                   aws_migration_cleanup_state='running',
+                   aws_migration_cleanup_definition_inactive=True)
+        self.app.save(job_id)
+        restored = App(self.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.settings, monitor_interval=0)
+        self.assertEqual(restored.jobs[job_id]['aws_migration_cleanup_state'], 'failed')
+        with patch('onedeploy.server.AwsExpressAdapter.aws', autospec=True,
+                   return_value=json.dumps({'Account': ACCOUNT})), \
+                patch('onedeploy.aws_migrations.cleanup_interrupted_migration',
+                      side_effect=RuntimeError('cleanup failed')) as cleanup:
+            with self.assertRaisesRegex(RuntimeError, 'cleanup failed'):
+                restored.cleanup_interrupted_aws_migration(job_id)
+        self.assertTrue(cleanup.call_args.kwargs['definition_inactive'])
+        self.assertEqual(restored.jobs[job_id]['aws_migration_cleanup_state'], 'failed')
+        self.assertEqual(restored.jobs[job_id]['aws_migration_cleanup_error'], 'cleanup failed')
+
+    def test_interrupted_migration_cleanup_uses_journaled_success_after_task_expires(self):
+        with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
+                   return_value={'database_id': 'onedeploy-demo-app'}):
+            _, payload = self.upload(archive())
+        job_id = payload['id']
+        attempt = job_id + '-a1'
+        task_arn = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task/default/' + 'a' * 32
+        definition = f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/onedeploy-migrate-{attempt}:1'
+        image = f'{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/onedeploy-managed:{attempt}-db'
+        digest = 'sha256:' + 'b' * 64
+        job = self.app.jobs[job_id]
+        job.update(status='interrupted', attempts=1, aws_migration_status='succeeded',
+                   aws_migration_task_arn=task_arn, aws_migration_task_definition_arn=definition,
+                   aws_migration_image=image, aws_migration_image_digest=digest,
+                   aws_migration_result={'task_arn': task_arn, 'task_definition_arn': definition,
+                                         'image': image, 'image_digest': digest},
+                   aws_migration_inspection={'status': 'unknown', 'task_arn': task_arn,
+                                             'task_definition_arn': definition},
+                   aws_migration_cleanup_definition_inactive=True)
+        self.app.save(job_id)
+        with patch('onedeploy.server.AwsExpressAdapter.aws', autospec=True,
+                   return_value=json.dumps({'Account': ACCOUNT})), \
+                patch('onedeploy.aws_migrations.cleanup_interrupted_migration',
+                      return_value={'state': 'done', 'image_deleted': False}) as cleanup:
+            self.app.cleanup_interrupted_aws_migration(job_id)
+        self.assertTrue(cleanup.call_args.kwargs['definition_inactive'])
+        self.assertEqual(job['aws_migration_cleanup_state'], 'done')
+
+    def test_interrupted_migration_cleanup_route_requires_token_and_empty_body(self):
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = '/api/jobs/' + 'a' * 16 + '/migration/cleanup'
+        handler.headers = {'Content-Length': '0'}
+        handler.json_response = Mock()
+        with patch.object(self.app, 'cleanup_interrupted_aws_migration') as cleanup:
+            handler.do_POST()
+        cleanup.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 403)
+        handler.headers['X-OneDeploy-Token'] = self.app.token
+        handler.headers['Content-Length'] = '2'
+        with patch.object(self.app, 'cleanup_interrupted_aws_migration') as cleanup:
+            handler.do_POST()
+        cleanup.assert_not_called()
+        self.assertEqual(handler.json_response.call_args.args[0], 400)
+        handler.headers['Content-Length'] = '0'
+        with patch.object(self.app, 'cleanup_interrupted_aws_migration',
+                          return_value={'state': 'done'}) as cleanup:
+            handler.do_POST()
+        cleanup.assert_called_once_with('a' * 16)
+        self.assertEqual(handler.json_response.call_args.args, (200, {'state': 'done'}))
+
     def test_opt_in_upload_persists_and_restores_postgres_request(self):
         database = {'database_id': 'onedeploy-demo-app'}
         with patch('onedeploy.server.AwsPostgresProvisioner.inspect_current',
