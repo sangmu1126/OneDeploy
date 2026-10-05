@@ -25,7 +25,8 @@ from onedeploy.cloud import CloudRunAdapter, CloudRunSettings
 from onedeploy.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from onedeploy.health import check_deployment
 from onedeploy.infrastructure import (OpenAIInfrastructurePlanner,
-                                      explicit_infrastructure_plan, infrastructure_compatibility,
+                                      deployment_access_mode, explicit_infrastructure_plan,
+                                      infrastructure_compatibility,
                                       inspect_infrastructure,
                                       plan_infrastructure, validate_infrastructure)
 from onedeploy.migrations import collect_sql_migrations
@@ -1620,8 +1621,8 @@ def handler_for(app: App):
                     if target == "aws-ecs-express":
                         if app.aws_settings.unavailable_reason():
                             raise ValueError(app.aws_settings.unavailable_reason())
-                        if public_flag != 'true':
-                            raise ValueError('AWS ECS Express 대상은 인터넷 공개 선택이 필요합니다.')
+                    if target != 'auto' and deployment_access_mode(target, public_flag == 'true') is None:
+                        raise ValueError('AWS ECS Express 대상은 인터넷 공개 선택이 필요합니다.')
                     size = int(self.headers.get("Content-Length", "0"))
                     content_type = self.headers.get('Content-Type', '')
                     folder_upload = content_type.lower().startswith('multipart/form-data;')
@@ -1710,7 +1711,8 @@ def handler_for(app: App):
                             available_targets = ['local-docker']
                             if app.cloud_settings.unavailable_reason() is None:
                                 available_targets.append('cloud-run')
-                            if public_flag == 'true' and app.aws_settings.unavailable_reason() is None:
+                            if (deployment_access_mode('aws-ecs-express', public_flag == 'true') is not None
+                                    and app.aws_settings.unavailable_reason() is None):
                                 available_targets.append('aws-ecs-express')
                             infrastructure_plan = plan_infrastructure(project, available_targets,
                                 public_flag == 'true', app.infrastructure_planner_factory(app.ai_settings))
@@ -1731,7 +1733,11 @@ def handler_for(app: App):
                                      if create_plan_id is not None else
                                      'RDS 소유권을 확인해 AWS를 선택했습니다. DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.'))
                         infrastructure_plan['compatibility'] = infrastructure_compatibility(
-                            infrastructure_profile, target, postgres=postgres_request is not None)
+                            infrastructure_profile, target, postgres=postgres_request is not None,
+                            public_access=public_flag == 'true')
+                        access_mode = infrastructure_plan['compatibility']['access_mode']
+                        if access_mode is None:
+                            raise ValueError('선택한 배포 대상의 공개 범위를 지원하지 않습니다.')
                         with app.lock:
                             app.ensure_application_available(application_id, target)
                             latest = None
@@ -1753,7 +1759,7 @@ def handler_for(app: App):
                             app.jobs[job_id] = {"id": job_id, "mode": "agent", "target": target,
                                 "requested_target": requested_target, "infrastructure_plan": infrastructure_plan,
                                 "application_id": application_id,
-                                "public": target in {"cloud-run", "aws-ecs-express"} and public_flag == "true",
+                                "public": access_mode == 'public',
                                 "status": "provisioning" if create_plan_id is not None else "running",
                                 "created_at": datetime.now(timezone.utc).isoformat(),
                                 "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,

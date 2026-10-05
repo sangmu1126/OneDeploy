@@ -70,11 +70,11 @@ TARGET_RESOURCES = {
 # These describe the currently implemented adapters, not everything the providers offer.
 TARGET_CAPABILITIES = {
     'local-docker': {'postgresql_binding': False, 'durable_files': False, 'background_worker': False,
-                     'image_platform': None},
+                     'image_platform': None, 'access_modes': ['loopback']},
     'cloud-run': {'postgresql_binding': False, 'durable_files': False, 'background_worker': False,
-                  'image_platform': 'linux/amd64'},
+                  'image_platform': 'linux/amd64', 'access_modes': ['authenticated', 'public']},
     'aws-ecs-express': {'postgresql_binding': True, 'durable_files': False, 'background_worker': False,
-                        'image_platform': 'linux/amd64'},
+                        'image_platform': 'linux/amd64', 'access_modes': ['public']},
 }
 DOCKER_FROM = re.compile(r'(?im)^\s*FROM\s+(?:--platform=([^\s]+)\s+)?[^\s#]+')
 MAX_INSPECT_FILES = 1000
@@ -225,15 +225,30 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                                  tuple(sorted(database_engines)), final_image_platform)
 
 
+def deployment_access_mode(target: str, public_access: bool) -> str | None:
+    """Return the access mode this adapter will actually deploy, if allowed."""
+    if target not in TARGET_CAPABILITIES:
+        raise ValueError('지원하지 않는 배포 대상입니다.')
+    modes = TARGET_CAPABILITIES[target]['access_modes']
+    if 'loopback' in modes:
+        return 'loopback'
+    if public_access and 'public' in modes:
+        return 'public'
+    if not public_access and 'authenticated' in modes:
+        return 'authenticated'
+    return None
+
+
 def infrastructure_compatibility(profile: InfrastructureProfile, target: str,
-                                 *, postgres: bool = False) -> dict:
+                                 *, postgres: bool = False,
+                                 public_access: bool | None = None) -> dict:
     """Assess detected requirements against the actual OneDeploy target adapter."""
     if target != 'auto' and target not in TARGET_CAPABILITIES:
         raise ValueError('지원하지 않는 배포 대상입니다.')
     # Auto has no adapter yet: only requirements supported by every candidate pass here.
     capabilities = TARGET_CAPABILITIES.get(target, {
         'postgresql_binding': False, 'durable_files': False, 'background_worker': False,
-        'image_platform': None})
+        'image_platform': None, 'access_modes': []})
     problems = []
     if 'sqlite' in profile.requirements or profile.storage == 'sqlite':
         problems.append('SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다')
@@ -254,9 +269,14 @@ def infrastructure_compatibility(profile: InfrastructureProfile, target: str,
             and '/'.join(literal_platform.split('/')[:2]) != capabilities['image_platform']):
         problems.append(f'최종 Dockerfile 단계의 {profile.final_image_platform} 플랫폼이 '
                         f"{capabilities['image_platform']} 이미지 빌드와 충돌합니다")
+    access_mode = (deployment_access_mode(target, public_access)
+                   if target != 'auto' and public_access is not None else None)
+    if target != 'auto' and public_access is not None and access_mode is None:
+        problems.append('선택한 공개 범위로 배포할 수 없습니다')
     return {'target': target, 'detected_requirements': list(profile.requirements),
             'database_engines': list(profile.database_engines), 'evidence': list(profile.evidence),
             'declared_image_platform': profile.final_image_platform,
+            'access_mode': access_mode,
             'postgres_binding': postgres, 'adapter_capabilities': capabilities.copy(),
             'compatible': not problems, 'problems': problems,
             'inspection_note': '탐지 신호가 없어도 무상태 앱임이 증명된 것은 아닙니다.'}

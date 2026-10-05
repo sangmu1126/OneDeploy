@@ -10,7 +10,8 @@ from unittest.mock import Mock, patch
 from onedeploy.agent import DeploymentTools
 from onedeploy.analysis import AISettings
 from onedeploy.aws import AwsSettings
-from onedeploy.infrastructure import (InfrastructureProfile, explicit_infrastructure_plan,
+from onedeploy.infrastructure import (InfrastructureProfile, deployment_access_mode,
+                                      explicit_infrastructure_plan,
                                       infrastructure_compatibility, inspect_infrastructure,
                                       validate_infrastructure,
                                       validate_infrastructure_proposal, OpenAIInfrastructurePlanner)
@@ -20,6 +21,13 @@ from onedeploy.migrations import collect_sql_migrations
 
 
 class InfrastructureTests(unittest.TestCase):
+    def test_access_mode_matches_actual_target_exposure(self):
+        self.assertEqual(deployment_access_mode('local-docker', True), 'loopback')
+        self.assertEqual(deployment_access_mode('cloud-run', False), 'authenticated')
+        self.assertEqual(deployment_access_mode('cloud-run', True), 'public')
+        self.assertIsNone(deployment_access_mode('aws-ecs-express', False))
+        self.assertEqual(deployment_access_mode('aws-ecs-express', True), 'public')
+
     def test_python_postgres_probe_is_supported_only_with_aws_database_binding(self):
         project = Path('examples/postgres-probe-python')
         profile = inspect_infrastructure(project)
@@ -84,6 +92,28 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(handler.json_response.call_args.args[0], 400)
             self.assertIn('linux/arm64', handler.json_response.call_args.args[1]['error'])
             self.assertFalse(app.jobs)
+
+    def test_local_upload_stays_loopback_even_with_public_permission(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('package.json', '{"scripts":{"start":"node server.js"}}')
+            bundle.writestr('server.js', 'console.log("ready")')
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            handler_class = handler_for(app)
+            handler = handler_class.__new__(handler_class)
+            handler.path = '/api/deployments'
+            handler.headers = {'X-OneDeploy-Token': app.token,
+                               'Content-Length': str(len(archive.getvalue())),
+                               'X-Deploy-Target': 'local-docker', 'X-Public-Access': 'true'}
+            handler.rfile = io.BytesIO(archive.getvalue())
+            handler.json_response = Mock()
+            with patch('onedeploy.server.threading.Thread'):
+                handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[0], 202)
+            job = app.jobs[handler.json_response.call_args.args[1]['id']]
+            self.assertFalse(job['public'])
+            self.assertEqual(job['infrastructure_plan']['compatibility']['access_mode'], 'loopback')
 
     def test_agent_edit_cannot_change_final_image_to_arm_for_aws(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -554,6 +584,7 @@ class InfrastructureTests(unittest.TestCase):
             self.assertTrue(compatibility['compatible'])
             self.assertEqual(compatibility['target'], 'aws-ecs-express')
             self.assertFalse(compatibility['postgres_binding'])
+            self.assertEqual(compatibility['access_mode'], 'public')
             private_handler = handler_class.__new__(handler_class)
             private_handler.path = '/api/deployments'
             private_handler.headers = {**handler.headers, 'X-Public-Access': 'false'}
