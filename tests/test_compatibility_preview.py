@@ -48,6 +48,8 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertEqual(reports['local-docker']['access_mode'], 'loopback')
         self.assertEqual(reports['aws-ecs-express']['access_mode'], 'public')
         self.assertTrue(all(item['cost']['estimate'] is None for item in reports.values()))
+        self.assertEqual(payload['inspection']['requirements'], [])
+        self.assertEqual(payload['inspection']['scanned_files'], 2)
         self.assertEqual(self.app.jobs, {})
         self.assertFalse(list(Path(self.temp.name).glob('*/job.json')))
 
@@ -60,6 +62,8 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertTrue(all(not item['compatible'] for item in payload['reports']))
         self.assertTrue(all(any('SQLite' in issue for issue in item['problems'])
                             for item in payload['reports']))
+        self.assertIn('sqlite', payload['inspection']['requirements'])
+        self.assertIn('package.json', payload['inspection']['evidence_files'])
 
 
 if __name__ == '__main__':

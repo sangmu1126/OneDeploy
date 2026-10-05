@@ -44,7 +44,7 @@ test('environment preview shows target differences before deployment', async () 
   const context = {el: id => elements[id], Error, String,
     api: async (path, options) => {
       calls.push([path, options]);
-      return {reports: [
+      return {inspection: {requirements: ['sqlite'], evidence_files: ['server.js'], scanned_files: 2}, reports: [
         {target: 'local-docker', compatible: true, preview_eligible: true,
          access_mode: 'loopback', problems: [], configuration_reason: null},
         {target: 'aws-ecs-express', compatible: false, preview_eligible: false,
@@ -56,6 +56,7 @@ test('environment preview shows target differences before deployment', async () 
   assert.equal(calls[0][0], '/api/compatibility');
   assert.equal(calls[0][1].body, file);
   assert.match(elements.compatibilityMap.textContent, /Local Docker · 감지된 요구 기준 통과/);
+  assert.match(elements.compatibilityMap.textContent, /탐지한 요구: sqlite · 근거 파일: server.js/);
   assert.match(elements.compatibilityMap.textContent, /AWS ECS Express · 현재 미지원/);
   assert.match(elements.compatibilityMap.textContent, /비용: 미산정/);
 });
@@ -116,8 +117,11 @@ test('interrupted local deployment shows cleanup only for recorded attempts', as
   runInNewContext(html.split('<script>', 2)[1].split('</script>', 1)[0], context);
   await new Promise(resolve => setImmediate(resolve));
   const job = {id: 'a'.repeat(16), mode: 'agent', target: 'local-docker',
-    status: 'interrupted', attempts: 1, events: []};
+    status: 'interrupted', attempts: 1, events: [], diagnosis: {
+      summary: '작업이 중단됐습니다.', recommended_action: '상태를 재확인하세요.'}};
   context.show(job);
+  assert.match(element('diagnosisSummary').textContent, /상태를 재확인하세요/);
+  assert.equal(element('diagnosisSummary').hidden, false);
   assert.equal(element('retire').hidden, false);
   assert.match(element('retire').textContent, /로컬 시도 정리/);
   context.show({...job, attempts: 0});

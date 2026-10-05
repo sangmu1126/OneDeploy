@@ -22,6 +22,7 @@ from onedeploy.agent import DeploymentAgent, DeploymentCancelled, DeploymentTool
 from onedeploy.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 from onedeploy.aws_network import ServiceNetworkRequest, discover_default_network
 from onedeploy.certificate import deployment_certificate
+from onedeploy.diagnosis import deployment_diagnosis
 from onedeploy.cloud import CloudRunAdapter, CloudRunSettings
 from onedeploy.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from onedeploy.health import check_deployment
@@ -1372,7 +1373,8 @@ def handler_for(app: App):
                 with app.lock:
                     job_id = self.path.rsplit("/", 1)[-1]
                     job = app.jobs.get(job_id)
-                    response = ({**job, 'health_history': app.health_history.get(job_id, []),
+                    response = ({**job, 'diagnosis': deployment_diagnosis(job),
+                                 'health_history': app.health_history.get(job_id, []),
                                  'last_health': (app.health_history.get(job_id) or [None])[-1],
                                  'monitor_error': app.monitor_errors.get(job_id)}
                                 if job else {"error": "Not found"})
@@ -1651,6 +1653,11 @@ def handler_for(app: App):
                                             'cost': {'estimate': None,
                                                      'note': '대상 전체 비용은 아직 산정하지 않았습니다.'}})
                     self.json_response(200, {'source_digest': digest,
+                                             'inspection': {
+                                                 'requirements': list(profile.requirements),
+                                                 'evidence_files': list(profile.evidence),
+                                                 'scanned_files': profile.scanned_files,
+                                             },
                                              'reports': reports})
                     return
                 if self.path == "/api/deployments":
