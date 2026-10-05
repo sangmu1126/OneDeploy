@@ -22,17 +22,27 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
     plan = job.get('plan') if isinstance(job.get('plan'), dict) else {}
     infrastructure = job.get('infrastructure_plan') if isinstance(job.get('infrastructure_plan'), dict) else {}
     compatibility = infrastructure.get('compatibility') if isinstance(infrastructure.get('compatibility'), dict) else {}
+    rehearsal = result.get('rehearsal') if isinstance(result.get('rehearsal'), dict) else {}
+    image_digest = result.get('image_digest') if isinstance(result.get('image_digest'), str) else None
+    registry_digest = image_digest if image_digest and re.fullmatch(r'sha256:[a-f0-9]{64}', image_digest) else None
+    completed = job.get('status') == 'succeeded' and bool(result.get('url'))
+    rehearsal_passed = bool(completed and rehearsal.get('status') == 'passed'
+                            and isinstance(rehearsal.get('image_id'), str)
+                            and re.fullmatch(r'sha256:[a-f0-9]{64}', rehearsal['image_id']))
     history = health_history or []
     latest_health = history[-1] if history else None
-    completed = job.get('status') == 'succeeded' and bool(result.get('url'))
     checks = [
         {'name': 'deployment_http', 'status': 'passed' if completed else 'unverified',
          'detail': ('배포 작업이 실제 HTTP 응답을 확인한 뒤 완료로 기록했습니다. 현재 가용성은 별도 검사입니다.'
                     if completed else '완료된 배포의 HTTP 확인 기록이 없습니다.')},
-        {'name': 'local_rehearsal', 'status': 'unverified',
-         'detail': '같은 산출물의 로컬 리허설 결과가 기록되지 않았습니다.'},
+        {'name': 'local_rehearsal', 'status': 'passed' if rehearsal_passed else 'unverified',
+         'detail': ('클라우드 업로드 전에 같은 태그의 이미지를 로컬에서 실행해 HTTP 200을 확인했습니다.'
+                    if rehearsal_passed else '같은 산출물의 로컬 리허설 결과가 기록되지 않았습니다.')},
+        {'name': 'registry_manifest', 'status': 'passed' if completed and registry_digest else 'unverified',
+         'detail': ('ECR 이미지 태그의 매니페스트 다이제스트를 업로드 후와 배포 후에 확인했습니다.'
+                    if completed and registry_digest else '레지스트리 매니페스트 다이제스트 확인 기록이 없습니다.')},
         {'name': 'image_identity', 'status': 'unverified',
-         'detail': '레지스트리와 실행 중인 이미지의 다이제스트 일치 결과가 기록되지 않았습니다.'},
+         'detail': '실행 중인 ECS 태스크의 이미지 다이제스트는 아직 대조하지 않았습니다.'},
         {'name': 'ai_model_execution', 'status': 'unverified',
          'detail': '실제 모델 호출과 고정 응답을 구분하는 출처 기록이 없습니다.'},
         {'name': 'rollback_rehearsal', 'status': 'unverified',
@@ -58,7 +68,6 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
     changes = job.get('changes') if isinstance(job.get('changes'), list) else []
     changed_paths = sorted({item['path'] for item in changes
                             if isinstance(item, dict) and isinstance(item.get('path'), str)})
-    image_digest = _digest(result.get('image_digest'))
     return {
         'schema_version': 1,
         'kind': 'onedeploy-record-snapshot',
@@ -75,7 +84,9 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                         'url': result.get('url') if completed else None,
                         'service': result.get('service'), 'container': result.get('container'),
                         'planned_resources': infrastructure.get('resources') or []},
-        'artifact': {'image_reference': result.get('image'), 'image_digest': image_digest},
+        'artifact': {'image_reference': result.get('image'),
+                     'local_image_id': rehearsal.get('image_id') if rehearsal_passed else None,
+                     'registry_manifest_digest': registry_digest},
         'verification': checks,
         'unverified': [item['name'] for item in checks if item['status'] == 'unverified'],
         'rollback': {'previous_job_id': job.get('replaces_job_id'),

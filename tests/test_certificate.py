@@ -26,7 +26,8 @@ class CertificateTests(unittest.TestCase):
         self.assertEqual(certificate['source']['changed_paths'], ['server.js'])
         self.assertEqual(certificate['destination']['access_mode'], 'public')
         self.assertEqual(certificate['artifact']['image_reference'], 'example:v1')
-        self.assertIsNone(certificate['artifact']['image_digest'])
+        self.assertIsNone(certificate['artifact']['registry_manifest_digest'])
+        self.assertIsNone(certificate['artifact']['local_image_id'])
         statuses = {item['name']: item['status'] for item in certificate['verification']}
         self.assertEqual(statuses['deployment_http'], 'passed')
         self.assertEqual(statuses['schema_migration'], 'passed')
@@ -47,6 +48,19 @@ class CertificateTests(unittest.TestCase):
         self.assertIsNone(certificate['destination']['url'])
         self.assertIn('deployment_http', certificate['unverified'])
         self.assertEqual(job['status'], 'failed')
+
+    def test_rehearsal_and_registry_evidence_do_not_claim_running_task_digest(self):
+        job = {'id': 'a' * 16, 'status': 'succeeded', 'target': 'aws-ecs-express',
+               'result': {'url': 'https://example.com', 'image': 'example:v1',
+                          'image_digest': 'sha256:' + 'c' * 64,
+                          'rehearsal': {'status': 'passed', 'image_id': 'sha256:' + 'b' * 64}}}
+        certificate = deployment_certificate(job)
+        checks = {item['name']: item['status'] for item in certificate['verification']}
+        self.assertEqual(checks['local_rehearsal'], 'passed')
+        self.assertEqual(checks['registry_manifest'], 'passed')
+        self.assertEqual(checks['image_identity'], 'unverified')
+        self.assertEqual(certificate['artifact']['local_image_id'], 'sha256:' + 'b' * 64)
+        self.assertEqual(certificate['artifact']['registry_manifest_digest'], 'sha256:' + 'c' * 64)
 
     def test_certificate_api_requires_session_and_existing_job(self):
         with tempfile.TemporaryDirectory() as directory:

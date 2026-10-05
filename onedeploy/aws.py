@@ -21,6 +21,7 @@ from pathlib import Path
 
 from onedeploy.analysis import redact
 from onedeploy.core import ImageBuilder, RDS_CA_CONTAINER_PATH, validate_environment
+from onedeploy.rehearsal import inspect_image_id, rehearse_image
 
 
 class AwsConfigurationError(RuntimeError):
@@ -129,7 +130,8 @@ class AwsSettings:
 
 
 class AwsExpressAdapter:
-    def __init__(self, event, settings: AwsSettings, existing=None, checkpoint=None):
+    def __init__(self, event, settings: AwsSettings, existing=None, checkpoint=None,
+                 rehearsal=False):
         self.output, self.settings = event, settings
         self.existing = existing
         self.checkpoint = checkpoint
@@ -141,6 +143,11 @@ class AwsExpressAdapter:
         self.image_built = False
         self.updated_existing = False
         self.previous_deployment_arn = None
+        self.rehearsal = rehearsal
+        self.rehearsal_result = None
+        self.rehearsal_image = None
+        self.rehearsal_image_built = False
+        self.image_digest = None
 
     def event(self, stage, message):
         for value in sorted(set(self.sensitive), key=len, reverse=True):
@@ -215,6 +222,7 @@ class AwsExpressAdapter:
         return account, repository, execution, infrastructure
 
     def deploy(self, project, plan, attempt_id, environment=None, postgres=None, migrations=None):
+        self.settings.validate()
         if not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id):
             raise ValueError('Invalid deployment attempt ID')
         if plan.target != 'aws-ecs-express':
@@ -252,6 +260,15 @@ class AwsExpressAdapter:
             migration_runner = AwsMigrationRunner(self, postgres, database, migrations,
                 f'{postgres.account}.dkr.ecr.{postgres.region}.amazonaws.com/onedeploy-managed', attempt_id)
             migration_runner.preflight()
+        if self.rehearsal:
+            if database is not None:
+                raise ValueError('PostgreSQL 앱의 로컬 리허설은 별도 DB 경로가 필요합니다.')
+            self.rehearsal_image = f'onedeploy/rehearsal-{attempt_id}:latest'
+            ImageBuilder(self.command, self.event).build(
+                project, plan, self.rehearsal_image, platform='linux/amd64')
+            self.rehearsal_image_built = True
+            self.rehearsal_result = rehearse_image(
+                self.command, self.event, self.rehearsal_image, plan, attempt_id, environment)
         account, repository, execution, infrastructure = self.prepare_infrastructure()
         if migration_runner is not None and repository != migration_runner.repository:
             raise AwsConfigurationError('마이그레이션 ECR 저장소가 AWS 기반 스택 결과와 다릅니다.')
@@ -310,9 +327,18 @@ class AwsExpressAdapter:
         if database is not None:
             from onedeploy.migrations import trusted_rds_ca_bundle
             ca_bundle = trusted_rds_ca_bundle()
-        ImageBuilder(self.command, self.event).build(project, plan, self.image,
-                                                      platform='linux/amd64', extra_ca_bundle=ca_bundle)
-        self.image_built = True
+        if self.rehearsal_result:
+            self.command(['docker', 'tag', self.rehearsal_image, self.image], timeout=30, quiet=True)
+            self.image_built = True
+            if inspect_image_id(self.command, self.image) != self.rehearsal_result['image_id']:
+                raise AwsConfigurationError('리허설 이미지와 ECR 업로드 이미지의 구성 ID가 다릅니다.')
+            self.command(['docker', 'image', 'rm', self.rehearsal_image], timeout=30, quiet=True)
+            self.rehearsal_image = None
+            self.event('rehearsal', '리허설한 동일 로컬 이미지를 ECR 태그로 승격했습니다.')
+        else:
+            ImageBuilder(self.command, self.event).build(project, plan, self.image,
+                                                          platform='linux/amd64', extra_ca_bundle=ca_bundle)
+            self.image_built = True
         registry = repository.split('/')[0]
         password = self.aws(['ecr', 'get-login-password'], private=True)
         if not password:
@@ -333,6 +359,16 @@ class AwsExpressAdapter:
                         raise
                     self.event('retry', f'ECR 업로드 시간 초과, {push_attempt + 2}/3 재시도')
                     time.sleep(5)
+        if self.rehearsal_result:
+            details = json.loads(self.aws(['ecr', 'describe-images', '--repository-name',
+                                           'onedeploy-managed', '--image-ids',
+                                           'imageTag=' + attempt_id], private=True))
+            images = details.get('imageDetails', [])
+            digest = images[0].get('imageDigest') if len(images) == 1 else None
+            if not isinstance(digest, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
+                raise AwsConfigurationError('ECR 이미지 매니페스트 다이제스트를 확인할 수 없습니다.')
+            self.image_digest = digest
+            self.event('uploading', '리허설한 이미지의 ECR 매니페스트 다이제스트를 기록했습니다.')
         migration_result = migration_runner.build_and_run() if migration_runner else None
         payload = {'healthCheckPath': plan.health_path,
                    'primaryContainer': {'image': self.image, 'containerPort': plan.port,
@@ -439,6 +475,13 @@ class AwsExpressAdapter:
             raise AwsConfigurationError('기존 ECS 서비스의 공개 URL이 변경됐습니다.')
         self.event('verifying', f'ECS Express HTTPS URL에서 실제 HTTP 응답 확인: {url}')
         self.verify(url + plan.health_path)
+        if self.image_digest:
+            details = json.loads(self.aws(['ecr', 'describe-images', '--repository-name',
+                                           'onedeploy-managed', '--image-ids',
+                                           'imageTag=' + attempt_id], private=True))
+            images = details.get('imageDetails', [])
+            if len(images) != 1 or images[0].get('imageDigest') != self.image_digest:
+                raise AwsConfigurationError('배포 중 ECR 이미지 태그의 다이제스트가 변경됐습니다.')
         active_configs = [config for config in ready.get('activeConfigurations', [])
                           if config.get('primaryContainer', {}).get('image') == self.image]
         task_definition = active_configs[0].get('taskDefinitionArn') if len(active_configs) == 1 else None
@@ -451,6 +494,8 @@ class AwsExpressAdapter:
                 'region': self.settings.region, 'account': account, 'public': True,
                 'service_security_group': self.settings.service_security_group,
                 'owner_attempt': owner_attempt, 'images': [*previous_images, self.image],
+                **({'rehearsal': self.rehearsal_result} if self.rehearsal_result else {}),
+                **({'image_digest': self.image_digest} if self.image_digest else {}),
                 **({'database': database} if database is not None else {}),
                 **({'migration': migration_result} if migration_result is not None else {}),
                 'task_definition_arn': task_definition,
@@ -594,6 +639,11 @@ class AwsExpressAdapter:
                 self.command(['docker', 'image', 'rm', self.image], timeout=30)
             except Exception:
                 self.event('cleanup', '로컬 이미지 정리 확인 필요: ' + self.image)
+        if self.rehearsal_image_built and self.rehearsal_image:
+            try:
+                self.command(['docker', 'image', 'rm', self.rehearsal_image], timeout=30)
+            except Exception:
+                self.event('cleanup', '로컬 리허설 이미지 정리 확인 필요: ' + self.rehearsal_image)
 
     def cleanup_abandoned_image(self, result, candidate_image, attempt_id):
         """Remove one failed-update tag only after the owned service is back on its prior image."""

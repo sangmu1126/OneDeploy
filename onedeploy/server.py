@@ -478,7 +478,8 @@ class App:
             elif target == "aws-ecs-express":
                 settings = AwsSettings(**job["aws"])
                 adapter_factory = lambda event: AwsExpressAdapter(event, settings, existing=job.get('prior_result'),
-                                                                    checkpoint=checkpoint)
+                                                                    checkpoint=checkpoint,
+                                                                    **({'rehearsal': True} if job.get('postgres') is None else {}))
             tools = DeploymentTools(Path(job["project"]), self.root / job_id / "work", job_id,
                                     environment, lambda s, m: self.event(job_id, s, m), checkpoint,
                                     attempts=job.get("attempts", 0), adapter_factory=adapter_factory, target=target,
