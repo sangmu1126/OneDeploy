@@ -37,6 +37,7 @@ class PostgresTests(unittest.TestCase):
         self.assertTrue(properties['StorageEncrypted'])
         self.assertTrue(properties['ManageMasterUserPassword'])
         self.assertEqual(properties['EngineVersion'], {'Ref': 'EngineVersion'})
+        self.assertEqual(properties['AvailabilityZone'], {'Ref': 'AvailabilityZone'})
         self.assertEqual(properties['EngineLifecycleSupport'],
                          'open-source-rds-extended-support-disabled')
         self.assertNotIn('MasterUserPassword', properties)
@@ -142,7 +143,7 @@ class PostgresTests(unittest.TestCase):
                     'DBInstanceClass': 'db.t4g.micro', 'StorageType': 'gp3', 'Vpc': True,
                     'SupportsStorageEncryption': True, 'MinStorageSize': 20,
                     'MaxStorageSize': 65536,
-                    'AvailabilityZones': [{'Name': 'a'}, {'Name': 'b'}]}]})
+                    'AvailabilityZones': [{'Name': 'a'}]}]})
             if args[:2] == ['rds', 'describe-db-engine-versions']:
                 return json.dumps({'DBEngineVersions': [{'Engine': 'postgres', 'EngineVersion': '17.5'}]})
             raise AssertionError(args)
@@ -151,6 +152,7 @@ class PostgresTests(unittest.TestCase):
                 patch('onedeploy.postgres.estimate_postgres_base_capacity', return_value=price):
             result = self.provisioner.preflight()
         self.assertEqual(result['availability_zones'], ['a', 'b'])
+        self.assertEqual(result['database_availability_zone'], 'a')
         self.assertEqual(result['engine_version'], '17.5')
         self.assertEqual(result['storage_type'], 'gp3')
         self.assertEqual(result['pricing'], price)
@@ -200,12 +202,14 @@ class PostgresTests(unittest.TestCase):
                     'DBInstanceClass': 'db.t4g.micro', 'StorageType': 'gp3', 'Vpc': True,
                     'SupportsStorageEncryption': True, 'MinStorageSize': 20,
                     'MaxStorageSize': 65536,
-                    'AvailabilityZones': [{'Name': 'a'}, {'Name': 'b'}]}]})
+                    'AvailabilityZones': [{'Name': 'a'}]}]})
             raise AssertionError(args)
         with patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
                 patch('onedeploy.postgres.estimate_postgres_base_capacity',
                       return_value={'baseline_730h_usd': '20.87'}):
-            self.assertEqual(self.provisioner.preflight()['engine_version'], '17.5')
+            result = self.provisioner.preflight()
+            self.assertEqual(result['engine_version'], '17.5')
+            self.assertEqual(result['database_availability_zone'], 'a')
 
     def test_service_group_rejects_another_apps_group(self):
         group = {'GroupId': SERVICE_GROUP, 'VpcId': VPC, 'OwnerId': ACCOUNT,
@@ -231,6 +235,8 @@ class PostgresTests(unittest.TestCase):
                 self.assertEqual(payload['Capabilities'], ['CAPABILITY_IAM'])
                 self.assertIn({'ParameterKey': 'EngineVersion', 'ParameterValue': '17.5'},
                               payload['Parameters'])
+                self.assertIn({'ParameterKey': 'AvailabilityZone', 'ParameterValue': 'a'},
+                              payload['Parameters'])
                 self.assertEqual(json.loads(payload['TemplateBody'])['Resources']['Database']
                                  ['Properties']['PubliclyAccessible'], False)
                 return json.dumps({'StackId': STACK})
@@ -238,7 +244,8 @@ class PostgresTests(unittest.TestCase):
                 return ''
             raise AssertionError(args)
         with patch.object(self.provisioner, 'preflight', return_value={
-                'engine_version': '17.5', 'pricing': {'baseline_730h_usd': '20.87'}}), \
+                'engine_version': '17.5', 'database_availability_zone': 'a',
+                'pricing': {'baseline_730h_usd': '20.87'}}), \
                 patch.object(self.provisioner.adapter, 'event',
                              side_effect=lambda stage, message: events.append((stage, message))), \
                 patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
@@ -251,11 +258,13 @@ class PostgresTests(unittest.TestCase):
 
     def test_create_rejects_changed_approved_plan_before_aws_mutation(self):
         with patch.object(self.provisioner, 'preflight', return_value={
-                'engine_version': '18.3', 'pricing': {'baseline_730h_usd': '22.00'}}), \
+                'engine_version': '18.3', 'database_availability_zone': 'a',
+                'pricing': {'baseline_730h_usd': '22.00'}}), \
                 patch.object(self.provisioner.adapter, 'aws') as aws:
             with self.assertRaisesRegex(AwsConfigurationError, '생성 계획이 변경'):
                 self.provisioner.create(expected_plan={
-                    'engine_version': '18.3', 'pricing': {'baseline_730h_usd': '20.87'}})
+                    'engine_version': '18.3', 'database_availability_zone': 'b',
+                    'pricing': {'baseline_730h_usd': '20.87'}})
         aws.assert_not_called()
 
     def test_existing_stack_name_blocks_new_database_plan(self):

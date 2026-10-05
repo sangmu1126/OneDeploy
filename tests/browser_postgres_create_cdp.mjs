@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const [serverUrl, debuggingPort, application, stage = 'create', archive] = process.argv.slice(2);
 assert.match(application, /^dbdrill-[a-f0-9]{8}$/);
-assert.ok(['create', 'network-only', 'one-action-deploy', 'one-action-submit-only-local', 'one-action-resume-existing', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan', 'one-action-local', 'one-action-failed-local', 'one-action-plan-rejected-local', 'one-action-manual-resume-local'].includes(stage));
+assert.ok(['create', 'network-only', 'one-action-deploy', 'one-action-submit-only-local', 'one-action-submit-for-manual-resume', 'one-action-resume-existing', 'verify', 'deploy', 'verify-deploy', 'retire', 'verify-retire', 'recover', 'auto-existing-plan', 'one-action-local', 'one-action-failed-local', 'one-action-plan-rejected-local', 'one-action-manual-resume-local'].includes(stage));
 const tabs = await (await fetch(`http://127.0.0.1:${debuggingPort}/json`)).json();
 const tab = tabs.find(item => item.type === 'page');
 assert.ok(tab?.webSocketDebuggerUrl);
@@ -30,8 +30,8 @@ function command(method, params = {}) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(Error(`Chrome ${method} did not answer within 30 seconds`));
-    }, 30000);
+      reject(Error(`Chrome ${method} did not answer within 120 seconds`));
+    }, 120000);
     pending.set(id, {
       resolve: value => { clearTimeout(timer); resolve(value); },
       reject: error => { clearTimeout(timer); reject(error); },
@@ -43,7 +43,7 @@ async function evaluate(expression) {
   const response = await command('Runtime.evaluate', {
     expression, awaitPromise: true, returnByValue: true,
   });
-  if (response.exceptionDetails) throw Error(response.exceptionDetails.text);
+  if (response.exceptionDetails) throw Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
   return response.result.value;
 }
 async function until(check, timeoutMs, intervalMs = 1000) {
@@ -115,7 +115,7 @@ try {
       await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('status').textContent==='배포 완료';})()"), 30 * 60 * 1000);
     }
     console.log('PASS: browser reconnected to the existing one-action job without another upload or RDS creation');
-  } else if (stage === 'one-action-deploy' || stage === 'one-action-submit-only-local') {
+  } else if (['one-action-deploy', 'one-action-submit-only-local', 'one-action-submit-for-manual-resume'].includes(stage)) {
     assert.ok(archive && process.env.ONEDEPLOY_BROWSER_PROBE_KEY);
     await evaluate(`(() => {const e=id=>document.getElementById(id);e('application').value=${JSON.stringify(application)};e('target').value='aws-ecs-express';e('target').onchange();e('public').checked=true;e('networkDiscover').click();return true;})()`);
     await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('networkDiscoverInfo').textContent&&!e('networkDiscoverInfo').textContent.includes('서브넷을 채웠습니다'))throw Error(e('networkDiscoverInfo').textContent);return e('postgresPlanVpc').value&&e('postgresPlanSubnets').value.split(',').length>=2;})()"), 60000);
@@ -128,13 +128,16 @@ try {
     await evaluate("document.getElementById('postgresCreateDeploy').click();true");
     const jobId = await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('jobId').textContent.match(/작업 ([a-f0-9]{16})/)?.[1] || '';})()"), 120000);
     console.log('PASS: browser submitted one reviewed RDS creation and app deployment job', jobId);
-    if (stage === 'one-action-submit-only-local') {
+    if (stage === 'one-action-submit-for-manual-resume') {
+      console.log('PASS: browser submitted one-action job for post-RDS manual resume');
+    } else if (stage === 'one-action-submit-only-local') {
       await until(() => evaluate("document.getElementById('status').textContent==='필수 값 입력 대기'"), 30000);
       console.log('PASS: first Chrome connection stopped at required environment input');
     } else {
     const names = await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);if(e('status').textContent==='작업 중단·결과 확인 필요'||e('status').textContent==='배포 실패')throw Error(e('current').textContent);return !e('inputSection').hidden&&!e('resume').disabled?[...e('envInputs').querySelectorAll('input')].map(x=>x.dataset.name):null;})()"), 60 * 60 * 1000);
     assert.deepEqual(names, ['PROBE_KEY']);
     await evaluate(`(() => {const input=document.querySelector('#envInputs input');input.value=${JSON.stringify(process.env.ONEDEPLOY_BROWSER_PROBE_KEY)};document.getElementById('resume').click();return true;})()`);
+    await until(() => evaluate("(() => {const e=id=>document.getElementById(id);if(e('error').textContent)throw Error(e('error').textContent);return e('status').textContent!=='필수 값 입력 대기';})()"), 30000);
     console.log('PASS: browser resumed the one-action deployment with the required environment value');
     }
   } else if (stage === 'auto-existing-plan') {

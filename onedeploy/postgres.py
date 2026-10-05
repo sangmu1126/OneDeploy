@@ -219,23 +219,27 @@ class AwsPostgresProvisioner:
             '--db-instance-class', 'db.t4g.micro', '--vpc'],
             private=True, quiet=True)).get('OrderableDBInstanceOptions', [])
         zones = {item['AvailabilityZone'] for item in subnets}
-        if not any(option.get('Engine') == 'postgres'
-                   and option.get('EngineVersion') == version
-                   and option.get('DBInstanceClass') == 'db.t4g.micro'
-                   and option.get('StorageType') == 'gp3'
-                   and option.get('Vpc') is True
-                   and option.get('SupportsStorageEncryption') is True
-                   and isinstance(option.get('MinStorageSize'), int)
-                   and option['MinStorageSize'] <= 20
-                   and isinstance(option.get('MaxStorageSize'), int)
-                   and option['MaxStorageSize'] >= 20
-                   and zones.issubset({az.get('Name') for az in option.get('AvailabilityZones', [])})
-                   for option in orderable):
+        eligible_zones = sorted({az.get('Name')
+            for option in orderable
+            if option.get('Engine') == 'postgres'
+            and option.get('EngineVersion') == version
+            and option.get('DBInstanceClass') == 'db.t4g.micro'
+            and option.get('StorageType') == 'gp3'
+            and option.get('Vpc') is True
+            and option.get('SupportsStorageEncryption') is True
+            and isinstance(option.get('MinStorageSize'), int)
+            and option['MinStorageSize'] <= 20
+            and isinstance(option.get('MaxStorageSize'), int)
+            and option['MaxStorageSize'] >= 20
+            for az in option.get('AvailabilityZones', [])
+            if az.get('Name') in zones})
+        if not eligible_zones:
             raise AwsConfigurationError('이 리전·가용 영역에서 기본 PostgreSQL 버전의 암호화된 db.t4g.micro/gp3 20GiB 구성을 확인하지 못했습니다.')
         pricing = estimate_postgres_base_capacity(self.adapter, req.region)
         return {'account': req.account, 'region': req.region, 'vpc_id': req.vpc_id,
                 'subnet_ids': list(req.subnet_ids), 'availability_zones': sorted({
                     item['AvailabilityZone'] for item in subnets}),
+                'database_availability_zone': eligible_zones[0],
                 'service_security_group': req.service_security_group,
                 'stack_name': req.stack_name, 'database_id': req.database_id,
                 'instance_class': 'db.t4g.micro', 'engine_version': version,
@@ -298,6 +302,8 @@ class AwsPostgresProvisioner:
                    'Parameters': [
                        {'ParameterKey': 'ApplicationId', 'ParameterValue': req.application_id},
                        {'ParameterKey': 'EngineVersion', 'ParameterValue': plan['engine_version']},
+                       {'ParameterKey': 'AvailabilityZone',
+                        'ParameterValue': plan['database_availability_zone']},
                        {'ParameterKey': 'VpcId', 'ParameterValue': req.vpc_id},
                        {'ParameterKey': 'SubnetIds', 'ParameterValue': ','.join(req.subnet_ids)},
                        {'ParameterKey': 'ServiceSecurityGroupId', 'ParameterValue': req.service_security_group}],

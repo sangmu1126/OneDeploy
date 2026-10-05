@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -85,6 +86,8 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
                     app.save(job_id)
                 return
             if wait_input and environment is None:
+                shutil.copytree(Path(app.jobs[job_id]['project']),
+                                app.root / job_id / 'work')
                 with app.lock:
                     app.jobs[job_id]['status'] = 'waiting_input'
                     app.jobs[job_id]['missing_environment'] = ['PROBE_KEY']
@@ -164,7 +167,11 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
                         operation['creation_id'])
                     or (reject_plan and (APPLICATION in app.postgres_operations.operations
                         or 'postgres_creation_id' in jobs[0]))):
-                raise AssertionError('Browser one-action job did not preserve the RDS binding')
+                raise AssertionError('Browser one-action job did not preserve the RDS binding: '
+                                     + repr({'job_count': len(jobs), 'deployments': deployments,
+                                             'status': jobs[0]['status'] if jobs else None,
+                                             'operation': operation['status'] if operation else None,
+                                             'creation_id': jobs[0].get('postgres_creation_id') if jobs else None}))
             if (preflight.call_count != 2 or create.call_count != (0 if reject_plan else 1)
                     or inspect.call_count != (0 if fail_create or reject_plan else
                                               2 if manual_resume else 1)

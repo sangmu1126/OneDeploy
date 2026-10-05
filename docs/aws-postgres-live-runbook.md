@@ -471,3 +471,23 @@ RDS 스택 `DELETE_COMPLETE`, 삭제 후 스냅샷 `available` 재확인을 통�
 실행하지 않음을 확인했다. 서버의 폐기 작업 기록도 비어 있었다. 유효 DB ID로
 브라우저에서 실제 폐기하는 흐름과 강제 중단 시험은 아직 하지 않았다.
 이 임시 RDS와 스냅샷의 실제 청구액은 확인하지 않았다.
+
+## 2026-10-05 신규 PostgreSQL 수동 재개의 실계정 시도
+
+`tests.smoke_aws_postgres_create_browser --apply --manual-resume`으로
+`dbdrill-a7c1e50d`의 Chrome 한 번 업로드 → RDS 생성 → 서버 재시작 → 이력의 수동
+재개 흐름을 실행했다. RDS 옵션 API의 AZ 목록은 단일 AZ만 포함할 수 있는데,
+기존 사전 점검은 모든 DB 서브넷 AZ가 옵션에 포함돼야 한다고 잘못 판단했다.
+지원되는 서브넷 AZ 중 하나를 명시적으로 선택하도록 고친 뒤 실제 PostgreSQL 18.3
+`db.t4g.micro`를 `ap-northeast-2a`에 생성했다. 수동 재개로 ECR 이미지가 업로드되고
+ECS 마이그레이션 태스크가 실행됐다. 태스크는 `STOPPED`/종료 코드 0이며 CloudWatch
+로그에 `{"applied":1}`을 남겼다.
+
+Chrome CDP가 완료된 마이그레이션 뒤 제품 작업 상태를 회수하지 못해 작업
+`6700805c12874656`은 `interrupted`로 기록됐다. ECS Express 서비스 생성과 앱의 공개
+HTTP 응답까지는 가지 못했으므로 이 시도는 전체 배포 성공으로 계산하지 않는다.
+수동 재개 뒤 생성된 임시 DB는 `tests.smoke_aws_postgres_cleanup`의 소유권·ECS 사용
+검사로 삭제했고, 앱 전용 네트워크 스택, 해당 시도의 두 ECR 태그, 전용 마이그레이션
+태스크 정의도 삭제했다. 작업 기록과 `database-cleanup.json`은 로컬 드릴 상태에 남겼다.
+다음 실행은 더 긴 Chrome CDP 명령 제한 시간을 적용하고 ECS 배포 및 HTTPS 데이터
+경로까지 끝나는지 확인해야 한다. API 키가 없어 실제 OpenAI 모델은 호출하지 않았다.
