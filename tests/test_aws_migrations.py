@@ -211,6 +211,21 @@ class AwsMigrationTests(unittest.TestCase):
         self.assertLess(calls.index(['ecs', 'deregister-task-definition']),
                         calls.index(['ecr', 'batch-delete-image']))
         self.assertEqual(calls[-1], ['ecr', 'batch-get-image'])
+        calls.clear()
+        def swapped_image(args, **kwargs):
+            if args[:2] == ['ecr', 'batch-get-image']:
+                changed = json.loads(json.dumps(present))
+                changed['images'][0]['imageId']['imageDigest'] = 'sha256:' + 'b' * 64
+                return json.dumps(changed)
+            return aws(args, **kwargs)
+        with patch.object(self.adapter, 'aws', side_effect=swapped_image) as commands:
+            with self.assertRaisesRegex(AwsConfigurationError, 'digest'):
+                cleanup_interrupted_migration(self.adapter, self.request, ATTEMPT,
+                    TASK, TASK_DEF, image, IMAGE_DIGEST)
+        self.assertNotIn(['ecs', 'deregister-task-definition'],
+                         [call.args[0][:2] for call in commands.call_args_list])
+        self.assertNotIn(['ecr', 'batch-delete-image'],
+                         [call.args[0][:2] for call in commands.call_args_list])
 
     def test_interrupted_cleanup_refuses_running_or_unowned_artifacts(self):
         def running(args, **_kwargs):
@@ -253,6 +268,34 @@ class AwsMigrationTests(unittest.TestCase):
         self.assertFalse(result['image_deleted'])
         self.assertEqual([call.args[0][:2] for call in called.call_args_list],
                          [['ecs', 'list-tasks'], ['ecr', 'batch-get-image']])
+
+    def test_journaled_success_can_cleanup_after_task_lookup_expires(self):
+        def aws(args, **_kwargs):
+            if args[:2] == ['ecs', 'list-tasks']:
+                return json.dumps({'taskArns': []})
+            if args[:2] == ['ecs', 'describe-task-definition']:
+                return json.dumps({'taskDefinition': {'taskDefinitionArn': TASK_DEF,
+                    'family': f'onedeploy-migrate-{ATTEMPT}', 'status': 'ACTIVE',
+                    'containerDefinitions': [{'name': 'migration',
+                        'image': self.runner.repository + '@' + IMAGE_DIGEST}]},
+                    'tags': [{'key': 'onedeploy-managed', 'value': 'true'},
+                             {'key': 'onedeploy-app', 'value': 'demo-app'},
+                             {'key': 'onedeploy-attempt', 'value': ATTEMPT}]})
+            if args[:2] == ['ecr', 'batch-get-image']:
+                return json.dumps({'images': [], 'failures': [
+                    {'imageId': {'imageTag': ATTEMPT + '-db'},
+                     'failureCode': 'ImageNotFound'}]})
+            if args[:2] == ['ecs', 'deregister-task-definition']:
+                return json.dumps({'taskDefinition': {'taskDefinitionArn': TASK_DEF,
+                                                       'status': 'INACTIVE'}})
+            raise AssertionError(args)
+        with patch.object(self.adapter, 'aws', side_effect=aws) as called:
+            result = cleanup_interrupted_migration(self.adapter, self.request, ATTEMPT,
+                TASK, TASK_DEF, self.runner.image, IMAGE_DIGEST, verified_outcome=True)
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual([call.args[0][:2] for call in called.call_args_list], [
+            ['ecs', 'list-tasks'], ['ecs', 'describe-task-definition'],
+            ['ecr', 'batch-get-image'], ['ecs', 'deregister-task-definition']])
 
     def test_uncertain_task_result_is_recorded_and_stops_retry(self):
         self.runner.subnet = self.request.subnet_ids[0]
@@ -323,16 +366,19 @@ class AwsMigrationTests(unittest.TestCase):
             self.assertFalse(self.runner.cleanup_completed())
             aws.assert_not_called()
         self.runner.completed = True
+        self.runner.image_digest = IMAGE_DIGEST
         checkpoints = []
         self.adapter.checkpoint = lambda **fields: checkpoints.append(fields)
-        def aws(args, **_kwargs):
-            if args[:2] == ['ecs', 'deregister-task-definition']:
-                return json.dumps({'taskDefinition': {'taskDefinitionArn': TASK_DEF,
-                                                       'status': 'INACTIVE'}})
-            return json.dumps({'imageIds': [{'imageTag': ATTEMPT + '-db'}], 'failures': []})
-        with patch.object(self.adapter, 'aws', side_effect=aws):
+        def cleaned(_adapter, _request, _attempt, _task, _definition, _image, _digest,
+                    *, checkpoint):
+            checkpoint()
+            return {'image_deleted': True}
+        with patch('onedeploy.aws_migrations.cleanup_interrupted_migration',
+                   side_effect=cleaned) as cleanup:
             self.assertTrue(self.runner.cleanup_completed())
             self.assertFalse(self.runner.completed)
+        self.assertEqual(cleanup.call_args.args[2:],
+                         (ATTEMPT, TASK, TASK_DEF, self.runner.image, IMAGE_DIGEST))
         self.assertEqual(checkpoints, [
             {'aws_migration_cleanup_definition_inactive': True},
             {'aws_migration_cleanup_state': 'done',
@@ -342,14 +388,15 @@ class AwsMigrationTests(unittest.TestCase):
         self.runner.registered_arn = TASK_DEF
         self.runner.task_arn = TASK
         self.runner.completed = True
+        self.runner.image_digest = IMAGE_DIGEST
         checkpoints = []
         self.adapter.checkpoint = lambda **fields: checkpoints.append(fields)
-        def aws(args, **_kwargs):
-            if args[:2] == ['ecs', 'deregister-task-definition']:
-                return json.dumps({'taskDefinition': {'taskDefinitionArn': TASK_DEF,
-                                                       'status': 'INACTIVE'}})
+        def interrupted(_adapter, _request, _attempt, _task, _definition, _image, _digest,
+                        *, checkpoint):
+            checkpoint()
             raise RuntimeError('ECR unavailable')
-        with patch.object(self.adapter, 'aws', side_effect=aws):
+        with patch('onedeploy.aws_migrations.cleanup_interrupted_migration',
+                   side_effect=interrupted):
             with self.assertRaisesRegex(RuntimeError, 'ECR unavailable'):
                 self.runner.cleanup_completed()
         self.assertEqual(checkpoints, [{'aws_migration_cleanup_definition_inactive': True}])

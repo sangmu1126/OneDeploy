@@ -69,6 +69,7 @@ def cleanup_interrupted_migration(adapter: AwsExpressAdapter, request: PostgresR
                                   attempt_id: str, task_arn: str, definition_arn: str,
                                   image: str, image_digest: str, *,
                                   definition_inactive: bool = False,
+                                  verified_outcome: bool = False,
                                   checkpoint=None) -> dict:
     """Remove only a stopped owned migration's definition and unique ECR tag."""
     request.validate()
@@ -85,9 +86,9 @@ def cleanup_interrupted_migration(adapter: AwsExpressAdapter, request: PostgresR
             or not isinstance(image_digest, str)
             or not re.fullmatch(r'sha256:[a-f0-9]{64}', image_digest)):
         raise AwsConfigurationError('정리할 마이그레이션 이미지 소유 정보가 올바르지 않습니다.')
-    # The first cleanup requires a fresh, known task outcome. Once deregistration
-    # is journaled, ECS may no longer describe an inactive definition on retry.
-    if not definition_inactive:
+    # Require a fresh task result unless success was already journaled or the
+    # definition was previously deregistered; ECS can expire either record.
+    if not definition_inactive and not verified_outcome:
         outcome = inspect_migration_task(adapter, request.application_id,
             request.account, request.region, attempt_id, task_arn, definition_arn)
         if outcome['status'] not in {'succeeded', 'failed'}:
@@ -323,23 +324,15 @@ class AwsMigrationRunner:
         """Delete only the known stopped task's definition and migration image tag."""
         if not self.completed or not self.registered_arn or not self.task_arn:
             return False
-        deregistered = json.loads(self.adapter.aws(['ecs', 'deregister-task-definition',
-            '--task-definition', self.registered_arn], private=True))
-        definition = deregistered.get('taskDefinition', {})
-        if (definition.get('taskDefinitionArn') != self.registered_arn
-                or definition.get('status') != 'INACTIVE'):
-            raise AwsConfigurationError('마이그레이션 태스크 정의 정리를 확인하지 못했습니다.')
-        if self.adapter.checkpoint:
-            self.adapter.checkpoint(aws_migration_cleanup_definition_inactive=True)
-        tag = self.attempt_id + '-db'
-        removed = json.loads(self.adapter.aws(['ecr', 'batch-delete-image', '--repository-name',
-            'onedeploy-managed', '--image-ids', f'imageTag={tag}'], private=True))
-        if (removed.get('failures') or not any(item.get('imageTag') == tag
-                                             for item in removed.get('imageIds', []))):
-            raise AwsConfigurationError('마이그레이션 ECR 이미지 태그 정리를 확인하지 못했습니다.')
+        def checkpoint():
+            if self.adapter.checkpoint:
+                self.adapter.checkpoint(aws_migration_cleanup_definition_inactive=True)
+        result = cleanup_interrupted_migration(self.adapter, self.request, self.attempt_id,
+            self.task_arn, self.registered_arn, self.image, self.image_digest,
+            checkpoint=checkpoint)
         if self.adapter.checkpoint:
             self.adapter.checkpoint(aws_migration_cleanup_state='done',
-                                    aws_migration_cleanup_image_deleted=True)
+                                    aws_migration_cleanup_image_deleted=result['image_deleted'])
         self.completed = False
         return True
 

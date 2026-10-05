@@ -122,6 +122,12 @@ test('interrupted AWS migration shows a read-only task inspection result', async
     aws_migration_inspection: {status: 'unknown', task_arn: 'owned-task',
       task_definition_arn: 'owned-definition'}});
   assert.equal(element('cleanupMigration').hidden, false);
+  context.show({...job, status: 'succeeded', result: {migration: {cleanup_complete: false}},
+    aws_migration_status: 'succeeded',
+    aws_migration_result: {task_arn: 'owned-task', task_definition_arn: 'owned-definition',
+      image: 'owned-image', image_digest: 'owned-digest'}});
+  assert.equal(element('inspectMigration').hidden, true);
+  assert.equal(element('cleanupMigration').hidden, false);
 });
 const start = html.indexOf('function postgresUploadHeaders(application)');
 const end = html.indexOf("el('deploy').onclick=", start);

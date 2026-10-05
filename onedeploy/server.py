@@ -942,26 +942,37 @@ class App:
         """Explicitly retire a verified stopped migration's unique AWS artifacts."""
         from onedeploy.aws_migrations import cleanup_interrupted_migration
 
+        def recorded_success(job):
+            completed = job.get('aws_migration_result') or {}
+            return (job.get('aws_migration_status') == 'succeeded'
+                    and all(completed.get(key) for key in
+                            ('task_arn', 'task_definition_arn', 'image', 'image_digest'))
+                    and completed.get('task_arn') == job.get('aws_migration_task_arn')
+                    and completed.get('task_definition_arn') == job.get('aws_migration_task_definition_arn')
+                    and completed.get('image') == job.get('aws_migration_image')
+                    and completed.get('image_digest') == job.get('aws_migration_image_digest'))
+
         def eligible(job):
             if not job:
                 return False
             inspection = job.get('aws_migration_inspection') or {}
-            completed = job.get('aws_migration_result') or {}
             inspected = (inspection.get('status') in {'succeeded', 'failed'}
+                         and inspection.get('task_arn') and inspection.get('task_definition_arn')
                          and inspection.get('task_arn') == job.get('aws_migration_task_arn')
                          and inspection.get('task_definition_arn') == job.get('aws_migration_task_definition_arn'))
-            recorded_success = (job.get('aws_migration_status') == 'succeeded'
-                                and completed.get('task_arn') == job.get('aws_migration_task_arn')
-                                and completed.get('task_definition_arn') == job.get('aws_migration_task_definition_arn')
-                                and completed.get('image') == job.get('aws_migration_image')
-                                and completed.get('image_digest') == job.get('aws_migration_image_digest'))
+            deployment = job.get('result') or {}
+            migration = deployment.get('migration') or {}
+            incomplete_success = (job.get('status') == 'succeeded'
+                                  and migration.get('cleanup_complete') is False
+                                  and recorded_success(job))
+            interrupted = (job.get('status') in {'failed', 'interrupted'}
+                           and job.get('result') is None
+                           and (inspected or recorded_success(job)))
             return (job and job.get('mode') == 'agent'
                     and job.get('target') == 'aws-ecs-express'
-                    and job.get('status') in {'failed', 'interrupted'}
-                    and job.get('result') is None
                     and type(job.get('attempts')) is int and 1 <= job['attempts'] <= 3
                     and job.get('aws_migration_cleanup_state') not in {'running', 'done'}
-                    and (inspected or recorded_success))
+                    and (interrupted or incomplete_success))
 
         with self.lock:
             job = self.jobs.get(job_id)
@@ -995,6 +1006,7 @@ class App:
                 snapshot['aws_migration_task_definition_arn'], snapshot['aws_migration_image'],
                 snapshot['aws_migration_image_digest'],
                 definition_inactive=bool(snapshot.get('aws_migration_cleanup_definition_inactive')),
+                verified_outcome=recorded_success(snapshot),
                 checkpoint=definition_inactive_checkpoint)
         except Exception as exc:
             with self.lock:
@@ -1006,8 +1018,10 @@ class App:
             current = self.jobs[job_id]
             current['aws_migration_cleanup_state'] = 'done'
             current['aws_migration_cleanup_image_deleted'] = result['image_deleted']
+            if current.get('status') == 'succeeded':
+                current['result']['migration']['cleanup_complete'] = True
             self.save(job_id)
-        self.event(job_id, 'migration_cleanup', '중단된 SQL 마이그레이션의 전용 ECS 정의와 ECR 태그를 정리했습니다.')
+        self.event(job_id, 'migration_cleanup', 'SQL 마이그레이션의 전용 ECS 정의와 ECR 태그를 정리했습니다.')
         return result
 
     def cleanup_abandoned_aws_image(self, job_id):
